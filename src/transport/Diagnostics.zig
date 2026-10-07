@@ -24,7 +24,9 @@ proxy_offered: Offered = .{},
 /// Which timeout ran out.
 timeout: ?Timeout = null,
 
-pub const Stage = enum { none, resolve, connect, proxy_tls, tunnel, tls, write, head, body };
+/// `connect` covers the name's lookup too: the two run as one race.
+/// `connect` covers the name's lookup too: the two run as one race.
+pub const Stage = enum { none, connect, proxy_tls, tunnel, tls, write, head, body };
 
 pub const Timeout = enum { connect, handshake, activity };
 
