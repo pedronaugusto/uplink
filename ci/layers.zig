@@ -53,6 +53,9 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "net lookup", .patterns = &.{
         "src/net/resolve.zig",
     } },
+    .{ .name = "net resolver", .patterns = &.{
+        "src/net/Resolver.zig",
+    } },
     .{ .name = "net dial", .patterns = &.{
         "src/net/dial.zig",
     } },
