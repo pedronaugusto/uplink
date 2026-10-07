@@ -233,7 +233,7 @@ fn dialAuthority(io: Io, authority: []const u8) !Io.net.Stream {
     var host = authority[0..colon];
     if (host.len >= 2 and host[0] == '[') host = host[1 .. host.len - 1];
     // Names the tests make up all stand for this machine.
-    if (std.mem.eql(u8, host, "localhost") or std.mem.endsWith(u8, host, ".test")) host = "127.0.0.1";
+    if (std.mem.eql(u8, host, "localhost") or std.mem.eql(u8, host, "::1") or std.mem.endsWith(u8, host, ".test")) host = "127.0.0.1";
     const address = try Io.net.IpAddress.parse(host, port);
     return address.connect(io, .{ .mode = .stream });
 }

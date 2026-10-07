@@ -51,9 +51,14 @@ pub const Answer = struct {
 
 /// An answer that does not depend on the request.
 pub fn fixed(comptime bytes: []const u8) Handler {
+    return fixedAnswer(.{ .bytes = bytes });
+}
+
+/// The same answer to every request.
+pub fn fixedAnswer(comptime a: Answer) Handler {
     return .{ .answer = struct {
         fn answer(_: ?*anyopaque, _: Request) Answer {
-            return .{ .bytes = bytes };
+            return a;
         }
     }.answer };
 }
