@@ -56,6 +56,41 @@ pub const layers: []const gantry.rules.Layer = &.{
     } },
     .{ .name = "transport values", .patterns = &.{
         "src/transport/Proxy.zig",
+        "src/transport/Diagnostics.zig",
+        "src/transport/BufferPool.zig",
+        "src/transport/Timer.zig",
+    } },
+    .{ .name = "transport shared", .patterns = &.{
+        "src/transport/ProxyAuth.zig",
+    } },
+    .{ .name = "transport context", .patterns = &.{
+        "src/transport/Context.zig",
+    } },
+    .{ .name = "transport connection", .patterns = &.{
+        "src/transport/Connection.zig",
+    } },
+    .{ .name = "transport", .patterns = &.{
+        "src/transport.zig",
+    } },
+    .{ .name = "pool", .patterns = &.{
+        "src/pool/Pool.zig",
+        "src/pool.zig",
+    } },
+    .{ .name = "client values", .patterns = &.{
+        "src/client/Request.zig",
+        "src/client/Body.zig",
+    } },
+    .{ .name = "client response", .patterns = &.{
+        "src/client/Response.zig",
+    } },
+    .{ .name = "client outgoing", .patterns = &.{
+        "src/client/Outgoing.zig",
+    } },
+    .{ .name = "client", .patterns = &.{
+        "src/client/Client.zig",
+    } },
+    .{ .name = "client namespace", .patterns = &.{
+        "src/client.zig",
     } },
     .{ .name = "public", .patterns = &.{
         "src/uplink.zig",

@@ -1,0 +1,297 @@
+//! A response: its head, and its body, read through `reader`.
+//!
+//! The head is copied out of the connection's buffer into one borrowed from
+//! the client's pool, with the head's fields beside it and the body
+//! reader's buffer after them, so a response costs no allocation once the
+//! client is warm. `deinit` gives everything back, and the connection to
+//! the pool when the body was read to its end.
+//!
+//! A response must not move once `reader` has been called: the reader
+//! points into it.
+
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+const Io = std.Io;
+const h1 = @import("../wire/h1.zig");
+const fields = @import("../wire/fields.zig");
+const coding = @import("../wire/coding.zig");
+const Method = @import("../wire/Method.zig");
+const Version = @import("../wire/version.zig").Version;
+const Connection = @import("../transport/Connection.zig");
+const Context = @import("../transport/Context.zig");
+const Diagnostics = @import("../transport/Diagnostics.zig");
+const BufferPool = @import("../transport/BufferPool.zig");
+const Pool = @import("../pool/Pool.zig");
+const Body = @import("Body.zig");
+
+const Response = @This();
+
+status: std.http.Status,
+version: Version,
+/// The reason phrase, as the server wrote it.
+reason: []const u8,
+headers: fields.Headers,
+
+/// Private: what the response came over.
+ctx: *Context,
+pool: *Pool,
+conn: ?*Connection,
+/// Private: the head, its fields and the body reader's buffer.
+head_buffer: []u8,
+body_buffer: []u8,
+/// Private: the decompression window, when the body is decoded.
+window: []u8 = &.{},
+keep_alive: bool,
+body: Body,
+decoder: Decoder = .none,
+started: bool = false,
+
+const Decoder = union(enum) {
+    none,
+    flate: struct {
+        container: std.compress.flate.Container,
+        state: std.compress.flate.Decompress,
+    },
+};
+
+/// Errors from reading the body, by name.
+pub const ReadError = error{
+    ConnectionFailed,
+    TimedOut,
+    TlsFailed,
+    ClientCertificateRejected,
+    Canceled,
+    /// Chunk framing or compressed data that does not decode.
+    HttpProtocolError,
+    /// The connection ended before the body did.
+    BodyIncomplete,
+};
+
+/// Errors from `collect`.
+pub const CollectError = error{
+    ConnectionFailed,
+    TimedOut,
+    TlsFailed,
+    ClientCertificateRejected,
+    Canceled,
+    HttpProtocolError,
+    BodyIncomplete,
+    OutOfMemory,
+    /// The body is longer than the limit given.
+    StreamTooLong,
+};
+
+/// The body, decoded per `Content-Encoding` when the client decompresses
+/// and the coding is gzip or deflate; any other coding is handed over as it
+/// came, for the caller to decode. Reads keep the client's timeouts. `io`
+/// is the one the reads run on until the response is released.
+pub fn reader(r: *Response, io: Io) *Io.Reader {
+    if (r.conn) |c| c.io = io;
+    if (!r.started) {
+        r.started = true;
+        r.body.in = if (r.conn) |c| c.reader() else Io.Reader.ending;
+        switch (r.decoder) {
+            .none => {},
+            .flate => |*f| f.state = .init(&r.body.interface, f.container, r.window),
+        }
+    }
+    return switch (r.decoder) {
+        .none => &r.body.interface,
+        .flate => |*f| &f.state.reader,
+    };
+}
+
+/// The whole body, at most `limit` bytes, in `gpa`.
+pub fn collect(r: *Response, gpa: Allocator, io: Io, limit: Io.Limit) CollectError![]u8 {
+    const rd = r.reader(io);
+    return rd.allocRemaining(gpa, limit) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.StreamTooLong => error.StreamTooLong,
+        error.ReadFailed => r.failure(),
+    };
+}
+
+/// Why the last read of the body failed.
+pub fn failure(r: *const Response) ReadError {
+    return switch (r.body.state) {
+        .incomplete => error.BodyIncomplete,
+        .malformed => error.HttpProtocolError,
+        .read_failed => if (r.conn) |c| c.readError() else error.ConnectionFailed,
+        // The body read fine: the decoder refused it.
+        .reading, .done => error.HttpProtocolError,
+    };
+}
+
+/// Release the response. Its connection is kept for the next exchange when
+/// the body was read to its end and nothing said to close it.
+pub fn deinit(r: *Response, io: Io) void {
+    if (r.conn) |c| {
+        const reusable = r.keep_alive and r.body.complete() and c.reusable() and c.reader().bufferedLen() == 0;
+        release(io, r.ctx, r.pool, c, reusable);
+    }
+    if (r.window.len != 0) r.ctx.buffers.release(io, r.window);
+    r.ctx.buffers.release(io, r.head_buffer);
+    r.* = undefined;
+}
+
+/// Give a connection back after its exchange: kept when `reusable`, closed
+/// otherwise; the connection the pool puts out to make room is closed too.
+pub fn release(io: Io, ctx: *Context, pool: *Pool, conn: *Connection, reusable: bool) void {
+    _ = ctx.counters.in_use.fetchSub(1, .monotonic);
+    if (!reusable) return conn.close(io);
+    conn.park(io);
+    if (pool.keep(io, .{ .h1 = conn })) |evicted| switch (evicted) {
+        .h1 => |old| old.close(io),
+    };
+}
+
+/// Errors from `receive`.
+pub const ReceiveError = error{
+    ConnectionFailed,
+    TimedOut,
+    TlsFailed,
+    ClientCertificateRejected,
+    Canceled,
+    HttpProtocolError,
+    OutOfMemory,
+};
+
+/// What `receive` needs besides the connection.
+pub const ReceiveOptions = struct {
+    method: Method,
+    limits: h1.Limits,
+    decompress: bool,
+    diagnostics: ?*Diagnostics,
+    /// Set once a byte of the response has arrived.
+    progress: *bool,
+};
+
+/// Read the response to the request just written on `conn`, which it then
+/// holds. Interim 1xx heads other than 101 are skipped.
+pub fn receive(io: Io, ctx: *Context, pool: *Pool, conn: *Connection, options: ReceiveOptions) ReceiveError!Response {
+    if (options.diagnostics) |d| d.stage = .head;
+    while (true) {
+        var head = try receiveHead(io, ctx, conn, options);
+        errdefer ctx.buffers.release(io, head.buffer);
+        const code = @backingInt(head.head.status);
+        if (code / 100 == 1 and code != 101) {
+            ctx.buffers.release(io, head.buffer);
+            continue;
+        }
+        const framing = h1.responseFraming(options.method, &head.head) catch return error.HttpProtocolError;
+        var response: Response = .{
+            .status = head.head.status,
+            .version = head.head.version,
+            .reason = head.head.reason,
+            .headers = head.head.headers,
+            .ctx = ctx,
+            .pool = pool,
+            .conn = conn,
+            .head_buffer = head.buffer,
+            .body_buffer = head.body_buffer,
+            .keep_alive = framing.keep_alive,
+            .body = .init(Io.Reader.ending, framing.framing, head.body_buffer),
+        };
+        if (options.decompress) try response.planDecoding(io);
+        if (options.diagnostics) |d| d.stage = .body;
+        return response;
+    }
+}
+
+/// Decode a body under one gzip or deflate coding; any other is handed
+/// over as it came.
+fn planDecoding(r: *Response, io: Io) Allocator.Error!void {
+    if (r.body.state == .done) return;
+    const codings = coding.Codings.of(&r.headers) catch return;
+    if (codings.len != 1) return;
+    const container: std.compress.flate.Container = switch (codings.items[0]) {
+        .gzip => .gzip,
+        .deflate => .zlib,
+        .identity, .zstd, .br => return,
+    };
+    r.window = try r.ctx.buffers.acquire(io, .large);
+    r.decoder = .{ .flate = .{ .container = container, .state = undefined } };
+}
+
+const Head = struct {
+    buffer: []u8,
+    head: h1.ResponseHead,
+    body_buffer: []u8,
+};
+
+/// The smallest body reader buffer a head buffer leaves.
+const min_body_buffer = 1024;
+
+fn fieldsBytes(limits: h1.Limits) usize {
+    return @as(usize, limits.max_fields) * @sizeOf(fields.Field);
+}
+
+/// Read one head from `conn` into a pooled buffer.
+fn receiveHead(io: Io, ctx: *Context, conn: *Connection, options: ReceiveOptions) ReceiveError!Head {
+    const r = conn.reader();
+    var scan: usize = 0;
+    while (true) {
+        const buffered = r.buffered();
+        if (buffered.len != 0) options.progress.* = true;
+        const window = buffered[0..@min(buffered.len, options.limits.max_head)];
+        if (h1.findHeadEnd(window, scan)) |end| {
+            const head = try place(io, ctx, buffered[0..end], options.limits);
+            r.toss(end);
+            return head;
+        }
+        if (buffered.len >= options.limits.max_head) return error.HttpProtocolError;
+        if (buffered.len == r.buffer.len) return receiveLong(io, ctx, conn, options);
+        scan = buffered.len -| 3;
+        r.fillMore() catch |err| return switch (err) {
+            error.EndOfStream => if (conn.failure == .none) error.ConnectionFailed else conn.readError(),
+            error.ReadFailed => conn.readError(),
+        };
+    }
+}
+
+/// A head longer than the connection's buffer: gathered piece by piece into
+/// a large pooled buffer, taking from the connection only the head's bytes.
+fn receiveLong(io: Io, ctx: *Context, conn: *Connection, options: ReceiveOptions) ReceiveError!Head {
+    const r = conn.reader();
+    const buffer = try ctx.buffers.acquire(io, .large);
+    errdefer ctx.buffers.release(io, buffer);
+    const cap = @min(options.limits.max_head, buffer.len - fieldsBytes(options.limits) - min_body_buffer - @alignOf(fields.Field));
+    var len: usize = 0;
+    while (true) {
+        const chunk = r.buffered();
+        const take = @min(chunk.len, cap - len);
+        @memcpy(buffer[len..][0..take], chunk[0..take]);
+        if (h1.findHeadEnd(buffer[0 .. len + take], len -| 3)) |end| {
+            r.toss(end - len);
+            return parseIn(buffer, end, options.limits);
+        }
+        r.toss(take);
+        len += take;
+        if (len == cap) return error.HttpProtocolError;
+        r.fillMore() catch |err| return switch (err) {
+            error.EndOfStream => error.HttpProtocolError,
+            error.ReadFailed => conn.readError(),
+        };
+    }
+}
+
+/// Copy `bytes`, a whole head, into a pooled buffer that fits it, its
+/// fields and a body reader buffer, and parse it there.
+fn place(io: Io, ctx: *Context, bytes: []const u8, limits: h1.Limits) ReceiveError!Head {
+    const need = std.mem.alignForward(usize, bytes.len, @alignOf(fields.Field)) + fieldsBytes(limits) + min_body_buffer;
+    const class = BufferPool.Class.fitting(@max(need, BufferPool.Class.record.len())) orelse return error.HttpProtocolError;
+    const buffer = try ctx.buffers.acquire(io, class);
+    errdefer ctx.buffers.release(io, buffer);
+    @memcpy(buffer[0..bytes.len], bytes);
+    return parseIn(buffer, bytes.len, limits);
+}
+
+fn parseIn(buffer: []u8, end: usize, limits: h1.Limits) ReceiveError!Head {
+    const fields_at = std.mem.alignForward(usize, end, @alignOf(fields.Field));
+    const field_ptr: [*]fields.Field = @ptrCast(@alignCast(buffer.ptr + fields_at)); // safe: pool buffers are 64-aligned and `fields_at` is aligned for a Field
+    const field_slice = field_ptr[0..limits.max_fields];
+    const parsed = (h1.parseResponse(buffer[0..end], field_slice, limits) catch return error.HttpProtocolError) orelse
+        return error.HttpProtocolError;
+    std.debug.assert(parsed.len == end);
+    return .{ .buffer = buffer, .head = parsed.head, .body_buffer = buffer[fields_at + fieldsBytes(limits) ..] };
+}

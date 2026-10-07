@@ -413,6 +413,12 @@ pub const ChunkedDecoder = struct {
         if (d.remaining == 0) d.state = .data_cr;
     }
 
+    /// The bytes of the current chunk's data still to come, when the
+    /// decoder is inside one; 0 while it reads framing.
+    pub fn pending(d: *const ChunkedDecoder) u64 {
+        return if (d.state == .data) d.remaining else 0;
+    }
+
     /// Whether the last chunk and the trailer have been read.
     pub fn done(d: *const ChunkedDecoder) bool {
         return d.state == .done;

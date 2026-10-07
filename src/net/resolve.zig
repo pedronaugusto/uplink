@@ -66,6 +66,52 @@ pub fn lookup(io: Io, host: []const u8, port: u16, family: ?IpAddress.Family, ou
     return out[0..count];
 }
 
+/// Errors from `lookupWithin`.
+pub const LookupWithinError = error{
+    InvalidHostName,
+    NameNotResolved,
+    ConcurrencyUnavailable,
+    Canceled,
+    /// `timeout` ran out first.
+    TimedOut,
+};
+
+/// `lookup`, abandoned once `timeout` runs out. Keeping the bound needs a
+/// task to race the lookup against; with none to spare the lookup runs
+/// unbounded, and `bounded` is set false.
+pub fn lookupWithin(io: Io, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress, timeout: ?Io.Duration, bounded: *bool) LookupWithinError![]IpAddress {
+    bounded.* = true;
+    const limit = timeout orelse return lookupMapped(io, host, port, family, out);
+    if (literal(host, port) != null) return lookupMapped(io, host, port, family, out);
+    const Race = union(enum) {
+        found: LookupError![]IpAddress,
+        expired: Io.Cancelable!void,
+    };
+    var buffer: [2]Race = undefined;
+    var race: Io.Select(Race) = .init(io, &buffer);
+    defer while (race.cancel()) |_| {};
+    race.concurrent(.found, lookup, .{ io, host, port, family, out }) catch {
+        bounded.* = false;
+        return lookupMapped(io, host, port, family, out);
+    };
+    race.concurrent(.expired, Io.sleep, .{ io, limit, .awake }) catch {
+        bounded.* = false;
+        while (race.cancel()) |late| switch (late) {
+            .found => |result| return result,
+            .expired => {},
+        };
+        unreachable; // unreachable: the lookup task was started above
+    };
+    return switch (try race.await()) {
+        .found => |result| result,
+        .expired => |result| if (result) |_| error.TimedOut else |err| err,
+    };
+}
+
+fn lookupMapped(io: Io, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress) LookupWithinError![]IpAddress {
+    return lookup(io, host, port, family, out);
+}
+
 /// `host` as an address, IPv6 brackets allowed, or null when it is a name.
 pub fn literal(host: []const u8, port: u16) ?IpAddress {
     const bare = if (host.len >= 2 and host[0] == '[' and host[host.len - 1] == ']') host[1 .. host.len - 1] else host;
