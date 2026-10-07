@@ -10,6 +10,7 @@ const Diagnostics = @import("../transport/Diagnostics.zig");
 const shakedown = @import("shakedown");
 const Proxy = @import("../transport/Proxy.zig");
 const TestProxy = @import("../testing/Proxy.zig");
+const Timeouts = @import("../transport/Context.zig").Timeouts;
 
 const ok_answer = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
 
@@ -587,4 +588,51 @@ test "SOCKS 4, 4a, 5 and 5h reach the server, looking the name up where each say
     const five = lines.next().?;
     try testing.expect(std.mem.startsWith(u8, five, "SOCKS 5 127.0.0.1:") or std.mem.startsWith(u8, five, "SOCKS 5 [::1]:"));
     try testing.expect(std.mem.startsWith(u8, lines.next().?, "SOCKS 5 localhost:"));
+}
+
+test "a SOCKS5 refusal is named by its reply code, which the diagnostics keep" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    // RFC 1928's codes, 1 to 8: a general failure, not allowed, network and
+    // host unreachable, connection refused, TTL expired, command and
+    // address type not supported.
+    const errors = [_]Client.SendError{ error.ProxyRefused, error.ProxyRefused, error.ProxyHostUnreachable, error.ProxyHostUnreachable, error.ProxyRefused, error.ProxyHostUnreachable, error.ProxyRefused, error.ProxyAddressUnsupported };
+    for (errors, 1..) |expected, code| {
+        const proxy = try TestProxy.start(gpa, io, .{ .kind = .socks, .reply = @intCast(code) });
+        defer proxy.stop();
+        var url_buf: [64]u8 = undefined;
+        var client: Client = .init(gpa, .{ .proxy = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "socks5h://127.0.0.1:{d}", .{proxy.port}), .curl) });
+        defer client.deinit(io);
+        var diagnostics: Diagnostics = .{};
+        try testing.expectError(expected, client.send(io, .{ .url = "http://git.test/", .diagnostics = &diagnostics }));
+        try testing.expectEqual(@as(?u16, @intCast(code)), diagnostics.proxy_status);
+        try testing.expectEqual(Diagnostics.Stage.tunnel, diagnostics.stage);
+        try testing.expectEqual(@as(u32, 0), client.stats().in_use);
+    }
+}
+
+test "a SOCKS negotiation that stalls is given up on at the connect timeout, and at the handshake timeout" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const cases = [_]struct { Timeouts, Diagnostics.Timeout }{
+        .{ .{ .connect = .fromMilliseconds(50) }, .connect },
+        .{ .{ .handshake = .fromMilliseconds(50) }, .handshake },
+    };
+    for (cases) |case| {
+        const proxy = try TestProxy.start(gpa, io, .{ .kind = .socks, .stall = true });
+        defer proxy.stop();
+        var url_buf: [64]u8 = undefined;
+        var client: Client = .init(gpa, .{
+            .proxy = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "socks5h://127.0.0.1:{d}", .{proxy.port}), .curl),
+            .timeouts = case[0],
+        });
+        defer client.deinit(io);
+        var diagnostics: Diagnostics = .{};
+        try testing.expectError(error.TimedOut, client.send(io, .{ .url = "http://git.test/", .diagnostics = &diagnostics }));
+        try testing.expectEqual(@as(?Diagnostics.Timeout, case[1]), diagnostics.timeout);
+    }
 }

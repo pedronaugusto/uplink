@@ -39,6 +39,10 @@ pub const Options = struct {
     challenge: ?[]const u8 = null,
     /// Refuse every tunnel with this status.
     refuse: ?u16 = null,
+    /// Answer every SOCKS5 request with this reply code (RFC 1928 §6).
+    reply: u8 = 0,
+    /// Read what a client sends and never answer.
+    stall: bool = false,
 };
 
 pub const Kind = enum { http, socks };
@@ -163,6 +167,10 @@ fn challenge(p: *Proxy, w: *Io.Writer) !void {
 
 fn handleSocks(p: *Proxy, r: *Io.Reader, w: *Io.Writer, client: Io.net.Stream) !void {
     const version = try r.takeByte();
+    // Ends when the client closes, or stop cancels the task.
+    if (p.options.stall) while (true) {
+        _ = try r.takeByte();
+    };
     var host_buf: [256]u8 = undefined;
     var host: []const u8 = undefined;
     var port: u16 = undefined;
@@ -218,8 +226,9 @@ fn handleSocks(p: *Proxy, r: *Io.Reader, w: *Io.Writer, client: Io.net.Stream) !
         }
         port = try r.takeInt(u16, .big);
         p.note("SOCKS 5 {s}:{d}", .{ host, port });
-        try w.writeAll(&.{ 5, 0, 0, 1, 127, 0, 0, 1, 0, 0 });
+        try w.writeAll(&.{ 5, p.options.reply, 0, 1, 127, 0, 0, 1, 0, 0 });
         try w.flush();
+        if (p.options.reply != 0) return;
     }
     var authority_buf: [300]u8 = undefined;
     const upstream = try dialAuthority(p.io, try std.mem.print(&authority_buf, "{s}:{d}", .{ host, port }));

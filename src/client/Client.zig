@@ -53,6 +53,7 @@ pub const Options = struct {
 
 /// A client with `options`. Nothing is allocated until the first request.
 pub fn init(gpa: Allocator, options: Options) Client {
+    const socks = if (options.proxy) |p| p.kind.socks() else false;
     var limits = options.limits;
     limits.max_head = @min(limits.max_head, 64 << 10);
     limits.max_fields = @min(limits.max_fields, 256);
@@ -62,7 +63,7 @@ pub fn init(gpa: Allocator, options: Options) Client {
         .context = .{
             .gpa = gpa,
             .buffers = .init(gpa, @as(u32, options.pool.max_idle) * 2 + 4),
-            .timer = if (options.timeouts.shortestPerOperation()) |shortest| Timer.init(shortest) else null,
+            .timer = if (options.timeouts.shortestOnSocket(socks)) |shortest| Timer.init(shortest) else null,
             .proxy = options.proxy,
             .tls = options.tls,
             .timeouts = options.timeouts,

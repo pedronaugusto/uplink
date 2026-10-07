@@ -58,6 +58,9 @@ mode: Mode = .untimed,
 watch: Timer.Watch,
 /// Private: when the handshake under way must be done, on the awake clock.
 handshake_until: ?Io.Timestamp = null,
+/// Private: the timeout `handshake_until` keeps, which for a SOCKS
+/// negotiation may be `connect`'s.
+handshake_bound: Diagnostics.Timeout = .handshake,
 /// Why the last operation failed.
 failure: Failure = .none,
 /// The exchange this connection serves, for its failure details; null
@@ -378,7 +381,7 @@ fn timedOut(conn: *Connection, kind: Diagnostics.Timeout) IoError {
 
 fn noteTimedOut(conn: *Connection, kind: Diagnostics.Timeout) void {
     conn.failure = .timed_out;
-    if (conn.diagnostics) |d| d.timeout = if (conn.handshake_until != null) .handshake else kind;
+    if (conn.diagnostics) |d| d.timeout = if (conn.handshake_until != null) conn.handshake_bound else kind;
 }
 
 /// Windows can report a server's refusal of a TLS client certificate as a
@@ -393,7 +396,8 @@ fn missingCertificateReset(conn: *Connection) bool {
 
 fn startWatch(conn: *Connection, io: Io) void {
     const timer = if (conn.ctx.timer) |*t| t else return;
-    if (conn.ctx.timeouts.shortestPerOperation() == null) return;
+    const tunneled = if (conn.ctx.proxy) |p| p.kind.socks() else false;
+    if (conn.ctx.timeouts.shortestOnSocket(tunneled) == null) return;
     if (timer.add(io, &conn.watch)) {
         conn.mode = .timer;
     } else {
@@ -664,13 +668,21 @@ fn socksTunnel(conn: *Connection, proxy: Proxy, started: Io.Timestamp) OpenError
     const io = conn.io;
     if (conn.diagnostics) |d| d.stage = .tunnel;
     var until: ?Io.Timestamp = null;
+    var bound: Diagnostics.Timeout = .connect;
     if (ctx.timeouts.connect) |limit| until = started.addDuration(limit);
     if (ctx.timeouts.handshake) |limit| {
         const h = Io.Clock.awake.now(io).addDuration(limit);
-        if (until == null or h.nanoseconds < until.?.nanoseconds) until = h;
+        if (until == null or h.nanoseconds < until.?.nanoseconds) {
+            until = h;
+            bound = .handshake;
+        }
     }
     conn.handshake_until = until;
-    defer conn.handshake_until = null;
+    conn.handshake_bound = bound;
+    defer {
+        conn.handshake_until = null;
+        conn.handshake_bound = .handshake;
+    }
     const version: socks.Version = switch (proxy.kind) {
         .socks4 => .socks4,
         .socks4a => .socks4a,

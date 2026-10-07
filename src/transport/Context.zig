@@ -47,11 +47,16 @@ pub const Timeouts = struct {
     /// coming, a server that stops taking a body.
     activity: ?Io.Duration = null,
 
-    /// The shortest of the timeouts kept per operation, or null.
-    pub fn shortestPerOperation(t: Timeouts) ?Io.Duration {
-        const h = t.handshake orelse return t.activity;
-        const a = t.activity orelse return h;
-        return if (h.nanoseconds < a.nanoseconds) h else a;
+    /// The shortest of the timeouts kept on the socket's reads and writes,
+    /// or null: each handshake's and each operation's, and through a SOCKS
+    /// proxy `connect`, which its negotiation runs within.
+    pub fn shortestOnSocket(t: Timeouts, socks: bool) ?Io.Duration {
+        var shortest: ?Io.Duration = null;
+        for ([_]?Io.Duration{ t.handshake, t.activity, if (socks) t.connect else null }) |d| {
+            const each = d orelse continue;
+            if (shortest == null or each.nanoseconds < shortest.?.nanoseconds) shortest = each;
+        }
+        return shortest;
     }
 };
 
@@ -108,12 +113,13 @@ pub const SystemTrust = struct {
     }
 };
 
-test "routes are equal without case in the host, and the shortest per-operation timeout is found" {
+test "routes are equal without case in the host, and the shortest timeout kept on the socket is found" {
     const a: Route = .{ .secure = true, .host = "Example.com", .port = 443 };
     try std.testing.expect(a.eql(.{ .secure = true, .host = "example.COM", .port = 443 }));
     try std.testing.expect(!a.eql(.{ .secure = false, .host = "example.com", .port = 443 }));
     try std.testing.expect(!a.eql(.{ .secure = true, .host = "example.com", .port = 8443 }));
     const t: Timeouts = .{ .connect = .fromSeconds(1), .handshake = .fromSeconds(10), .activity = .fromSeconds(5) };
-    try std.testing.expectEqual(@as(i96, 5 * std.time.ns_per_s), t.shortestPerOperation().?.nanoseconds);
-    try std.testing.expectEqual(null, (Timeouts{ .connect = .fromSeconds(1) }).shortestPerOperation());
+    try std.testing.expectEqual(@as(i96, 5 * std.time.ns_per_s), t.shortestOnSocket(false).?.nanoseconds);
+    try std.testing.expectEqual(@as(i96, std.time.ns_per_s), t.shortestOnSocket(true).?.nanoseconds);
+    try std.testing.expectEqual(null, (Timeouts{ .connect = .fromSeconds(1) }).shortestOnSocket(false));
 }
