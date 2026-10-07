@@ -32,7 +32,7 @@ const policy = @import("policy.zig");
 
 const Run = @This();
 
-client: *Shared,
+shared: *Shared,
 /// The request as the caller gave it.
 request: Request,
 /// What the next attempt sends: a redirect may change all three.
@@ -105,7 +105,7 @@ pub fn init(c: *Shared, io: Io, request: Request) Error!Run {
         c.context.timer.tighten(io, Io.Clock.awake.now(io).durationTo(deadline.?));
     }
     return .{
-        .client = c,
+        .shared = c,
         .request = request,
         .method = request.method,
         .body = request.body,
@@ -120,13 +120,13 @@ pub fn init(c: *Shared, io: Io, request: Request) Error!Run {
 /// Give back what the run borrowed and the response did not take.
 pub fn deinit(run: *Run, io: Io) void {
     run.releaseEntry(io);
-    if (run.url_buffer.len != 0) run.client.context.buffers.release(io, run.url_buffer);
+    if (run.url_buffer.len != 0) run.shared.context.buffers.release(io, run.url_buffer);
     run.* = undefined;
 }
 
 fn releaseEntry(run: *Run, io: Io) void {
     const e = run.origin_entry orelse return;
-    run.client.origin_auth.release(io, e);
+    run.shared.origin_auth.release(io, e);
     run.origin_entry = null;
 }
 
@@ -161,7 +161,7 @@ fn diagnostics(run: *const Run) ?*Diagnostics {
 /// The route of the current URL, through the proxy the client chooses
 /// for it.
 pub fn route(run: *Run, io: Io) Error!Context.Route {
-    const proxy = run.client.context.proxies.forUrl(io, run.url) catch |err| return switch (err) {
+    const proxy = run.shared.context.proxies.forUrl(io, run.url) catch |err| return switch (err) {
         error.InvalidProxy => error.InvalidProxy,
         error.OutOfMemory => error.OutOfMemory,
     };
@@ -181,7 +181,7 @@ pub const Lease = struct { conn: *Connection, reused: bool };
 /// A kept connection to `r` that still looks alive, or a new one, waiting
 /// for one while the route is at its limit.
 pub fn acquire(run: *Run, io: Io, r: Context.Route) Error!Lease {
-    const c = run.client;
+    const c = run.shared;
     const d = run.diagnostics();
     while (true) {
         var waited = false;
@@ -235,7 +235,7 @@ pub fn acquire(run: *Run, io: Io, r: Context.Route) Error!Lease {
 /// kept connection that fails before a byte of the response comes back is
 /// replaced once, when the request can go again.
 fn attempt(run: *Run, io: Io) Error!Response {
-    const c = run.client;
+    const c = run.shared;
     const r = try run.route(io);
     var resent = false;
     while (true) {
@@ -297,7 +297,7 @@ fn exchange(run: *Run, io: Io, conn: *Connection, r: Context.Route) Error!Respon
 /// else the server's final answer, sent before the body, which then is
 /// never sent and the connection never reused.
 pub fn awaitContinue(run: *Run, io: Io, conn: *Connection) Error!?Response {
-    if (!try conn.readable(io, run.client.options.expect_continue_timeout)) return null;
+    if (!try conn.readable(io, run.shared.options.expect_continue_timeout)) return null;
     var interim = try run.receive(io, conn, true);
     if (interim.status == .@"continue") {
         interim.releaseHead(io);
@@ -307,11 +307,13 @@ pub fn awaitContinue(run: *Run, io: Io, conn: *Connection) Error!?Response {
     return interim;
 }
 
-/// Read the response's head, telling the observer how long it took.
-fn receive(run: *Run, io: Io, conn: *Connection, want_continue: bool) Error!Response {
-    const c = run.client;
+/// Read the response's head, telling the observer the request went and
+/// how long its answer took; `want_continue` reads the go-ahead a request
+/// waits for before its body, which is not yet the request sent.
+pub fn receive(run: *Run, io: Io, conn: *Connection, want_continue: bool) Error!Response {
+    const c = run.shared;
     if (c.context.observer) |o| {
-        o.emit(.{ .sent = .{ .method = run.method.name, .url = run.url_text } });
+        if (!want_continue) o.emit(.{ .sent = .{ .method = run.method.name, .url = run.url_text } });
         run.sent_at = Io.Clock.awake.now(io);
     }
     const response = try Response.receive(io, &c.context, &c.pool, conn, .{
@@ -330,7 +332,7 @@ fn receive(run: *Run, io: Io, conn: *Connection, want_continue: bool) Error!Resp
 pub fn prepareAttempt(run: *Run, io: Io) Error!void {
     run.attempts +|= 1;
     run.has_prepared = false;
-    const hook = run.client.options.prepare orelse return;
+    const hook = run.shared.options.prepare orelse return;
     run.prepared = .{
         .method = run.method,
         .url = run.url_text,
@@ -359,8 +361,8 @@ fn writeReader(run: *Run, io: Io, conn: *Connection, source: *Io.Reader, length:
         };
         return;
     }
-    const buffer = try run.client.context.buffers.acquire(io, .record);
-    defer run.client.context.buffers.release(io, buffer);
+    const buffer = try run.shared.context.buffers.acquire(io, .record);
+    defer run.shared.context.buffers.release(io, buffer);
     var chunked: h1.ChunkedWriter = .init(w, buffer);
     _ = source.streamRemaining(&chunked.interface) catch |err| return switch (err) {
         error.ReadFailed => error.BodyReadFailed,
@@ -372,7 +374,7 @@ fn writeReader(run: *Run, io: Io, conn: *Connection, source: *Io.Reader, length:
 /// Write the request line and fields, everything checked by `init` or as
 /// it is added, into the connection's writer.
 pub fn writeHead(run: *Run, io: Io, conn: *Connection, r: Context.Route, framing: h1.Framing, expect: bool) Io.Writer.Error!void {
-    const c = run.client;
+    const c = run.shared;
     const w = conn.writer();
     const url = run.url;
     try w.writeAll(run.method.name);
@@ -389,7 +391,7 @@ pub fn writeHead(run: *Run, io: Io, conn: *Connection, r: Context.Route, framing
     try w.writeAll(" HTTP/1.1\r\nHost: ");
     try url.writeAuthority(w, false);
     try w.writeAll("\r\n");
-    if (conn.absolute_form and !run.dropsCredentials()) {
+    if (conn.absolute_form) {
         // Answered for with the path as the Digest target, as curl answers.
         const path = if (url.target.len != 0 and url.target[0] == '/') url.target else "/";
         const slot = r.proxy.?;
@@ -398,11 +400,12 @@ pub fn writeHead(run: *Run, io: Io, conn: *Connection, r: Context.Route, framing
     if (c.options.user_agent) |ua| if (!named(run.request.headers, "user-agent")) try h1.writeField(w, .{ .name = "User-Agent", .value = ua });
     if (c.options.decompress and !named(run.request.headers, "accept-encoding")) try w.writeAll("Accept-Encoding: gzip, deflate, zstd\r\n");
     try run.writeAuthorization(io, w);
-    if (c.options.cookies) |jar| if (!named(run.request.headers, "cookie")) {
+    // The jar's cookies, unless the caller's own `Cookie` is still sent.
+    if (c.options.cookies) |jar| if (run.left_origin or !named(run.request.headers, "cookie")) {
         _ = try jar.writeField(io, w, url);
     };
     for (run.request.headers) |h| {
-        if (run.dropsCredentials() and isCredential(h.name)) continue;
+        if (run.left_origin and isCredential(h.name)) continue;
         if (run.body_dropped and describesBody(h.name)) continue;
         try h1.writeField(w, h);
     }
@@ -420,7 +423,7 @@ pub fn writeHead(run: *Run, io: Io, conn: *Connection, r: Context.Route, framing
 /// else from the answers the client keeps for the origin; none when the
 /// caller wrote the field.
 fn writeAuthorization(run: *Run, io: Io, w: *Io.Writer) Io.Writer.Error!void {
-    if (run.request.auth == null and run.client.origin_auth.live.load(.acquire) == 0) return;
+    if (run.request.auth == null and run.shared.origin_auth.live.load(.acquire) == 0) return;
     if (named(run.request.headers, "authorization") and !run.left_origin) return;
     if (run.request.auth) |a| if (!run.left_origin) {
         try w.writeAll("Authorization: ");
@@ -436,11 +439,7 @@ fn writeAuthorization(run: *Run, io: Io, w: *Io.Writer) Io.Writer.Error!void {
     var target_buf: [2048]u8 = undefined;
     const t = run.url.target;
     const target = if (t.len != 0 and t[0] == '/') t else std.mem.print(&target_buf, "/{s}", .{t}) catch "/";
-    run.origin_entry = try run.client.origin_auth.writeField(io, w, run.url, run.method.name, target);
-}
-
-fn dropsCredentials(run: *const Run) bool {
-    return run.left_origin;
+    run.origin_entry = try run.shared.origin_auth.writeField(io, w, run.url, run.method.name, target);
 }
 
 fn named(headers: []const std.http.Header, name: []const u8) bool {
@@ -497,7 +496,7 @@ const Next = union(enum) {
 
 /// Decide what follows `response`, which stays the caller's to release.
 fn judge(run: *Run, io: Io, response: *Response) Error!Next {
-    const c = run.client;
+    const c = run.shared;
     if (c.options.cookies) |jar| try jar.storeAll(io, run.url, &response.headers);
     const status = response.status;
     if (status == .proxy_auth_required) return if (try run.answerProxy(io, response)) .again else .done;
@@ -512,7 +511,7 @@ fn judge(run: *Run, io: Io, response: *Response) Error!Next {
 }
 
 /// A 407 from an HTTP proxy the request went to whole: answered, and the
-/// request sent again, as P1 always did.
+/// request sent again, as curl does; a stale Digest nonce once more.
 fn answerProxy(run: *Run, io: Io, response: *Response) Error!bool {
     const r = try run.route(io);
     if (!absoluteForm(r)) return false;
@@ -521,7 +520,7 @@ fn answerProxy(run: *Run, io: Io, response: *Response) Error!bool {
     var offered_buf: [256]u8 = undefined;
     var offered: Io.Writer = .fixed(&offered_buf);
     const slot = r.proxy.?;
-    const again = slot.auth.challenged(run.client.context.gpa, io, slot.proxy.credential, &response.headers, &offered) catch |err| switch (err) {
+    const again = slot.auth.challenged(run.shared.context.gpa, io, slot.proxy.credential, &response.headers, &offered) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.ProxyAuthMethodUnsupported => {
             if (run.diagnostics()) |d| d.proxy_offered.set(offered.buffered(), offered.end == offered_buf.len);
@@ -537,7 +536,7 @@ fn answerProxy(run: *Run, io: Io, response: *Response) Error!bool {
 /// A 401: the answer the run sent is judged, a stale Digest nonce answered
 /// again, and a secret filled once from the client's credentials.
 fn answerOrigin(run: *Run, io: Io, response: *Response) Error!bool {
-    const c = run.client;
+    const c = run.shared;
     const credentials = c.options.credentials;
     if (named(run.request.headers, "authorization") and !run.left_origin) return false;
     if (run.request.auth != null and !run.left_origin) return false;
@@ -583,7 +582,7 @@ fn answerOrigin(run: *Run, io: Io, response: *Response) Error!bool {
 }
 
 fn emitChallenged(run: *Run, status: u16) void {
-    if (run.client.context.observer) |o| o.emit(.{ .challenged = .{ .status = status } });
+    if (run.shared.context.observer) |o| o.emit(.{ .challenged = .{ .status = status } });
 }
 
 /// A redirect the policy follows: the next URL, method and body set.
@@ -597,7 +596,7 @@ fn followRedirect(run: *Run, io: Io, response: *Response) Error!bool {
     const location = response.headers.getKnown(.location) orelse return false;
     const resolved = try run.resolveLocation(io, location);
     var keep = true;
-    defer if (keep) run.client.context.buffers.release(io, resolved.buffer);
+    defer if (keep) run.shared.context.buffers.release(io, resolved.buffer);
     const next = url_mod.parse(resolved.text) catch return error.InvalidRedirect;
     if (!try policy.mayFollow(follow, run.url, next, run.hops)) return false;
     const same = url_mod.sameOrigin(run.url, next);
@@ -612,9 +611,9 @@ fn followRedirect(run: *Run, io: Io, response: *Response) Error!bool {
     // A body that cannot go again goes again only when it was empty: as
     // none, which a POST still sends with its zero length.
     const body: Request.Body = if (hop.keep_body and run.body.replayable()) run.body else .none;
-    if (run.client.context.observer) |o| o.emit(.{ .redirect = .{ .status = code, .url = resolved.text } });
+    if (run.shared.context.observer) |o| o.emit(.{ .redirect = .{ .status = code, .url = resolved.text } });
     keep = false;
-    if (run.url_buffer.len != 0) run.client.context.buffers.release(io, run.url_buffer);
+    if (run.url_buffer.len != 0) run.shared.context.buffers.release(io, run.url_buffer);
     run.url_buffer = resolved.buffer;
     run.url_text = resolved.text;
     run.url = next;
@@ -635,7 +634,7 @@ const Resolved = struct { buffer: []u8, text: []u8 };
 /// `location` resolved against the current URL, in a buffer from the
 /// pool.
 fn resolveLocation(run: *Run, io: Io, location: []const u8) Error!Resolved {
-    const buffers = &run.client.context.buffers;
+    const buffers = &run.shared.context.buffers;
     for ([_]BufferPool.Class{ .small, .record, .large }) |class| {
         const buffer = try buffers.acquire(io, class);
         const text = url_mod.resolve(run.url_text, location, buffer) catch |err| {
@@ -689,7 +688,7 @@ fn withinDeadline(run: *const Run, io: Io, wait: Io.Duration) bool {
 fn pause(run: *Run, io: Io, wait: Io.Duration, status: ?u16, error_name: ?[]const u8) Error!void {
     run.tries += 1;
     if (run.diagnostics()) |d| d.retries +|= 1;
-    if (run.client.context.observer) |o| o.emit(.{ .retry = .{ .attempt = run.tries, .delay = wait, .status = status, .error_name = error_name } });
+    if (run.shared.context.observer) |o| o.emit(.{ .retry = .{ .attempt = run.tries, .delay = wait, .status = status, .error_name = error_name } });
     if (wait.nanoseconds > 0) io.sleep(wait, .awake) catch return error.Canceled;
 }
 

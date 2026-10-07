@@ -123,14 +123,7 @@ pub fn finish(o: *Outgoing, io: Io) FinishError!Response {
         .dropped => unreachable, // unreachable: a dropped body has its answer in `early`, taken above
     }
     conn.flush() catch return conn.writeError();
-    const c = o.run.client;
-    const first = try Response.receive(io, &c.context, &c.pool, conn, .{
-        .method = o.run.method,
-        .limits = c.options.limits,
-        .decompress = c.options.decompress,
-        .diagnostics = o.run.request.diagnostics,
-        .progress = &o.run.progress,
-    });
+    const first = try o.run.receive(io, conn, false);
     // The response holds the connection now, and the run the response.
     o.conn = null;
     return o.run.complete(io, first);
@@ -144,7 +137,7 @@ fn writeFailed(o: *Outgoing, conn: *Connection) FinishError {
 /// Close the connection unless `finish` handed it on, and give back what
 /// the request borrowed.
 pub fn deinit(o: *Outgoing, io: Io) void {
-    const c = o.run.client;
+    const c = o.run.shared;
     if (o.conn) |conn| Response.release(io, &c.context, &c.pool, conn, false);
     if (o.early) |*answer| answer.deinit(io);
     c.context.buffers.release(io, o.buffer);
