@@ -32,10 +32,12 @@ resolver: Resolver,
 /// Private: the cache `resolver` goes through, when it does.
 dns_cache: ?Resolver.Cache,
 observer: ?Observer,
-/// Private: one zstd window kept for the next zstd body.
+/// Private: one zstd buffer kept for the next zstd body.
 zstd_window: std.atomic.Value(?[*]u8) = .init(null),
-/// The length of a zstd window: the largest frame window decoded plus a
-/// block.
+/// The largest frame window a zstd body may ask for.
+zstd_max_window: u32,
+/// The length of a zstd buffer: the window, a block, and room after them
+/// for the decoder's state.
 zstd_window_len: usize,
 counters: Counters = .{},
 
@@ -67,7 +69,8 @@ pub fn init(gpa: Allocator, options: Options) Context {
         .resolver = options.resolver orelse .system,
         .dns_cache = if (options.dns_cache) |o| .init(gpa, options.resolver orelse .system, o) else null,
         .observer = options.observer,
-        .zstd_window_len = @as(usize, options.max_zstd_window) + std.compress.zstd.block_size_max,
+        .zstd_max_window = options.max_zstd_window,
+        .zstd_window_len = std.mem.alignForward(usize, @as(usize, options.max_zstd_window) + std.compress.zstd.block_size_max, 64) + @sizeOf(std.compress.zstd.Decompress),
     };
 }
 
@@ -83,22 +86,32 @@ pub fn deinit(ctx: *Context, io: Io) void {
     ctx.proxies.deinit();
     ctx.system_trust.deinit();
     if (ctx.dns_cache) |*c| c.deinit();
-    if (ctx.zstd_window.load(.acquire)) |w| ctx.gpa.free(w[0..ctx.zstd_window_len]);
+    if (ctx.zstd_window.load(.acquire)) |w| ctx.gpa.free(alignedZstd(w[0..ctx.zstd_window_len]));
     ctx.buffers.deinit();
     ctx.* = undefined;
 }
 
-/// A zstd window: the one kept, or a new one.
-pub fn acquireZstdWindow(ctx: *Context) Allocator.Error![]u8 {
-    if (ctx.zstd_window.swap(null, .acq_rel)) |w| return w[0..ctx.zstd_window_len];
-    return ctx.gpa.alloc(u8, ctx.zstd_window_len);
+/// The part of a zstd buffer the decoder reads into: the window and a
+/// block.
+pub fn zstdBufferLen(ctx: *const Context) usize {
+    return @as(usize, ctx.zstd_max_window) + std.compress.zstd.block_size_max;
 }
 
-/// Give a zstd window back: kept when none is, freed otherwise.
+/// A zstd buffer: the one kept, or a new one, aligned for its decoder.
+pub fn acquireZstdWindow(ctx: *Context) Allocator.Error![]u8 {
+    if (ctx.zstd_window.swap(null, .acq_rel)) |w| return w[0..ctx.zstd_window_len];
+    return ctx.gpa.alignedAlloc(u8, .@"64", ctx.zstd_window_len);
+}
+
+/// Give a zstd buffer back: kept when none is, freed otherwise.
 pub fn releaseZstdWindow(ctx: *Context, window: []u8) void {
     std.debug.assert(window.len == ctx.zstd_window_len);
     if (ctx.zstd_window.cmpxchgStrong(null, window.ptr, .acq_rel, .acquire) == null) return;
-    ctx.gpa.free(window);
+    ctx.gpa.free(alignedZstd(window));
+}
+
+fn alignedZstd(window: []u8) []align(64) u8 {
+    return @alignCast(window); // safe: every zstd buffer is allocated 64-aligned
 }
 
 /// How long each step may take; null is no limit.

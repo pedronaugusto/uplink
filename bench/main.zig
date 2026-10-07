@@ -10,12 +10,22 @@
 //!   cookie-heavy), parsed and their framing decided: MB/s and heads/s.
 //! - `wire/chunked/<chunk>`: a chunked body decoded, its data copied out
 //!   as a reader hands it on: MB/s.
+//! - `wire/sse`: Server-Sent Events read from a stream: MB/s and events/s.
+//! - `wire/set-cookie`: `Set-Cookie` values read: values/s.
 //! - `client/keepalive/<body>`: one task, one kept connection to a server
 //!   on loopback, request after request: requests/s, p50, p99 and p99.9.
+//! - `client/keepalive/cookies`: the same with a jar of 50 cookies, 30 of
+//!   them sent with every request.
+//! - `client/keepalive/auth`: the same with an answer to a 401 kept and
+//!   sent with every request.
+//! - `client/redirect`: a request redirected once: requests/s.
 //! - `client/concurrent/<tasks>`: that many tasks through one client.
-//! - `client/download/<framing>`: one body read through: MB/s.
+//! - `client/download/<body>`: one body read through: MB/s; `gzip` is
+//!   English-like text decoded as it arrives.
 //!
-//! Every row names its `Io` (`Threaded`), the host and the Zig version.
+//! Throughput rows repeat until a third of a second has passed, so a
+//! short row is not measured on a handful of runs. Every row names its
+//! `Io` (`Threaded`), the host and the Zig version.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -58,6 +68,14 @@ fn now(io: Io) u64 {
     return @intCast(Io.Clock.awake.now(io).nanoseconds);
 }
 
+/// How long a throughput row repeats for, at least.
+const budget_ns = std.time.ns_per_s / 3;
+
+/// Whether `name` is asked for by `prefix`: one starts the other.
+fn wanted(name: []const u8, prefix: []const u8) bool {
+    return std.mem.startsWith(u8, name, prefix) or std.mem.startsWith(u8, prefix, name);
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -73,31 +91,53 @@ pub fn main(init: std.process.Init) !void {
     var stdout = Io.File.stdout().writer(io, &stdout_buffer);
     const out: Out = .{ .file = &file_writer.interface, .stdout = &stdout.interface };
 
-    if (std.mem.startsWith(u8, "wire/parse", prefix) or std.mem.startsWith(u8, prefix, "wire/parse")) try parseRow(gpa, io, out);
+    if (wanted("wire/parse", prefix)) try parseRow(gpa, io, out);
     for ([_]usize{ 256, 4096, 65536 }) |chunk| {
         var name_buf: [64]u8 = undefined;
         const name = try std.mem.print(&name_buf, "wire/chunked/{d}", .{chunk});
         if (std.mem.startsWith(u8, name, prefix)) try chunkedRow(gpa, io, out, name, chunk);
     }
-    if (!std.mem.startsWith(u8, "client", prefix) and !std.mem.startsWith(u8, prefix, "client")) return;
+    if (wanted("wire/sse", prefix)) try sseRow(gpa, io, out);
+    if (wanted("wire/set-cookie", prefix)) try setCookieRow(gpa, io, out);
+    if (!wanted("client", prefix)) return;
+    const text = try gen.text(gpa, 0x7e47, 8 << 20);
+    defer gpa.free(text);
+    const gzip = try compressed(gpa, text);
+    defer gpa.free(gzip);
     var server: Server = undefined;
-    try Server.start(io, &server);
+    try Server.start(io, &server, gzip);
     defer server.stop();
     for ([_][]const u8{ "0", "1k" }) |body| {
         var name_buf: [64]u8 = undefined;
         const name = try std.mem.print(&name_buf, "client/keepalive/{s}", .{body});
-        if (std.mem.startsWith(u8, name, prefix)) try keepAliveRow(gpa, io, out, &server, name, body);
+        if (std.mem.startsWith(u8, name, prefix)) try keepAliveRow(gpa, io, out, &server, name, body, .plain);
     }
+    if (wanted("client/keepalive/cookies", prefix)) try keepAliveRow(gpa, io, out, &server, "client/keepalive/cookies", "0", .cookies);
+    if (wanted("client/keepalive/auth", prefix)) try keepAliveRow(gpa, io, out, &server, "client/keepalive/auth", "private", .auth);
+    if (wanted("client/redirect", prefix)) try keepAliveRow(gpa, io, out, &server, "client/redirect", "redirect", .plain);
     for ([_]usize{ 16, 128 }) |tasks| {
         var name_buf: [64]u8 = undefined;
         const name = try std.mem.print(&name_buf, "client/concurrent/{d}", .{tasks});
         if (std.mem.startsWith(u8, name, prefix)) try concurrentRow(gpa, io, out, &server, name, tasks);
     }
-    for ([_][]const u8{ "big", "chunked" }) |path| {
+    for ([_][]const u8{ "big", "chunked", "gzip" }) |path| {
         var name_buf: [64]u8 = undefined;
         const name = try std.mem.print(&name_buf, "client/download/{s}", .{path});
         if (std.mem.startsWith(u8, name, prefix)) try downloadRow(gpa, io, out, &server, name, path);
     }
+}
+
+fn compressed(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
+    var w: Io.Writer.Allocating = .init(gpa);
+    defer w.deinit();
+    const window = try gpa.alloc(u8, std.compress.flate.max_window_len);
+    defer gpa.free(window);
+    const state = try gpa.create(std.compress.flate.Compress);
+    defer gpa.destroy(state);
+    state.* = try .init(&w.writer, window, .gzip, .level_6);
+    try state.writer.writeAll(text);
+    try state.finish();
+    return w.toOwnedSlice();
 }
 
 fn parseRow(gpa: std.mem.Allocator, io: Io, out: Out) !void {
@@ -126,13 +166,13 @@ fn chunkedRow(gpa: std.mem.Allocator, io: Io, out: Out, name: []const u8, chunk:
     const total = 16 << 20;
     const body = try gen.chunked(gpa, total, chunk);
     defer gpa.free(body);
-    const rounds = 20;
+    var rounds: u64 = 0;
     var data: u64 = 0;
     // The data is copied out, as a reader hands it to its caller.
     const sink = try gpa.alloc(u8, 64 << 10);
     defer gpa.free(sink);
     const start = now(io);
-    for (0..rounds) |_| {
+    while (now(io) - start < budget_ns) : (rounds += 1) {
         var d: uplink.wire.h1.ChunkedDecoder = .{};
         var at: usize = 0;
         while (!d.done()) {
@@ -149,11 +189,73 @@ fn chunkedRow(gpa: std.mem.Allocator, io: Io, out: Out, name: []const u8, chunk:
     try out.emit(.{ .name = name, .ops = rounds, .ns = now(io) - start, .bytes = data });
 }
 
-fn keepAliveRow(gpa: std.mem.Allocator, io: Io, out: Out, server: *Server, name: []const u8, path: []const u8) !void {
-    var client: uplink.Client = .init(gpa, .{});
+fn sseRow(gpa: std.mem.Allocator, io: Io, out: Out) !void {
+    const stream = try gen.events(gpa, 0x55e, 20_000);
+    defer gpa.free(stream);
+    var data: [4096]u8 = undefined;
+    var events: u64 = 0;
+    var bytes: u64 = 0;
+    const start = now(io);
+    while (now(io) - start < budget_ns) {
+        var in: Io.Reader = .fixed(stream);
+        var r: uplink.wire.sse.Reader = .init(&in, &data);
+        while (try r.next()) |e| {
+            std.mem.doNotOptimizeAway(e.data.ptr);
+            events += 1;
+        }
+        bytes += stream.len;
+    }
+    try out.emit(.{ .name = "wire/sse", .ops = events, .ns = now(io) - start, .bytes = bytes });
+}
+
+fn setCookieRow(gpa: std.mem.Allocator, io: Io, out: Out) !void {
+    const values = try gen.setCookies(gpa, 0xc00c1e, 4096);
+    defer {
+        for (values) |v| gpa.free(v);
+        gpa.free(values);
+    }
+    var parsed: u64 = 0;
+    const start = now(io);
+    while (now(io) - start < budget_ns) {
+        for (values) |v| {
+            std.mem.doNotOptimizeAway(uplink.wire.cookie.parse(v).?.expires);
+            parsed += 1;
+        }
+    }
+    try out.emit(.{ .name = "wire/set-cookie", .ops = parsed, .ns = now(io) - start });
+}
+
+const Extra = enum { plain, cookies, auth };
+
+/// Answers every 401 with the same password.
+const Answer = struct {
+    fn credentials() uplink.Credentials {
+        return .{ .context = null, .fillFn = fill };
+    }
+
+    fn fill(_: Io, _: ?*anyopaque, _: uplink.Credentials.Query) uplink.Credentials.FillError!?uplink.Credentials.Secret {
+        return .{ .password = .{ .user = "bench", .password = "secret" } };
+    }
+};
+
+fn keepAliveRow(gpa: std.mem.Allocator, io: Io, out: Out, server: *Server, name: []const u8, path: []const u8, extra: Extra) !void {
+    var jar: uplink.CookieJar = .init(gpa, .{});
+    defer jar.deinit();
+    const entries = [_]uplink.net.Resolver.Static.Entry{.{ .host = "www.bench.test", .addresses = &.{.{ .ip4 = .loopback(0) }} }};
+    const static: uplink.net.Resolver.Static = .{ .entries = &entries };
+    var client: uplink.Client = .init(gpa, .{
+        .cookies = if (extra == .cookies) &jar else null,
+        .credentials = if (extra == .auth) Answer.credentials() else null,
+        .resolver = static.resolver(),
+    });
     defer client.deinit(io);
     var url_buf: [64]u8 = undefined;
-    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/{s}", .{ server.port, path });
+    // Cookies need a name with domains above it; the rest go by address.
+    const host = if (extra == .cookies) "www.bench.test" else "127.0.0.1";
+    const url = try std.mem.print(&url_buf, "http://{s}:{d}/{s}", .{ host, server.port, path });
+    // The warm-up's first request answers `/private`'s 401; the rest send
+    // the kept answer.
+    if (extra == .cookies) try fillJar(&jar, io);
     const count = 50_000;
     const samples = try gpa.alloc(u64, count);
     defer gpa.free(samples);
@@ -174,6 +276,21 @@ fn keepAliveRow(gpa: std.mem.Allocator, io: Io, out: Out, server: *Server, name:
         .p99_ns = samples[count * 99 / 100],
         .p999_ns = samples[count * 999 / 1000],
     });
+}
+
+/// Fifty cookies: thirty for the request's host and the domains above it,
+/// twenty for elsewhere.
+fn fillJar(jar: *uplink.CookieJar, io: Io) !void {
+    const here = try uplink.wire.url.parse("http://www.bench.test/app/page");
+    const there = try uplink.wire.url.parse("http://other.test/");
+    for (0..50) |i| {
+        var buf: [96]u8 = undefined;
+        const set = if (i < 30)
+            try std.mem.print(&buf, "c{d}=value{d}; Path={s}{s}", .{ i, i, if (i % 3 == 0) "/" else "/app", if (i % 2 == 0) "; Domain=bench.test" else "" })
+        else
+            try std.mem.print(&buf, "o{d}=value{d}", .{ i, i });
+        try jar.store(io, if (i < 30) here else there, set);
+    }
 }
 
 fn exchange(client: *uplink.Client, io: Io, url: []const u8) !void {
@@ -205,11 +322,11 @@ fn downloadRow(gpa: std.mem.Allocator, io: Io, out: Out, server: *Server, name: 
     defer client.deinit(io);
     var url_buf: [64]u8 = undefined;
     const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/{s}", .{ server.port, path });
-    const rounds = 8;
+    var rounds: u64 = 0;
     var bytes: u64 = 0;
     var sink_buffer: [64 << 10]u8 = undefined;
     const start = now(io);
-    for (0..rounds) |_| {
+    while (now(io) - start < budget_ns) : (rounds += 1) {
         var response = try client.send(io, .{ .url = url });
         defer response.deinit(io);
         var sink: Io.Writer.Discarding = .init(&sink_buffer);

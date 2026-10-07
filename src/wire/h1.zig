@@ -387,7 +387,9 @@ pub const ChunkedDecoder = struct {
     pub const max_extension = 4 << 10;
     pub const max_trailer = 64 << 10;
 
-    const State = enum { size, size_space, extension, size_lf, data, data_cr, data_lf, trailer_start, trailer_line, end_lf, done };
+    /// The states `feed` stops at come last, so one compare per byte tells
+    /// it to go on.
+    const State = enum { size, size_space, extension, size_lf, data_cr, data_lf, trailer_line, end_lf, data, trailer_start, done };
 
     /// Why a chunked body is malformed.
     pub const Error = error{
@@ -405,18 +407,22 @@ pub const ChunkedDecoder = struct {
     /// and reports with `take`.
     pub const Step = struct { consumed: usize, data: usize };
 
-    /// Read framing bytes from `in` up to the next data, the start of the
-    /// trailer section, or the end. Once `inTrailer` says so, every byte
-    /// `feed` consumes is the trailer's, its closing blank line included,
-    /// for a caller that keeps trailers to gather.
+    /// Read framing bytes from `in` up to the next data, a line of the
+    /// trailer section, or the end. Once `inTrailer` says so before a feed,
+    /// every byte it consumes is the trailer's, its closing blank line
+    /// included, for a caller that keeps trailers to gather.
     pub fn feed(d: *ChunkedDecoder, in: []const u8) Error!Step {
         var i: usize = 0;
         while (i < in.len) : (i += 1) {
-            if (d.state == .data) return .{ .consumed = i, .data = @min(d.remaining, in.len - i) };
-            if (d.state == .done) break;
-            const was = d.state;
+            if (@backingInt(d.state) >= @backingInt(State.data)) switch (d.state) {
+                .data => return .{ .consumed = i, .data = @min(d.remaining, in.len - i) },
+                .done => break,
+                // A line of the trailer section starts: stop before it, so
+                // the caller gathers the section from the next feed on.
+                .trailer_start => if (i != 0) return .{ .consumed = i, .data = 0 },
+                else => unreachable, // unreachable: only the states past `data` get here
+            };
             try d.byte(in[i]);
-            if (d.state == .trailer_start and was != .trailer_line) return .{ .consumed = i + 1, .data = 0 };
         }
         const data: usize = if (d.state == .data) @min(d.remaining, in.len - i) else 0;
         return .{ .consumed = i, .data = data };

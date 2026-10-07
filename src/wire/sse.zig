@@ -103,9 +103,40 @@ pub const Parser = struct {
                 if (try p.endLine()) |event| return .{ .consumed = i + 1, .event = event };
                 continue;
             }
+            // Inside a value or a comment, take the run to the line's end
+            // at once.
+            if ((p.state == .value and p.field != .retry) or p.state == .comment) {
+                const end = lineEnd(in, i);
+                if (p.state == .value) try p.valueRun(in[i..end]);
+                i = end - 1;
+                continue;
+            }
             try p.byte(c);
         }
         return .{ .consumed = i };
+    }
+
+    /// A run of a value's bytes, none a line end.
+    fn valueRun(p: *Parser, run: []const u8) Error!void {
+        switch (p.field) {
+            .data => {
+                if (p.data_len + run.len > p.data.len) return error.DataTooLong;
+                @memcpy(p.data[p.data_len..][0..run.len], run);
+                p.data_len += run.len;
+            },
+            .event => {
+                if (p.type_len + run.len > max_type) return error.FieldTooLong;
+                @memcpy(p.type_buf[p.type_len..][0..run.len], run);
+                p.type_len += @intCast(run.len);
+            },
+            .id => {
+                if (p.pending_id_len + run.len > max_id) return error.FieldTooLong;
+                @memcpy(p.pending_id[p.pending_id_len..][0..run.len], run);
+                p.pending_id_len += @intCast(run.len);
+            },
+            .ignored => {},
+            .retry => unreachable, // unreachable: `feed` reads a retry value byte by byte
+        }
     }
 
     fn byte(p: *Parser, c: u8) Error!void {
@@ -252,6 +283,19 @@ pub const Parser = struct {
         return p.id_buf[0..p.id_len];
     }
 };
+
+/// Where the line at `from` ends: the index of the next CR or LF, or the
+/// input's end. Sixteen bytes at a time.
+fn lineEnd(in: []const u8, from: usize) usize {
+    var i = from;
+    while (i + 16 <= in.len) : (i += 16) {
+        const v: @Vector(16, u8) = in[i..][0..16].*;
+        const hits: u16 = @bitCast((v == @as(@Vector(16, u8), @splat('\r'))) | (v == @as(@Vector(16, u8), @splat('\n'))));
+        if (hits != 0) return i + @ctz(hits);
+    }
+    while (i < in.len and in[i] != '\r' and in[i] != '\n') i += 1;
+    return i;
+}
 
 /// Events read from a stream, such as a response body.
 pub const Reader = struct {

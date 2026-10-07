@@ -45,7 +45,10 @@ conn: ?*Connection,
 /// Private: the head, its fields and the body reader's buffer.
 head_buffer: []u8,
 body_buffer: []u8,
-/// Private: the decompression window, when the body is decoded.
+/// Private: the buffer the decoder and its window live in, when the body
+/// is decoded: from the client's pool for flate, the client's one kept
+/// window for zstd. The decoder is not kept in the response itself, which
+/// stays small to pass around.
 window: []u8 = &.{},
 /// Private: the final URL's bytes, when a redirect was followed.
 url_buffer: []u8 = &.{},
@@ -60,12 +63,27 @@ started: bool = false,
 
 const Decoder = union(enum) {
     none,
-    flate: struct {
-        container: std.compress.flate.Container,
-        state: std.compress.flate.Decompress,
-    },
-    zstd: std.compress.zstd.Decompress,
+    flate: *FlateState,
+    zstd: *std.compress.zstd.Decompress,
 };
+
+const FlateState = struct {
+    container: std.compress.flate.Container,
+    state: std.compress.flate.Decompress,
+};
+
+/// Where a decoder's state goes in its buffer: after the window.
+fn stateIn(comptime T: type, buffer: []u8, window_len: usize) *T {
+    const at = std.mem.alignForward(usize, window_len, @alignOf(T));
+    std.debug.assert(at + @sizeOf(T) <= buffer.len);
+    return @ptrCast(@alignCast(buffer.ptr + at)); // safe: pool and zstd buffers are aligned past T's need, `at` is aligned for T, and the assert keeps it inside
+}
+
+/// The flate window, 64 KiB, and its decoder after it, in one pool buffer.
+const flate_window = std.compress.flate.max_window_len;
+comptime {
+    std.debug.assert(std.mem.alignForward(usize, flate_window, @alignOf(FlateState)) + @sizeOf(FlateState) <= BufferPool.Class.large.len());
+}
 
 /// Errors from reading the body, by name.
 pub const ReadError = error{
@@ -107,14 +125,14 @@ pub fn reader(r: *Response, io: Io) *Io.Reader {
         r.body.trailer_pool = &r.ctx.buffers;
         switch (r.decoder) {
             .none => {},
-            .flate => |*f| f.state = .init(&r.body.interface, f.container, r.window),
-            .zstd => |*z| z.* = .init(&r.body.interface, r.window, .{ .window_len = @intCast(r.window.len - std.compress.zstd.block_size_max) }),
+            .flate => |f| f.state = .init(&r.body.interface, f.container, r.window[0..flate_window]),
+            .zstd => |z| z.* = .init(&r.body.interface, r.window[0..r.ctx.zstdBufferLen()], .{ .window_len = r.ctx.zstd_max_window }),
         }
     }
     return switch (r.decoder) {
         .none => &r.body.interface,
-        .flate => |*f| &f.state.reader,
-        .zstd => |*z| &z.reader,
+        .flate => |f| &f.state.reader,
+        .zstd => |z| &z.reader,
     };
 }
 
@@ -315,13 +333,15 @@ fn planDecoding(r: *Response, io: Io) Allocator.Error!void {
         .deflate => .zlib,
         .zstd => {
             r.window = try r.ctx.acquireZstdWindow();
-            r.decoder = .{ .zstd = undefined };
+            r.decoder = .{ .zstd = stateIn(std.compress.zstd.Decompress, r.window, r.ctx.zstdBufferLen()) };
             return;
         },
         .identity, .br => return,
     };
     r.window = try r.ctx.buffers.acquire(io, .large);
-    r.decoder = .{ .flate = .{ .container = container, .state = undefined } };
+    const f = stateIn(FlateState, r.window, flate_window);
+    f.container = container;
+    r.decoder = .{ .flate = f };
 }
 
 const Head = struct {
