@@ -190,8 +190,13 @@ fn takeLocked(p: *Pool, io: Io, route: Route) ?Acquired {
 }
 
 fn expired(p: *Pool, io: Io, entry: Idle) bool {
+    if (p.options.idle_timeout == null) return false;
+    return p.expiredAt(entry, Io.Clock.awake.now(io).nanoseconds);
+}
+
+fn expiredAt(p: *Pool, entry: Idle, now: i96) bool {
     const limit = p.options.idle_timeout orelse return false;
-    return Io.Clock.awake.now(io).nanoseconds - entry.since >= limit.nanoseconds;
+    return now - entry.since >= limit.nanoseconds;
 }
 
 /// The state of a limited route, made when it is first asked for.
@@ -216,11 +221,19 @@ fn forget(p: *Pool, state: *RouteState) void {
     p.gpa.destroy(state);
 }
 
-/// Keep `k` idle, or hand it to an exchange waiting for its route. Returns
-/// the connection to close to make room: the oldest of its route past the
-/// route's cap, else the oldest of all past the pool's, or `k` itself when
-/// nothing may be kept. A connection returned must be told to `closed`.
-pub fn keep(p: *Pool, io: Io, k: Kind) ?Kind {
+/// What `keep` puts out, for the caller to close and tell `closed`.
+pub const Kept = struct {
+    /// To make room: the oldest of the route past its cap, else the oldest
+    /// of all past the pool's, or the connection itself when none may be
+    /// kept.
+    evicted: ?Kind = null,
+    /// The oldest idle connection, when it was idle past its time: one per
+    /// keep, so a pool in use never holds an expired one for long.
+    expired: ?Kind = null,
+};
+
+/// Keep `k` idle, or hand it to an exchange waiting for its route.
+pub fn keep(p: *Pool, io: Io, k: Kind) Kept {
     p.mutex.lockUncancelable(io);
     defer p.mutex.unlock(io);
     if (p.options.max_per_route != 0) {
@@ -228,11 +241,14 @@ pub fn keep(p: *Pool, io: Io, k: Kind) ?Kind {
             const w: *Waiter = @fieldParentPtr("node", node);
             w.granted = .{ .idle = k };
             w.event.set(io);
-            return null;
+            return .{};
         };
     }
-    if (p.options.max_idle == 0 or p.options.max_idle_per_route == 0) return k;
-    if (p.idle.len == 0) p.idle = p.gpa.alloc(Idle, p.options.max_idle) catch return k;
+    if (p.options.max_idle == 0 or p.options.max_idle_per_route == 0) return .{ .evicted = k };
+    if (p.idle.len == 0) p.idle = p.gpa.alloc(Idle, p.options.max_idle) catch return .{ .evicted = k };
+    var kept: Kept = .{};
+    const now: i96 = if (p.options.idle_timeout != null) Io.Clock.awake.now(io).nanoseconds else 0;
+    if (p.len != 0 and p.expiredAt(p.idle[0], now)) kept.expired = p.removeAt(0).kind;
     var same: usize = 0;
     var oldest_same: ?usize = null;
     for (p.idle[0..p.len], 0..) |other, i| {
@@ -240,28 +256,15 @@ pub fn keep(p: *Pool, io: Io, k: Kind) ?Kind {
         same += 1;
         if (oldest_same == null) oldest_same = i;
     }
-    var evicted: ?Kind = null;
     if (same >= p.options.max_idle_per_route) {
-        evicted = p.removeAt(oldest_same.?).kind;
+        kept.evicted = p.removeAt(oldest_same.?).kind;
     } else if (p.len == p.idle.len) {
-        evicted = p.removeAt(0).kind;
+        kept.evicted = p.removeAt(0).kind;
     }
-    const since: i96 = if (p.options.idle_timeout != null) Io.Clock.awake.now(io).nanoseconds else 0;
-    p.idle[p.len] = .{ .kind = k, .since = since };
+    p.idle[p.len] = .{ .kind = k, .since = now };
     p.len += 1;
     p.idle_count.store(@intCast(p.len), .monotonic);
-    return evicted;
-}
-
-/// The oldest idle connection, when it has been idle past its time: the
-/// caller closes it and tells `closed`. Asked after each `keep`, so a pool
-/// in use never holds an expired connection for long.
-pub fn expiredOldest(p: *Pool, io: Io) ?Kind {
-    if (p.options.idle_timeout == null or p.idle_count.load(.monotonic) == 0) return null;
-    p.mutex.lockUncancelable(io);
-    defer p.mutex.unlock(io);
-    if (p.len == 0 or !p.expired(io, p.idle[0])) return null;
-    return p.removeAt(0).kind;
+    return kept;
 }
 
 /// A connection of `route` was closed, or one the pool made room for could
@@ -330,13 +333,13 @@ test "the last kept is taken first, a route keeps its cap, and the pool its own"
         .{ .secure = false, .host = "c", .port = 80 },
     };
     for (&conns, routes) |*c, r| c.route = r;
-    try testing.expectEqual(null, pool.keep(io, .{ .h1 = &conns[0] }));
-    try testing.expectEqual(null, pool.keep(io, .{ .h1 = &conns[1] }));
+    try testing.expectEqual(null, pool.keep(io, .{ .h1 = &conns[0] }).evicted);
+    try testing.expectEqual(null, pool.keep(io, .{ .h1 = &conns[1] }).evicted);
     // A third for route `a` puts out its oldest.
-    try testing.expectEqual(&conns[0], pool.keep(io, .{ .h1 = &conns[2] }).?.h1);
-    try testing.expectEqual(null, pool.keep(io, .{ .h1 = &conns[3] }));
+    try testing.expectEqual(&conns[0], pool.keep(io, .{ .h1 = &conns[2] }).evicted.?.h1);
+    try testing.expectEqual(null, pool.keep(io, .{ .h1 = &conns[3] }).evicted);
     // The pool is full: its oldest of all goes.
-    try testing.expectEqual(&conns[1], pool.keep(io, .{ .h1 = &conns[4] }).?.h1);
+    try testing.expectEqual(&conns[1], pool.keep(io, .{ .h1 = &conns[4] }).evicted.?.h1);
     var waited = false;
     try testing.expectEqual(&conns[2], (try pool.acquire(io, routes[0], null, &waited)).idle.h1);
     try testing.expectEqual(Acquired.open, try pool.acquire(io, routes[0], null, &waited));
@@ -350,7 +353,7 @@ test "a pool that keeps nothing hands every connection back" {
     var pool: Pool = .init(testing.allocator, .{ .max_idle = 0 });
     defer pool.deinit();
     var conn = connWith(.{ .secure = false, .host = "a", .port = 80 });
-    try testing.expectEqual(&conn, pool.keep(io, .{ .h1 = &conn }).?.h1);
+    try testing.expectEqual(&conn, pool.keep(io, .{ .h1 = &conn }).evicted.?.h1);
 }
 
 test "a connection idle past its time is handed out to be closed, not used" {
@@ -361,16 +364,17 @@ test "a connection idle past its time is handed out to be closed, not used" {
     const route: Route = .{ .secure = false, .host = "a", .port = 80 };
     var a = connWith(route);
     var b = connWith(.{ .secure = false, .host = "b", .port = 80 });
-    _ = pool.keep(io, .{ .h1 = &a });
+    var c = connWith(.{ .secure = false, .host = "c", .port = 80 });
+    try testing.expectEqual(Kept{}, pool.keep(io, .{ .h1 = &a }));
     clock.advance(.fromSeconds(60));
-    _ = pool.keep(io, .{ .h1 = &b });
-    try testing.expectEqual(null, pool.expiredOldest(io));
+    try testing.expectEqual(Kept{}, pool.keep(io, .{ .h1 = &b }));
     clock.advance(.fromSeconds(30));
-    try testing.expectEqual(&a, pool.expiredOldest(io).?.h1);
-    try testing.expectEqual(null, pool.expiredOldest(io));
+    // Keeping another puts the expired oldest out.
+    try testing.expectEqual(&a, pool.keep(io, .{ .h1 = &c }).expired.?.h1);
     clock.advance(.fromSeconds(60));
     var waited = false;
     try testing.expectEqual(&b, (try pool.acquire(io, b.route, null, &waited)).expired.h1);
+    try testing.expectEqual(&c, (try pool.acquire(io, c.route, null, &waited)).idle.h1);
 }
 
 test "a full route makes exchanges wait in order, for a kept connection or for room" {
@@ -399,7 +403,7 @@ test "a full route makes exchanges wait in order, for a kept connection or for r
     // The connection comes back: the first waiter has it. Then it closes:
     // the second gets room for a new one.
     var conn = connWith(route);
-    try testing.expectEqual(null, pool.keep(io, .{ .h1 = &conn }));
+    try testing.expectEqual(Kept{}, pool.keep(io, .{ .h1 = &conn }));
     pool.closed(io, route);
     try group.await(io);
     try testing.expectEqual(&conn, (try first).idle.h1);

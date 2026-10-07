@@ -1,6 +1,6 @@
-//! Test-only: an HTTP/1.1 server on 127.0.0.1 that answers each request on
-//! a connection by a function of the request, and records what it saw.
-//! Every connection runs as a task of its own.
+//! Test-only: an HTTP/1.1 server on 127.0.0.1, or on a Unix socket, that
+//! answers each request on a connection by a function of the request, and
+//! records what it saw. Every connection runs as a task of its own.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -12,6 +12,8 @@ io: Io,
 gpa: Allocator,
 listener: Io.net.Server,
 port: u16,
+/// The socket's path, for a server on a Unix socket.
+path: ?[]const u8 = null,
 handler: Handler,
 task: Io.Future(void) = undefined,
 group: Io.Group = .init,
@@ -29,6 +31,18 @@ pub const Handler = struct {
     context: ?*anyopaque = null,
     /// The answer to `request`, the head and its body as received.
     answer: *const fn (context: ?*anyopaque, request: Request) Answer,
+    /// What to do with a head that asks `Expect: 100-continue`, before its
+    /// body is read.
+    expect: Expect = .ignore,
+};
+
+pub const Expect = enum {
+    /// Read the body when it comes.
+    ignore,
+    /// Send `100 Continue`, then read the body.
+    go_ahead,
+    /// Answer `417 Expectation Failed` and close, the body never read.
+    refuse,
 };
 
 pub const Request = struct {
@@ -36,6 +50,8 @@ pub const Request = struct {
     body: []const u8,
     /// The request's place on its connection, from 0.
     index: u32,
+    /// The request's place among all the server answered, from 0.
+    number: u32,
 };
 
 pub const Answer = struct {
@@ -47,6 +63,10 @@ pub const Answer = struct {
     close: bool = false,
     /// Write the answer in pieces this long, flushing each.
     piece: usize = 0,
+    /// Wait this long before each piece after the first.
+    pause: Io.Duration = .zero,
+    /// After the answer, send back everything that arrives.
+    echo: bool = false,
 };
 
 /// An answer that does not depend on the request.
@@ -73,11 +93,28 @@ pub fn start(gpa: Allocator, io: Io, handler: Handler) !*Server {
     return s;
 }
 
+/// A server on the Unix socket at `path`, which must not exist.
+pub fn startUnix(gpa: Allocator, io: Io, path: []const u8, handler: Handler) !*Server {
+    const s = try gpa.create(Server);
+    errdefer gpa.destroy(s);
+    const address = try Io.net.UnixAddress.init(path);
+    var listener = try address.listen(io, .{});
+    errdefer listener.deinit(io);
+    s.* = .{ .io = io, .gpa = gpa, .listener = listener, .port = 0, .path = path, .handler = handler };
+    s.task = io.concurrent(serve, .{s}) catch return error.SkipZigTest;
+    return s;
+}
+
 pub fn stop(s: *Server) void {
     const io = s.io;
     s.stopping.store(true, .release);
-    const address = Io.net.IpAddress.parse("127.0.0.1", s.port) catch unreachable; // unreachable: a literal address
-    if (address.connect(io, .{ .mode = .stream })) |stream| stream.close(io) else |_| {}
+    if (s.path) |p| {
+        const address = Io.net.UnixAddress.init(p) catch unreachable; // unreachable: the server listened on it
+        if (address.connect(io)) |stream| stream.close(io) else |_| {}
+    } else {
+        const address = Io.net.IpAddress.parse("127.0.0.1", s.port) catch unreachable; // unreachable: a literal address
+        if (address.connect(io, .{ .mode = .stream })) |stream| stream.close(io) else |_| {}
+    }
     s.task.await(io);
     s.group.cancel(io);
     s.listener.deinit(io);
@@ -114,26 +151,52 @@ fn handle(s: *Server, stream: Io.net.Stream) void {
     var w = stream.writer(s.io, &write_buffer);
     var index: u32 = 0;
     while (true) : (index += 1) {
-        const request = readRequest(&r.interface) catch return;
+        const head_len = readHead(&r.interface) catch return;
+        const head = r.interface.buffered()[0..head_len];
+        if (headerValue(head, "expect") != null) switch (s.handler.expect) {
+            .ignore => {},
+            .go_ahead => {
+                w.interface.writeAll("HTTP/1.1 100 Continue\r\n\r\n") catch return;
+                w.interface.flush() catch return;
+            },
+            .refuse => {
+                s.record(head, "");
+                w.interface.writeAll("HTTP/1.1 417 Expectation Failed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n") catch return;
+                w.interface.flush() catch return;
+                return;
+            },
+        };
+        const request = readBody(&r.interface, head_len) catch return;
         s.record(request.head, request.body);
-        const answer = s.handler.answer(s.handler.context, .{ .head = request.head, .body = request.body, .index = index });
+        const number = s.requests.fetchAdd(1, .monotonic);
+        const answer = s.handler.answer(s.handler.context, .{ .head = request.head, .body = request.body, .index = index, .number = number });
         r.interface.toss(request.len);
-        _ = s.requests.fetchAdd(1, .monotonic);
         if (answer.silent) {
             while (true) r.interface.fillMore() catch return;
         }
-        writeAnswer(&w.interface, answer) catch return;
+        writeAnswer(s.io, &w.interface, answer) catch return;
+        if (answer.echo) return echo(&r.interface, &w.interface);
         if (answer.close) return;
     }
 }
 
-fn writeAnswer(w: *Io.Writer, answer: Answer) Io.Writer.Error!void {
+fn echo(r: *Io.Reader, w: *Io.Writer) void {
+    while (true) {
+        if (r.bufferedLen() == 0) r.fillMore() catch return;
+        w.writeAll(r.buffered()) catch return;
+        r.tossBuffered();
+        w.flush() catch return;
+    }
+}
+
+fn writeAnswer(io: Io, w: *Io.Writer, answer: Answer) !void {
     if (answer.piece == 0) {
         try w.writeAll(answer.bytes);
         return w.flush();
     }
     var at: usize = 0;
     while (at < answer.bytes.len) {
+        if (at != 0 and answer.pause.nanoseconds > 0) try io.sleep(answer.pause, .awake);
         const n = @min(answer.piece, answer.bytes.len - at);
         try w.writeAll(answer.bytes[at..][0..n]);
         try w.flush();
@@ -150,11 +213,16 @@ fn record(s: *Server, head: []const u8, body: []const u8) void {
 
 const Read = struct { head: []const u8, body: []const u8, len: usize };
 
+/// The length of the head at the start of `r`'s buffer, its blank line
+/// included, not taken.
+fn readHead(r: *Io.Reader) !usize {
+    while (std.mem.find(u8, r.buffered(), "\r\n\r\n") == null) try r.fillMore();
+    return std.mem.find(u8, r.buffered(), "\r\n\r\n").? + 4;
+}
+
 /// One whole request in `r`'s buffer, not taken: its head, and its body
 /// by `Content-Length` or chunks, decoded here crudely.
-fn readRequest(r: *Io.Reader) !Read {
-    while (std.mem.find(u8, r.buffered(), "\r\n\r\n") == null) try r.fillMore();
-    const head_len = std.mem.find(u8, r.buffered(), "\r\n\r\n").? + 4;
+fn readBody(r: *Io.Reader, head_len: usize) !Read {
     const head = r.buffered()[0..head_len];
     if (headerValue(head, "content-length")) |text| {
         const n = try std.fmt.parseUnsigned(usize, text, 10);
@@ -179,4 +247,11 @@ pub fn headerValue(head: []const u8, name: []const u8) ?[]const u8 {
         if (std.ascii.eqlIgnoreCase(line[0..colon], name)) return std.mem.trim(u8, line[colon + 1 ..], " \t");
     }
     return null;
+}
+
+/// The path of `head`'s request line.
+pub fn pathOf(head: []const u8) []const u8 {
+    const sp = std.mem.findScalar(u8, head, ' ') orelse return "";
+    const end = std.mem.findScalarPos(u8, head, sp + 1, ' ') orelse return "";
+    return head[sp + 1 .. end];
 }

@@ -490,8 +490,8 @@ fn startWatch(conn: *Connection, io: Io) void {
     conn.mode = if (conn.ctx.timer.add(io, &conn.watch)) .timer else .operate;
 }
 
-/// A deadline and which limit it is.
-const Limit = struct { at: Io.Timestamp, kind: Diagnostics.Timeout };
+/// A deadline, which limit it is, and the time it was found at.
+const Limit = struct { at: Io.Timestamp, kind: Diagnostics.Timeout, now: Io.Timestamp = .zero };
 
 /// The deadline of an operation starting now, or null when none applies,
 /// found without reading the clock.
@@ -504,6 +504,7 @@ fn operationLimit(conn: *Connection, io: Io) ?Limit {
     if (t.activity) |a| nearer(&best, .{ .at = now.addDuration(a), .kind = if (conn.handshake_until != null) .handshake else .activity });
     if (conn.deadline) |d| nearer(&best, .{ .at = d, .kind = .deadline });
     if (t.low_speed) |l| nearer(&best, .{ .at = conn.speed.deadline(now, l), .kind = .low_speed });
+    best.?.now = now;
     return best;
 }
 
@@ -517,7 +518,7 @@ fn perform(conn: *Connection, op: Io.Operation) error{Failed}!Io.Operation.Resul
     const io = conn.io;
     if (conn.mode == .unenforced) return io.operate(op) catch return conn.fail(.canceled);
     const limit = conn.operationLimit(io) orelse return io.operate(op) catch return conn.fail(.canceled);
-    if (limit.at.nanoseconds <= Io.Clock.awake.now(io).nanoseconds) {
+    if (limit.at.nanoseconds <= limit.now.nanoseconds) {
         conn.noteTimedOut(limit.kind);
         return error.Failed;
     }

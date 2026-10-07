@@ -296,7 +296,7 @@ fn exchange(run: *Run, io: Io, conn: *Connection, r: Context.Route) Error!Respon
 /// word. Null to send the body — a 100 came, or nothing came in time;
 /// else the server's final answer, sent before the body, which then is
 /// never sent and the connection never reused.
-fn awaitContinue(run: *Run, io: Io, conn: *Connection) Error!?Response {
+pub fn awaitContinue(run: *Run, io: Io, conn: *Connection) Error!?Response {
     if (!try conn.readable(io, run.client.options.expect_continue_timeout)) return null;
     var interim = try run.receive(io, conn, true);
     if (interim.status == .@"continue") {
@@ -420,6 +420,7 @@ pub fn writeHead(run: *Run, io: Io, conn: *Connection, r: Context.Route, framing
 /// else from the answers the client keeps for the origin; none when the
 /// caller wrote the field.
 fn writeAuthorization(run: *Run, io: Io, w: *Io.Writer) Io.Writer.Error!void {
+    if (run.request.auth == null and run.client.origin_auth.live.load(.acquire) == 0) return;
     if (named(run.request.headers, "authorization") and !run.left_origin) return;
     if (run.request.auth) |a| if (!run.left_origin) {
         try w.writeAll("Authorization: ");
@@ -594,14 +595,12 @@ fn followRedirect(run: *Run, io: Io, response: *Response) Error!bool {
     const code = @backingInt(response.status);
     const hop = policy.hop(code, run.method) orelse return false;
     const location = response.headers.getKnown(.location) orelse return false;
-    if (run.hops == follow.max) return error.TooManyRedirects;
     const resolved = try run.resolveLocation(io, location);
     var keep = true;
     defer if (keep) run.client.context.buffers.release(io, resolved.buffer);
     const next = url_mod.parse(resolved.text) catch return error.InvalidRedirect;
-    if (run.url.secure and !next.secure and !follow.allow_downgrade) return error.InsecureRedirect;
+    if (!try policy.mayFollow(follow, run.url, next, run.hops)) return false;
     const same = url_mod.sameOrigin(run.url, next);
-    if (follow.same_origin_only and !same) return false;
     if (hop.keep_body and !run.body.replayable()) {
         const empty = switch (run.body) {
             .reader => |rd| rd.length != null and rd.length.? == 0,

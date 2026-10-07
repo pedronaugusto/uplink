@@ -143,3 +143,34 @@ pub fn getaddrinfo(name: []const u8, port: u16, family: ?IpAddress.Family, out: 
     if (count == 0) return error.LookupFailed;
     return out[0..count];
 }
+
+const testing = std.testing;
+
+/// A socket option's value, read back; null where this test cannot read
+/// one.
+fn readOption(handle: Io.net.Socket.Handle, level: i32, name: u32) ?c_int {
+    var value: c_int = 0;
+    var len: std.posix.socklen_t = @sizeOf(c_int);
+    if (builtin.link_libc) {
+        if (std.c.getsockopt(handle, level, name, &value, &len) != 0) return null;
+    } else if (os == .linux) {
+        const rc = std.os.linux.getsockopt(handle, level, name, @ptrCast(&value), &len); // safe: the option is a c_int, its bytes the buffer
+        if (std.os.linux.errno(rc) != .SUCCESS) return null;
+    } else return null;
+    return value;
+}
+
+test "a tuned socket has Nagle's algorithm off and keepalive on at the idle time asked" {
+    if (os == .windows or os == .wasi) return error.SkipZigTest;
+    const io = testing.io;
+    var listener = try (try IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    const stream = try listener.socket.address.connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    const h = stream.socket.handle;
+    tune(io, h, .{ .keepalive = .fromSeconds(45) });
+    try testing.expect((readOption(h, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY) orelse return error.SkipZigTest) != 0);
+    try testing.expect(readOption(h, std.posix.SOL.SOCKET, std.posix.SO.KEEPALIVE).? != 0);
+    const idle_name: ?u32 = if (@hasDecl(std.posix.TCP, "KEEPIDLE")) std.posix.TCP.KEEPIDLE else if (@hasDecl(std.posix.TCP, "KEEPALIVE")) std.posix.TCP.KEEPALIVE else null;
+    if (idle_name) |name| try testing.expectEqual(@as(?c_int, 45), readOption(h, std.posix.IPPROTO.TCP, name));
+}

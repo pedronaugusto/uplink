@@ -5,6 +5,7 @@
 const std = @import("std");
 const Io = std.Io;
 const date = @import("../wire/date.zig");
+const url_mod = @import("../wire/url.zig");
 const Method = @import("../wire/Method.zig");
 
 /// Which redirects are followed.
@@ -27,6 +28,19 @@ pub const Redirects = union(enum) {
     /// The default: follow up to ten, never from `https` to `http`.
     pub const default: Redirects = .{ .follow = .{} };
 };
+
+/// Errors a redirect raises.
+pub const RedirectError = error{ TooManyRedirects, InsecureRedirect };
+
+/// Whether a redirect from `from` to `to` is followed, `hops` having been
+/// followed already: an error ends the request, and false hands the 3xx to
+/// the caller.
+pub fn mayFollow(follow: Redirects.Follow, from: url_mod.Url, to: url_mod.Url, hops: u8) RedirectError!bool {
+    if (hops >= follow.max) return error.TooManyRedirects;
+    if (from.secure and !to.secure and !follow.allow_downgrade) return error.InsecureRedirect;
+    if (follow.same_origin_only and !url_mod.sameOrigin(from, to)) return false;
+    return true;
+}
 
 /// What follows a redirect status (RFC 9110 §15.4): the method to use
 /// and whether the body goes with it. 301 and 302 turn a POST into a GET
@@ -121,6 +135,19 @@ test "redirects change the method as RFC 9110 and every browser do" {
     try testing.expect(hop(308, .POST).?.method.eql(.POST));
     try testing.expectEqual(null, hop(304, .GET));
     try testing.expectEqual(null, hop(300, .GET));
+}
+
+test "a redirect is refused past its count, from https to http, and off its origin when asked" {
+    const a = try url_mod.parse("https://a.test/");
+    const plain = try url_mod.parse("http://a.test/");
+    const other = try url_mod.parse("https://b.test/");
+    try testing.expect(try mayFollow(.{}, a, other, 9));
+    try testing.expectError(error.TooManyRedirects, mayFollow(.{}, a, other, 10));
+    try testing.expectError(error.InsecureRedirect, mayFollow(.{}, a, plain, 0));
+    try testing.expect(try mayFollow(.{ .allow_downgrade = true }, a, plain, 0));
+    try testing.expect(try mayFollow(.{}, plain, a, 0));
+    try testing.expect(!try mayFollow(.{ .same_origin_only = true }, a, other, 0));
+    try testing.expectError(error.TooManyRedirects, mayFollow(.{ .max = 0 }, a, a, 0));
 }
 
 test "backoff grows from its base to its cap, at random below each" {

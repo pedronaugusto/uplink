@@ -27,10 +27,14 @@ conn: ?*Connection,
 /// Private: the body writer's buffer, from the pool.
 buffer: []u8,
 body: Writer,
+/// Private: the server's answer before the body, which it refused.
+early: ?Response = null,
 
 const Writer = union(enum) {
     length: h1.LengthWriter,
     chunked: h1.ChunkedWriter,
+    /// The server answered before the body: it goes nowhere.
+    dropped: Io.Writer.Discarding,
 };
 
 /// Errors from `finish`.
@@ -83,17 +87,29 @@ pub fn init(run: Run, conn: *Connection, buffer: []u8, length: ?u64) Outgoing {
     };
 }
 
+/// A request the server answered before its body: what is written is
+/// dropped, and `finish` returns `response`.
+pub fn refused(run: Run, response: Response, buffer: []u8) Outgoing {
+    return .{ .run = run, .conn = null, .buffer = buffer, .body = .{ .dropped = .init(buffer) }, .early = response };
+}
+
 /// Where the body is written. Writing past a declared length fails, and
 /// `finish` then says `BodyTooLong`.
 pub fn writer(o: *Outgoing) *Io.Writer {
     return switch (o.body) {
-        inline else => |*w| &w.interface,
+        .length => |*w| &w.interface,
+        .chunked => |*w| &w.interface,
+        .dropped => |*d| &d.writer,
     };
 }
 
 /// End the body, read the response, and follow the policy. On success the
 /// connection belongs to the response.
 pub fn finish(o: *Outgoing, io: Io) FinishError!Response {
+    if (o.early) |answer| {
+        o.early = null;
+        return o.run.complete(io, answer);
+    }
     const conn = o.conn orelse return error.ExchangeOver;
     conn.io = io;
     if (o.run.request.diagnostics) |d| d.stage = .write;
@@ -104,6 +120,7 @@ pub fn finish(o: *Outgoing, io: Io) FinishError!Response {
             if (lw.remaining != 0) return error.BodyIncomplete;
         },
         .chunked => |*cw| cw.end() catch return conn.writeError(),
+        .dropped => unreachable, // unreachable: a dropped body has its answer in `early`, taken above
     }
     conn.flush() catch return conn.writeError();
     const c = o.run.client;
@@ -129,6 +146,7 @@ fn writeFailed(o: *Outgoing, conn: *Connection) FinishError {
 pub fn deinit(o: *Outgoing, io: Io) void {
     const c = o.run.client;
     if (o.conn) |conn| Response.release(io, &c.context, &c.pool, conn, false);
+    if (o.early) |*answer| answer.deinit(io);
     c.context.buffers.release(io, o.buffer);
     o.run.deinit(io);
     o.* = undefined;

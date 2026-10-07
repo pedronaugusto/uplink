@@ -74,9 +74,12 @@ pub fn send(c: *Client, io: Io, request: Request) SendError!Response {
 }
 
 /// Start a request whose body the caller writes: the request's body must
-/// be `.streamed`, or `.none` for chunks. The head goes out with the body;
-/// `Outgoing.finish` reads the response and follows the policy, though no
-/// redirect or retry can send a body the caller streamed again.
+/// be `.streamed`, or `.none` for chunks. The head goes out with the body,
+/// or, with `expect_continue`, before it, waiting for the go-ahead: a
+/// server that answers instead has the body dropped as it is written, and
+/// its answer is `finish`'s. `Outgoing.finish` reads the response and
+/// follows the policy, though no redirect or retry can send a body the
+/// caller streamed again.
 pub fn begin(c: *Client, io: Io, request: Request) SendError!Outgoing {
     const length: ?u64 = switch (request.body) {
         .streamed => |s| s.length,
@@ -95,9 +98,14 @@ pub fn begin(c: *Client, io: Io, request: Request) SendError!Outgoing {
     try run.prepareAttempt(io);
     if (request.diagnostics) |d| d.stage = .write;
     run.sent = true;
-    run.writeHead(io, lease.conn, r, if (length) |n| .{ .length = n } else .chunked, false) catch
+    const expect = request.expect_continue and (length orelse 1) != 0;
+    run.writeHead(io, lease.conn, r, if (length) |n| .{ .length = n } else .chunked, expect) catch
         return lease.conn.writeError();
     if (lease.reused) _ = s.context.counters.reused.fetchAdd(1, .monotonic);
+    if (expect) {
+        lease.conn.flush() catch return lease.conn.writeError();
+        if (try run.awaitContinue(io, lease.conn)) |refused| return .refused(run, refused, buffer);
+    }
     return .init(run, lease.conn, buffer, length);
 }
 

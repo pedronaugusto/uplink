@@ -234,11 +234,9 @@ pub fn release(io: Io, ctx: *Context, pool: *Pool, conn: *Connection, reusable: 
     _ = ctx.counters.in_use.fetchSub(1, .monotonic);
     if (!reusable) return closeConnection(io, pool, conn);
     conn.park(io);
-    if (pool.keep(io, .{ .h1 = conn })) |evicted| switch (evicted) {
+    const kept = pool.keep(io, .{ .h1 = conn });
+    for ([_]?Pool.Kind{ kept.evicted, kept.expired }) |out| if (out) |k| switch (k) {
         .h1 => |old| closeConnection(io, pool, old),
-    };
-    while (pool.expiredOldest(io)) |old| switch (old) {
-        .h1 => |c| closeConnection(io, pool, c),
     };
 }
 
