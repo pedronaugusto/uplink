@@ -89,13 +89,14 @@ pub const Known = enum(u8) {
     vary,
     @"www-authenticate",
 
-    /// The known name `name` is, compared without case, or null.
+    /// The known name `name` is, compared without case, or null: one
+    /// switch on the length and the first letter, then one compare.
     pub fn of(name: []const u8) ?Known {
         if (name.len < 2 or name.len > longest) return null;
-        // One candidate per first letter and length, then one compare.
+        const first = name[0] | 0x20;
         inline for (comptime std.enums.values(Known)) |k| {
             const text = @tagName(k);
-            if (name.len == text.len and (name[0] | 0x20) == text[0] and eqlLower(name, text)) return k;
+            if (name.len == text.len and first == text[0] and eqlLower(name[1..], text[1..])) return k;
         }
         return null;
     }
