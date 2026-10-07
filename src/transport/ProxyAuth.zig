@@ -94,7 +94,12 @@ pub fn challenged(pa: *ProxyAuth, gpa: Allocator, io: Io, credential: ?Proxy.Cre
         return true;
     }
     switch (auth.pick(challenges.items, c.method, offered)) {
-        .digest => |ch| pa.answer = .{ .digest = try .init(gpa, ch, &cnonce(io)) },
+        .digest => |ch| {
+            // Made apart and then stored: `answer` keeps its old value when
+            // the copies cannot be made.
+            const digest: auth.Digest = try .init(gpa, ch, &cnonce(io));
+            pa.answer = .{ .digest = digest };
+        },
         .basic => pa.answer = .basic,
         .unsupported => return error.ProxyAuthMethodUnsupported,
     }
