@@ -163,13 +163,15 @@ pub fn begin(c: *Client, io: Io, request: Request) SendError!Outgoing {
     errdefer c.context.buffers.release(io, buffer);
     c.writeHead(io, lease.conn, request, url, if (length) |n| .{ .length = n } else .chunked) catch
         return lease.conn.writeError();
+    if (lease.reused) _ = c.context.counters.reused.fetchAdd(1, .monotonic);
     return .init(&c.context, &c.pool, lease.conn, buffer, request.method, length, c.options.limits, c.options.decompress, request.diagnostics);
 }
 
 /// What a client has done, read without a lock.
 pub const Stats = struct {
     connections_opened: u64,
-    /// Exchanges that went over a kept connection.
+    /// Exchanges that went over a kept connection: a stale one replaced
+    /// by a new connection does not count.
     reused: u64,
     idle: u32,
     in_use: u32,
@@ -234,7 +236,6 @@ fn acquire(c: *Client, io: Io, route: Context.Route, diagnostics: ?*Diagnostics)
             conn.close(io);
             continue;
         }
-        _ = c.context.counters.reused.fetchAdd(1, .monotonic);
         _ = c.context.counters.in_use.fetchAdd(1, .monotonic);
         return .{ .conn = conn, .reused = true };
     }
@@ -267,6 +268,7 @@ fn exchange(c: *Client, io: Io, request: Request, url: url_mod.Url) SendError!Re
             }
             return err;
         };
+        if (lease.reused) _ = c.context.counters.reused.fetchAdd(1, .monotonic);
         return response;
     }
 }

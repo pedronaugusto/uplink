@@ -43,8 +43,8 @@ pub fn lookup(io: Io, host: []const u8, port: u16, family: ?IpAddress.Family, ou
     var buffer: [max_addresses]Io.net.HostName.LookupResult = undefined;
     var queue: Io.Queue(Io.net.HostName.LookupResult) = .init(&buffer);
     var future = io.concurrent(Io.net.HostName.lookup, .{ name, io, &queue, .{ .port = port, .family = family } }) catch {
-        if (!sys.own_lookup) return error.ConcurrencyUnavailable;
-        return sys.getaddrinfo(host, port, family, out) catch error.NameNotResolved;
+        if (sys.own_lookup) return sys.getaddrinfo(host, port, family, out) catch error.NameNotResolved;
+        return error.ConcurrencyUnavailable;
     };
     defer future.cancel(io) catch {};
     var count: usize = 0;
