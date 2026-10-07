@@ -44,6 +44,31 @@ fn setAfd(io: Io, handle: Io.net.Socket.Handle, level: i32, name: u32) void {
     _ = io.operate(operation) catch {};
 }
 
+/// End every operation under way on a socket, from another task: on POSIX
+/// a shutdown of both directions, which wakes a blocked `recvmsg` or
+/// `sendmsg`; on Windows an abortive disconnect, since AFD's graceful one
+/// leaves a pending receive waiting for the peer. The socket is not
+/// closed; its owner closes it. A refusal means it is ended already.
+pub fn abort(io: Io, handle: Io.net.Socket.Handle) void {
+    if (os == .windows) {
+        const windows = std.os.windows;
+        const info: windows.AFD.PARTIAL_DISCONNECT_INFO = .{
+            .DisconnectMode = .{ .SEND = true, .RECEIVE = true, .ABORTIVE = true },
+            .Timeout = -1,
+        };
+        const operation: Io.Operation = .{ .device_io_control = .{
+            .file = .{ .handle = handle, .flags = .{ .nonblocking = false } },
+            .code = windows.IOCTL.AFD.PARTIAL_DISCONNECT,
+            .in = std.mem.asBytes(&info),
+        } };
+        // ziglint-ignore: Z026 a socket that cannot be disconnected is ended already, which is what this asks
+        _ = io.operate(operation) catch {};
+        return;
+    }
+    // ziglint-ignore: Z026 a socket that cannot be shut down is ended already, which is what this asks
+    io.vtable.netShutdown(io.userdata, handle, .both) catch {};
+}
+
 /// Whether this target has a name lookup that runs on the caller's own
 /// task: libc's `getaddrinfo`.
 pub const own_lookup = builtin.link_libc and os != .windows;

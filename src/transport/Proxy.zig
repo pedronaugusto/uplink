@@ -8,6 +8,7 @@
 //! default port, and in what `no_proxy` can name.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const IpAddress = Io.net.IpAddress;
@@ -357,10 +358,13 @@ test "curl's environment: lower-case http_proxy only, https's own list, no_proxy
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    // Windows names its variables without case: there `HTTP_PROXY` is
+    // `http_proxy`, for curl too, and `NO_PROXY` is `no_proxy`.
+    const cased = builtin.target.os.tag != .windows;
     var env: std.process.Environ.Map = .init(testing.allocator);
     defer env.deinit();
     try env.put("HTTP_PROXY", "http://upper:1");
-    try testing.expectEqual(null, try fromEnvironment(a, &env, "http://git.example/x", .curl));
+    if (cased) try testing.expectEqual(null, try fromEnvironment(a, &env, "http://git.example/x", .curl));
     try testing.expectEqualStrings("upper", (try fromEnvironment(a, &env, "http://git.example/x", .go)).?.host);
     try env.put("http_proxy", "http://lower:2");
     try env.put("HTTPS_PROXY", "http://secure:3");
@@ -370,7 +374,7 @@ test "curl's environment: lower-case http_proxy only, https's own list, no_proxy
     try env.put("no_proxy", ".example");
     try testing.expectEqual(null, try fromEnvironment(a, &env, "https://git.example/x", .curl));
     // Go reads NO_PROXY first, which does not name git.example.
-    try testing.expect((try fromEnvironment(a, &env, "https://git.example/x", .go)) != null);
+    if (cased) try testing.expect((try fromEnvironment(a, &env, "https://git.example/x", .go)) != null);
     try testing.expectEqual(null, try fromEnvironment(a, &env, "http://localhost:8080/", .go));
     try testing.expectError(error.InvalidUrl, fromEnvironment(a, &env, "ftp://x/", .curl));
 }

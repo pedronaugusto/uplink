@@ -5,9 +5,10 @@
 //! POSIX a timed write waits only for the socket to take bytes, then blocks
 //! in `sendmsg` for as long as the peer leaves its window shut. So a
 //! connection with a timeout stores the deadline of the operation it is in
-//! — an atomic store, no lock — and this task shuts the socket of any
-//! operation past its deadline, which ends the operation with the error a
-//! closed socket gives. The connection then reports `TimedOut`.
+//! — an atomic store, no lock — and this task ends any operation past its
+//! deadline by shutting its socket down (an abortive disconnect on Windows,
+//! where a graceful one leaves a pending receive waiting for the peer). The
+//! connection then reports `TimedOut`.
 //!
 //! It ticks while operations are armed, at a tenth of the shortest timeout,
 //! and parks when none has been for a tick, so an idle client costs no
@@ -15,6 +16,8 @@
 
 const std = @import("std");
 const Io = std.Io;
+
+const sys = @import("../net/sys.zig");
 
 const Timer = @This();
 
@@ -121,8 +124,7 @@ fn scan(t: *Timer, io: Io) void {
         const deadline = w.deadline.load(.acquire);
         if (deadline == 0 or now < deadline or w.fired.load(.acquire)) continue;
         w.fired.store(true, .release);
-        // ziglint-ignore: Z026 a socket that cannot be shut down is already closed, which ends the operation too
-        io.vtable.netShutdown(io.userdata, w.handle, .both) catch {};
+        sys.abort(io, w.handle);
     }
 }
 
