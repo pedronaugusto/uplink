@@ -1,0 +1,41 @@
+{
+  "sources": [
+    "src"
+  ],
+  "test_roots": [
+    "src/tests.zig"
+  ],
+  "test_support": [
+    "src/testing/**"
+  ],
+  "function_exceptions": {},
+  "layout_exceptions": {},
+  "docs": {
+    "zig build docs -- usage": {
+      "source": "examples/usage.zig",
+      "region": "usage",
+      "imports": [
+        "uplink"
+      ]
+    }
+  },
+  "ziglint_exceptions": "ci/ziglint-exceptions.json",
+  "vendored": {
+    "src/tls/Client.zig": "Zig standard-library TLS client fork, held byte for byte to std and its recorded diff by src/testing/tls_fork.zig and zig build check-tls-fork."
+  },
+  "extra_checks": [
+    [
+      "zig",
+      "build",
+      "check-tls-fork"
+    ],
+    [
+      "zig",
+      "build",
+      "check-consumer"
+    ]
+  ],
+  "unreachable_exceptions": "ci/unreachable-exceptions.json",
+  "debug_print_exceptions": "ci/debug-print-exceptions.json",
+  "file_name_exceptions": "ci/file-name-exceptions.json"
+}

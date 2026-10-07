@@ -1,0 +1,14 @@
+{
+  "package": "uplink",
+  "compile_step": "check",
+  "targets": [
+    "x86_64-linux-gnu",
+    "aarch64-linux-gnu",
+    "x86_64-linux-musl",
+    "x86_64-windows-gnu",
+    "aarch64-windows-gnu",
+    "x86_64-macos",
+    "aarch64-macos"
+  ],
+  "compile_once": true
+}

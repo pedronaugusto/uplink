@@ -1,0 +1,29 @@
+.{
+    .name = .uplink,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.17.0",
+    .fingerprint = 0x4179bf32652e5d1,
+    // What a consumer fetches: the module and its documents. The tests,
+    // benchmarks, examples and CI stay in the repository, behind build.zig's
+    // own-tree guard.
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "CHANGELOG.md",
+        "LICENSE",
+        "README.md",
+    },
+    .dependencies = .{
+        .preflight = .{
+            .url = "git+https://github.com/pedronaugusto/preflight#f6a5191c42d8de76ab758465bf897e7acee931d9",
+            .hash = "preflight-0.1.0-LX1Zwv2WBQABkEzFUf5-MzYCtr0SSYHZrV097Vir7DYQ",
+            .lazy = true,
+        },
+        .shakedown = .{
+            .url = "git+https://github.com/pedronaugusto/shakedown#48e5a51cb0b334fe99e0f81525dd6cba75f5b0c0",
+            .hash = "shakedown-0.1.0-BR8U432ZAwDPQfrUew5ZcP0eeNKMD8rDQPt2jjgF_zRh",
+            .lazy = true,
+        },
+    },
+}
