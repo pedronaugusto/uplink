@@ -108,8 +108,10 @@ pub const Pki = struct {
     }
 };
 
-/// `PATH`, and on Windows what a process needs to start and where Git for
-/// Windows keeps its `openssl.exe`.
+/// `PATH`, with OpenSSL 3's own directory first where a package manager
+/// keeps it apart from the system's LibreSSL (macOS), and on Windows what a
+/// process needs to start and where Git for Windows keeps its
+/// `openssl.exe`.
 fn environ(gpa: Allocator) !std.process.Environ.Map {
     var map: std.process.Environ.Map = .init(gpa);
     errdefer map.deinit();
@@ -124,6 +126,10 @@ fn environ(gpa: Allocator) !std.process.Environ.Map {
             defer gpa.free(value);
             try map.put(name, value);
         }
+    } else if (builtin.target.os.tag == .macos) {
+        const with_brew = try std.mem.concat(gpa, u8, &.{ "/opt/homebrew/opt/openssl@3/bin:/usr/local/opt/openssl@3/bin:", path });
+        defer gpa.free(with_brew);
+        try map.put("PATH", with_brew);
     } else try map.put("PATH", path);
     return map;
 }

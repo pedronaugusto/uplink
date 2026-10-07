@@ -1,0 +1,58 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: fast, merge (the candidate for main) or release (before a cut, or after threading or platform work)
+        type: choice
+        options: [fast, merge, release]
+        default: fast
+      adopt:
+        description: Initialize absent source ledgers from findings already on main
+        type: boolean
+        default: false
+  pull_request:
+  merge_group:
+concurrency:
+  # Main status runs must not share the replaceable branch queue.
+  group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('main-status-{0}', github.run_id) || github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+permissions:
+  contents: read
+  actions: read
+jobs:
+  skip:
+    if: github.event_name != 'push'
+    uses: pedronaugusto/preflight/.github/workflows/skip.yml@f6a5191c42d8de76ab758465bf897e7acee931d9
+    with:
+      tier: ${{ github.event_name == 'workflow_dispatch' && inputs.tier || 'merge' }}
+      preflight-ref: f6a5191c42d8de76ab758465bf897e7acee931d9
+  gate:
+    needs: skip
+    if: always() && (github.event_name == 'push' || (needs.skip.result == 'success' && needs.skip.outputs.docs-only != 'true'))
+    uses: pedronaugusto/preflight/.github/workflows/zig.yml@f6a5191c42d8de76ab758465bf897e7acee931d9
+    with:
+      preflight-ref: f6a5191c42d8de76ab758465bf897e7acee931d9
+      tier: ${{ github.event_name == 'workflow_dispatch' && inputs.tier || 'merge' }}
+      adopt: ${{ github.event_name == 'workflow_dispatch' && inputs.adopt }}
+      attest: ${{ github.event_name == 'push' }}
+      # Generated from ci/workflow.json with zig build plan -- --tier fast.
+      fast-matrix: >-
+        {"include":[{"os":"ubuntu-latest","name":"Linux Debug","step":"preflight-fast","args":"-Doptimize=debug","shard":"","setup":true,"job_timeout":20,"cache_key":"fast-linux-debug-0","artifact":""}]}
+      # Generated with zig build plan -- --tier merge.
+      merge-matrix: >-
+        {"include":[{"os":"ubuntu-latest","name":"Linux Debug","step":"preflight-fast","args":"-Doptimize=debug -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"fast-linux-debug-0","artifact":""}]}
+      merge-compile-matrix: >-
+        {"include":[{"os":"ubuntu-latest","name":"compile for test (macos-latest, Debug)","step":"ci-build","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true -Dtarget=aarch64-macos","shard":"","setup":false,"job_timeout":20,"cache_key":"compile-ebda036faf315e75","artifact":"preflight-ebda036faf315e75"},{"os":"ubuntu-latest","name":"compile for test (windows-latest, Debug)","step":"ci-build","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true -Dtarget=x86_64-windows-gnu","shard":"","setup":false,"job_timeout":20,"cache_key":"compile-03c230abe180e8e9","artifact":"preflight-03c230abe180e8e9"}]}
+      merge-run-matrix: >-
+        {"include":[{"os":"macos-latest","name":"test (macos-latest, Debug)","step":"ci-run","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"ebda036faf315e75","artifact":"preflight-ebda036faf315e75"},{"os":"windows-latest","name":"test (windows-latest, Debug)","step":"ci-run","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"03c230abe180e8e9","artifact":"preflight-03c230abe180e8e9"}]}
+      # Generated with zig build plan -- --tier release.
+      release-matrix: >-
+        {"include":[{"os":"ubuntu-latest","name":"test (ubuntu-latest, Debug)","step":"ci","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"64526a725a6be397","artifact":""},{"os":"ubuntu-latest","name":"test (ubuntu-latest, ReleaseSafe)","step":"ci","args":"-Doptimize=safe -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"929001d8bf20c626","artifact":""},{"os":"ubuntu-latest","name":"test (ubuntu-latest, ReleaseFast)","step":"ci","args":"-Doptimize=fast -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"ff4d0a7dbdf6570c","artifact":""},{"os":"ubuntu-latest","name":"source checks and documented snippets","step":"lint","args":"","shard":"","setup":false,"job_timeout":20,"cache_key":"f8fb09ced14d6cbf","artifact":""},{"os":"ubuntu-latest","name":"compile (ReleaseSmall)","step":"check","args":"-Doptimize=small","shard":"","setup":false,"job_timeout":20,"cache_key":"6efd70ffd2ace30e","artifact":""},{"os":"ubuntu-latest","name":"cross (all configured targets)","step":"preflight-cross","args":"","shard":"","setup":false,"job_timeout":20,"cache_key":"31829ac6da603806","artifact":""}]}
+      release-compile-matrix: >-
+        {"include":[{"os":"ubuntu-latest","name":"compile for test (macos-latest, Debug)","step":"ci-build","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true -Dtarget=aarch64-macos","shard":"","setup":false,"job_timeout":20,"cache_key":"compile-ebda036faf315e75","artifact":"preflight-ebda036faf315e75"},{"os":"ubuntu-latest","name":"compile for test (macos-latest, ReleaseSafe)","step":"ci-build","args":"-Doptimize=safe -Dci-lint=false -Dci-timings=true -Dtarget=aarch64-macos","shard":"","setup":false,"job_timeout":20,"cache_key":"compile-b231e36a5f15deb2","artifact":"preflight-b231e36a5f15deb2"},{"os":"ubuntu-latest","name":"compile for test (windows-latest, Debug)","step":"ci-build","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true -Dtarget=x86_64-windows-gnu","shard":"","setup":false,"job_timeout":20,"cache_key":"compile-03c230abe180e8e9","artifact":"preflight-03c230abe180e8e9"},{"os":"ubuntu-latest","name":"compile for test (windows-latest, ReleaseSafe)","step":"ci-build","args":"-Doptimize=safe -Dci-lint=false -Dci-timings=true -Dtarget=x86_64-windows-gnu","shard":"","setup":false,"job_timeout":20,"cache_key":"compile-79f6a6b2846d7f58","artifact":"preflight-79f6a6b2846d7f58"}]}
+      release-run-matrix: >-
+        {"include":[{"os":"macos-latest","name":"test (macos-latest, Debug)","step":"ci-run","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"ebda036faf315e75","artifact":"preflight-ebda036faf315e75"},{"os":"macos-latest","name":"test (macos-latest, ReleaseSafe)","step":"ci-run","args":"-Doptimize=safe -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"b231e36a5f15deb2","artifact":"preflight-b231e36a5f15deb2"},{"os":"windows-latest","name":"test (windows-latest, Debug)","step":"ci-run","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"03c230abe180e8e9","artifact":"preflight-03c230abe180e8e9"},{"os":"windows-latest","name":"test (windows-latest, ReleaseSafe)","step":"ci-run","args":"-Doptimize=safe -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"79f6a6b2846d7f58","artifact":"preflight-79f6a6b2846d7f58"}]}
+      compile-once: true

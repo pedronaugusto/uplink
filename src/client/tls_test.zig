@@ -13,6 +13,7 @@ const Diagnostics = @import("../transport/Diagnostics.zig");
 const Proxy = @import("../transport/Proxy.zig");
 const openssl = @import("../testing/openssl.zig");
 const TestProxy = @import("../testing/Proxy.zig");
+const Server = @import("../testing/Server.zig");
 
 /// `GET /` over TLS to `port`: the status page, in `gpa`.
 fn fetch(gpa: Allocator, io: Io, client: *Client, port: u16, diagnostics: ?*Diagnostics) ![]u8 {
@@ -212,4 +213,35 @@ test "TLS to the server runs inside a CONNECT tunnel and inside SOCKS" {
         defer gpa.free(log);
         try testing.expect(std.mem.find(u8, log, "127.0.0.1:") != null);
     }
+}
+
+test "a handshake that does not come is given up on at the handshake timeout" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const server = try Server.start(gpa, io, Server.fixedAnswer(.{ .silent = true }));
+    defer server.stop();
+    var client: Client = .init(gpa, .{ .tls = .{ .verify = .none }, .timeouts = .{ .handshake = .fromMilliseconds(100) } });
+    defer client.deinit(io);
+    var diagnostics: Diagnostics = .{};
+    try testing.expectError(error.TimedOut, fetch(gpa, io, &client, server.port, &diagnostics));
+    try testing.expectEqual(Diagnostics.Timeout.handshake, diagnostics.timeout.?);
+    try testing.expectEqual(Diagnostics.Stage.tls, diagnostics.stage);
+    try testing.expectEqual(@as(u32, 0), client.stats().idle);
+}
+
+test "a session's secrets go to the key log the client was given, and nowhere else" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const pki = try openssl.Pki.make(gpa, io);
+    defer pki.destroy();
+    var server = try openssl.SServer.start(gpa, io, pki, .{ .version = "-tls1_3" });
+    defer server.stop(io);
+    var log: Io.Writer.Allocating = .init(gpa);
+    defer log.deinit();
+    var client: Client = .init(gpa, .{ .tls = .{ .verify = .none, .key_log = &log.writer } });
+    defer client.deinit(io);
+    const page = try fetch(gpa, io, &client, server.port, null);
+    gpa.free(page);
+    try testing.expect(std.mem.find(u8, log.written(), "CLIENT_HANDSHAKE_TRAFFIC_SECRET ") != null);
+    try testing.expect(std.mem.find(u8, log.written(), "CLIENT_TRAFFIC_SECRET_0 ") != null);
 }
