@@ -5,10 +5,15 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "wire grammar", .patterns = &.{
         "src/wire/fields.zig",
         "src/wire/version.zig",
+        "src/wire/date.zig",
+        "src/wire/form.zig",
+        "src/wire/sse.zig",
     } },
     .{ .name = "wire codecs", .patterns = &.{
         "src/wire/Method.zig",
         "src/wire/coding.zig",
+        "src/wire/cookie.zig",
+        "src/wire/multipart.zig",
         "src/wire/socks.zig",
         "src/wire/url.zig",
     } },

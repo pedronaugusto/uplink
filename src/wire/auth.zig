@@ -11,8 +11,9 @@
 //! own, with MD5, SHA-256 and SHA-512-256 and their `-sess` forms, `qop=auth`
 //! or none, and a hashed user name when the server asks for one. `auth-int`,
 //! which hashes the body too, is not answered; curl does not offer it for a
-//! proxy either. Negotiate and NTLM need a security library of the system's
-//! and are not spoken: `pick` names them unsupported.
+//! proxy either. Bearer (RFC 6750) answers with a token the caller holds.
+//! Negotiate and NTLM need a security library of the system's and are not
+//! spoken: `pick` names them unsupported.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -20,7 +21,7 @@ const Writer = std.Io.Writer;
 const fields = @import("fields.zig");
 
 /// A scheme a challenge names.
-pub const Scheme = enum { basic, digest, other };
+pub const Scheme = enum { basic, digest, bearer, other };
 
 /// One challenge: its scheme, and its parameters as written, quoted strings
 /// unescaped.
@@ -126,6 +127,8 @@ fn finish(arena: Allocator, name: []const u8, params: *std.ArrayList(Param)) All
         .basic
     else if (std.ascii.eqlIgnoreCase(name, "digest"))
         .digest
+    else if (std.ascii.eqlIgnoreCase(name, "bearer"))
+        .bearer
     else
         .other;
     const owned = try arena.dupe(Param, params.items);
@@ -192,6 +195,13 @@ pub fn writeBasic(w: *Writer, user: []const u8, password: []const u8) Writer.Err
         var out: [4]u8 = undefined;
         try w.writeAll(encoder.encode(&out, carry[0..carried]));
     }
+}
+
+/// Write `Bearer <token>`. The token must be a field value; a caller's
+/// token is checked before it gets here.
+pub fn writeBearer(w: *Writer, token: []const u8) Writer.Error!void {
+    try w.writeAll("Bearer ");
+    try w.writeAll(token);
 }
 
 /// A Digest answer's state, across the requests that use one nonce.
@@ -435,6 +445,18 @@ test "a Digest answer is RFC 7616's, for its worked examples" {
         try testing.expect(std.mem.find(u8, value, "nc=00000001, qop=auth") != null);
         try testing.expect(fields.isFieldValue(value));
     }
+}
+
+test "a Bearer challenge is named, and answered with the token as it is" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const list = try parse(arena.allocator(), "Bearer realm=\"api\", error=\"invalid_token\"");
+    try testing.expectEqual(Scheme.bearer, list[0].scheme);
+    try testing.expectEqualStrings("invalid_token", list[0].param("error").?);
+    var buf: [64]u8 = undefined;
+    var w: Writer = .fixed(&buf);
+    try writeBearer(&w, "mF_9.B5f-4.1JqM");
+    try testing.expectEqualStrings("Bearer mF_9.B5f-4.1JqM", w.buffered());
 }
 
 test "Digest state releases what it copied when allocation stops" {

@@ -13,8 +13,19 @@ pub const coding = @import("wire/coding.zig");
 pub const auth = @import("wire/auth.zig");
 /// SOCKS4, 4a, 5 and 5h CONNECT negotiation.
 pub const socks = @import("wire/socks.zig");
-/// The parts of an `http` or `https` URL a request is made from.
+/// The parts of an `http` or `https` URL a request is made from, and
+/// references resolved against one.
 pub const url = @import("wire/url.zig");
+/// HTTP dates: read in their three forms, written in one.
+pub const date = @import("wire/date.zig");
+/// `Set-Cookie` values, cookie dates, and the domain and path rules.
+pub const cookie = @import("wire/cookie.zig");
+/// Server-Sent Events, read and written.
+pub const sse = @import("wire/sse.zig");
+/// `application/x-www-form-urlencoded` bodies.
+pub const form = @import("wire/form.zig");
+/// `multipart/form-data` bodies, written.
+pub const multipart = @import("wire/multipart.zig");
 /// A request method: any token.
 pub const Method = @import("wire/Method.zig");
 /// The HTTP version a message was exchanged in.
@@ -28,4 +39,9 @@ test {
     _ = socks;
     _ = Method;
     _ = url;
+    _ = date;
+    _ = cookie;
+    _ = sse;
+    _ = form;
+    _ = multipart;
 }
