@@ -10,6 +10,10 @@ pub fn main() void {
     _ = &uplink.Client.begin;
     _ = &uplink.Response.collect;
     _ = &uplink.Proxy.fromEnvironment;
+    _ = &uplink.CookieJar.writeField;
+    _ = &uplink.Upgraded.close;
+    _ = &uplink.net.Resolver.Static.parseEntry;
+    _ = &uplink.wire.sse.Reader.next;
     _ = &uplink.tls.Trust.addSystem;
     _ = &uplink.wire.h1.parseResponse;
     _ = std;

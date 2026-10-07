@@ -33,4 +33,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `wire`: HTTP/1.1 heads parsed in place, strict on requests and lenient on
   responses; framing by RFC 9112 §6.3; a chunked decoder and writers; header
   fields and lists; content codings; authentication challenges; SOCKS; URLs.
-- `Diagnostics`: why an exchange failed, with no allocation.
+- `Diagnostics`: why an exchange failed, with no allocation, and how many
+  redirects and retries it took.
+- Redirects: `Redirects.follow` up to ten by default, the method and body
+  changed or kept by status as RFC 9110 has it, `https` to `http` refused
+  unless allowed, the caller's credentials and cookies dropped when the
+  origin changes; `Response.url` is where they led.
+- Retries: a connection that failed before any answer, when the request can
+  go again, and the statuses `Retries.statuses` names, after `Retry-After` or
+  a full-jitter backoff, within the request's deadline.
+- `Credentials`: answers to a server's 401, filled once per origin and sent
+  with every later request there as Basic, Digest or Bearer, with the store
+  told whether each was taken; `Request.auth` for credentials sent from the
+  first request.
+- `CookieJar`: cookies kept and sent by RFC 6265bis, with a public suffix
+  seam, and read from and written to the Netscape cookie file.
+- `Prepare`, a hook called before every attempt is written, and `Observer`,
+  told every step of every request with its timing.
+- Timeouts: `Request.timeout` over the whole request, its retries, redirects
+  and body reads included, and `Timeouts.low_speed`, curl's and git's low
+  speed limit.
+- Pool: `max_per_route` with first-come waiters bounded by the request's
+  deadline, `idle_timeout`, and `drain_limit`, the unread body read so its
+  connection is kept.
+- `Proxy.Choice.environment`: the environment's proxy chosen per request.
+- `net.Resolver`: the system's lookup, `Resolver.Static` (curl's
+  `--resolve`) and `Resolver.Cache`, which a client keeps by default;
+  addresses raced by Happy Eyeballs; `Dial.unix_socket`; TCP keepalive.
+- `Expect: 100-continue` for a body given or written; `Response.upgrade` for
+  a 101 or a `CONNECT`'s tunnel; `Response.trailers`; zstd bodies, with the
+  window capped by `max_zstd_window`.
+- `wire`: HTTP dates, `Set-Cookie` values and cookie dates, Server-Sent
+  Events read and written, form and multipart bodies, references resolved
+  against a URL, Bearer.
