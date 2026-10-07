@@ -5,10 +5,15 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "wire grammar", .patterns = &.{
         "src/wire/fields.zig",
         "src/wire/version.zig",
+        "src/wire/date.zig",
+        "src/wire/form.zig",
+        "src/wire/sse.zig",
     } },
     .{ .name = "wire codecs", .patterns = &.{
         "src/wire/Method.zig",
         "src/wire/coding.zig",
+        "src/wire/cookie.zig",
+        "src/wire/multipart.zig",
         "src/wire/socks.zig",
         "src/wire/url.zig",
     } },
@@ -48,6 +53,9 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "net lookup", .patterns = &.{
         "src/net/resolve.zig",
     } },
+    .{ .name = "net resolver", .patterns = &.{
+        "src/net/Resolver.zig",
+    } },
     .{ .name = "net dial", .patterns = &.{
         "src/net/dial.zig",
     } },
@@ -58,6 +66,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/transport/Proxy.zig",
         "src/transport/Diagnostics.zig",
         "src/transport/BufferPool.zig",
+        "src/transport/Observer.zig",
         "src/transport/Timer.zig",
     } },
     .{ .name = "transport shared", .patterns = &.{
@@ -77,16 +86,26 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/pool.zig",
     } },
     .{ .name = "client values", .patterns = &.{
-        "src/client/Request.zig",
+        "src/client/policy.zig",
+        "src/client/Credentials.zig",
+        "src/client/Prepare.zig",
         "src/client/Body.zig",
+    } },
+    .{ .name = "client request", .patterns = &.{
+        "src/client/Request.zig",
+        "src/client/CookieJar.zig",
+        "src/client/OriginAuth.zig",
+        "src/client/Upgraded.zig",
     } },
     .{ .name = "client response", .patterns = &.{
         "src/client/Response.zig",
     } },
-    .{ .name = "client outgoing", .patterns = &.{
-        "src/client/Outgoing.zig",
+    .{ .name = "client shared", .patterns = &.{
+        "src/client/Shared.zig",
     } },
-    .{ .name = "client", .patterns = &.{
+    .{ .name = "client exchange", .patterns = &.{
+        "src/client/Run.zig",
+        "src/client/Outgoing.zig",
         "src/client/Client.zig",
     } },
     .{ .name = "client namespace", .patterns = &.{

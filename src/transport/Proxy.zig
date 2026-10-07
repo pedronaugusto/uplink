@@ -141,6 +141,23 @@ pub const FromEnvironmentError = error{
     OutOfMemory,
 };
 
+/// Which proxy a client's requests go through.
+pub const Choice = union(enum) {
+    /// None: every connection goes straight to its server.
+    none,
+    /// This one, for every request.
+    fixed: Proxy,
+    /// The one the environment names for each request's URL, by curl's or
+    /// Go's rules (see `fromEnvironment`). The map must outlive the client,
+    /// which reads each variable once, at the first request that needs it.
+    environment: Environment,
+
+    pub const Environment = struct {
+        env: *const std.process.Environ.Map,
+        rules: Rules,
+    };
+};
+
 /// The proxy the environment chooses for `url`, or null: none is set, or
 /// `no_proxy` names the host. uplink never reads the process environment
 /// itself; the caller hands it in.
@@ -155,28 +172,37 @@ pub const FromEnvironmentError = error{
 ///   or a loopback address.
 pub fn fromEnvironment(arena: Allocator, env: *const std.process.Environ.Map, url: []const u8, rules: Rules) FromEnvironmentError!?Proxy {
     const target = url_mod.parse(url) catch return error.InvalidUrl;
-    const https = target.secure;
-    const host = target.host;
-    const port = target.port;
+    const value = environmentValue(env, target.secure, rules) orelse return null;
+    if (bypassed(noProxyValue(env, rules), target.host, target.port, rules)) return null;
+    const proxy = try parse(arena, value, rules);
+    return proxy;
+}
+
+/// The proxy setting the environment holds for `https` or `http` targets
+/// under `rules`, unparsed, or null.
+pub fn environmentValue(env: *const std.process.Environ.Map, https: bool, rules: Rules) ?[]const u8 {
     const names: []const []const u8 = switch (rules) {
         .curl => if (https) &.{ "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY" } else &.{ "http_proxy", "all_proxy", "ALL_PROXY" },
         .go => if (https) &.{ "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "all_proxy", "ALL_PROXY" } else &.{ "HTTP_PROXY", "http_proxy", "all_proxy", "ALL_PROXY" },
     };
-    const value = for (names) |name| {
+    for (names) |name| {
         const v = env.get(name) orelse continue;
-        if (v.len != 0) break v;
-    } else return null;
-    const no_proxy_names: [2][]const u8 = switch (rules) {
+        if (v.len != 0) return v;
+    }
+    return null;
+}
+
+/// The `no_proxy` list the environment holds under `rules`, or empty.
+pub fn noProxyValue(env: *const std.process.Environ.Map, rules: Rules) []const u8 {
+    const names: [2][]const u8 = switch (rules) {
         .curl => .{ "no_proxy", "NO_PROXY" },
         .go => .{ "NO_PROXY", "no_proxy" },
     };
-    const no_proxy = for (no_proxy_names) |name| {
+    for (names) |name| {
         const v = env.get(name) orelse continue;
-        if (v.len != 0) break v;
-    } else "";
-    if (bypassed(no_proxy, host, port, rules)) return null;
-    const proxy = try parse(arena, value, rules);
-    return proxy;
+        if (v.len != 0) return v;
+    }
+    return "";
 }
 
 /// Whether a request to `host` on `port` goes around the proxy, as a

@@ -235,6 +235,20 @@ fn unfold(bytes: []u8, field: *Field, line_start: usize, line: []const u8) Parse
     field.value = joined;
 }
 
+/// The fields of a chunked body's trailer section (RFC 9112 §7.1.2):
+/// `bytes` is the section as the decoder consumed it, its blank line
+/// included, read leniently as a response head is. Fields go into
+/// `fields`; a folded value is unfolded in `bytes`.
+pub fn parseTrailer(bytes: []u8, fields: []Field) ParseError!Headers {
+    if (findHeadEnd(bytes, 0) == null) {
+        // Only the blank line: no fields.
+        if (bytes.len <= 2) return .{};
+        return error.InvalidFieldName;
+    }
+    const n = try parseFields(bytes, 0, fields, .response);
+    return .init(fields[0..n]);
+}
+
 /// How a message's body is delimited.
 pub const Framing = union(enum) {
     /// No body.
@@ -373,7 +387,9 @@ pub const ChunkedDecoder = struct {
     pub const max_extension = 4 << 10;
     pub const max_trailer = 64 << 10;
 
-    const State = enum { size, size_space, extension, size_lf, data, data_cr, data_lf, trailer_start, trailer_line, end_lf, done };
+    /// The states `feed` stops at come last, so one compare per byte tells
+    /// it to go on.
+    const State = enum { size, size_space, extension, size_lf, data_cr, data_lf, trailer_line, end_lf, data, trailer_start, done };
 
     /// Why a chunked body is malformed.
     pub const Error = error{
@@ -391,12 +407,21 @@ pub const ChunkedDecoder = struct {
     /// and reports with `take`.
     pub const Step = struct { consumed: usize, data: usize };
 
-    /// Read framing bytes from `in` up to the next data or the end.
+    /// Read framing bytes from `in` up to the next data, a line of the
+    /// trailer section, or the end. Once `inTrailer` says so before a feed,
+    /// every byte it consumes is the trailer's, its closing blank line
+    /// included, for a caller that keeps trailers to gather.
     pub fn feed(d: *ChunkedDecoder, in: []const u8) Error!Step {
         var i: usize = 0;
         while (i < in.len) : (i += 1) {
-            if (d.state == .data) return .{ .consumed = i, .data = @min(d.remaining, in.len - i) };
-            if (d.state == .done) break;
+            if (@backingInt(d.state) >= @backingInt(State.data)) switch (d.state) {
+                .data => return .{ .consumed = i, .data = @min(d.remaining, in.len - i) },
+                .done => break,
+                // A line of the trailer section starts: stop before it, so
+                // the caller gathers the section from the next feed on.
+                .trailer_start => if (i != 0) return .{ .consumed = i, .data = 0 },
+                else => unreachable, // unreachable: only the states past `data` get here
+            };
             try d.byte(in[i]);
         }
         const data: usize = if (d.state == .data) @min(d.remaining, in.len - i) else 0;
@@ -422,6 +447,15 @@ pub const ChunkedDecoder = struct {
     /// Whether the last chunk and the trailer have been read.
     pub fn done(d: *const ChunkedDecoder) bool {
         return d.state == .done;
+    }
+
+    /// Whether the last chunk has been read and its trailer section, if
+    /// any, is being read.
+    pub fn inTrailer(d: *const ChunkedDecoder) bool {
+        return switch (d.state) {
+            .trailer_start, .trailer_line, .end_lf => true,
+            else => false,
+        };
     }
 
     fn byte(d: *ChunkedDecoder, c: u8) Error!void {
@@ -852,6 +886,32 @@ test "a chunked body decodes the same whether it comes whole or a byte at a time
         try testing.expectEqualStrings("Wikipedia in\r\n\r\nchunks.", out.items);
         try testing.expectEqualStrings("NEXT", body[used..]);
     }
+}
+
+test "the trailer section is handed over apart from the framing, and its fields read" {
+    const body = "3\r\nabc\r\n0\r\nChecksum: 1\r\nX-Fold: a\r\n b\r\n\r\nNEXT";
+    for ([_]usize{ 1, 4, body.len }) |piece| {
+        var d: ChunkedDecoder = .{};
+        var trailer: std.ArrayList(u8) = .empty;
+        defer trailer.deinit(testing.allocator);
+        var at: usize = 0;
+        while (!d.done()) {
+            const window = body[at..@min(body.len, at + piece)];
+            const was_trailer = d.inTrailer();
+            const step = try d.feed(window);
+            if (was_trailer) try trailer.appendSlice(testing.allocator, window[0..step.consumed]);
+            d.take(step.data);
+            at += step.consumed + step.data;
+        }
+        try testing.expectEqualStrings("NEXT", body[at..]);
+        var fields: [4]Field = undefined;
+        const t = try parseTrailer(trailer.items, &fields);
+        try testing.expectEqualStrings("1", t.get("checksum").?);
+        try testing.expectEqualStrings("a   b", t.get("x-fold").?);
+    }
+    var none = "\r\n".*;
+    var fields: [1]Field = undefined;
+    try testing.expectEqual(@as(usize, 0), (try parseTrailer(&none, &fields)).count());
 }
 
 test "chunk sizes are hex only and overflow is refused; data must end its line" {

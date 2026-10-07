@@ -86,6 +86,195 @@ pub fn parse(text: []const u8) ParseError!Url {
     };
 }
 
+/// Whether two URLs have the same origin (RFC 6454): scheme, host without
+/// case, and port.
+pub fn sameOrigin(a: Url, b: Url) bool {
+    return a.secure == b.secure and a.port == b.port and std.ascii.eqlIgnoreCase(a.host, b.host);
+}
+
+/// Why a reference cannot be resolved.
+pub const ResolveError = error{
+    /// `base` is not an absolute URL.
+    InvalidUrl,
+    /// The result does not fit `out`.
+    NoSpaceLeft,
+};
+
+/// The URL `reference` names relative to `base`, an absolute URL, by RFC
+/// 3986 §5.2, into `out`: what a `Location` field leads to. Dot segments
+/// are removed; a space, a control character or a byte past ASCII in the
+/// reference is percent-encoded, as browsers and curl encode them; and a
+/// reference with no fragment keeps the base's (RFC 9110 §10.2.2).
+pub fn resolve(base: []const u8, reference: []const u8, out: []u8) ResolveError![]u8 {
+    const b = split(base);
+    if (b.scheme == null or b.authority == null) return error.InvalidUrl;
+    const r = split(reference);
+    var w: Writer = .{ .out = out };
+    if (r.scheme) |scheme| {
+        try w.lower(scheme);
+        try w.raw(":");
+        try w.authorityOf(r.authority);
+        try w.path(r.path);
+        try w.query(r.query);
+    } else if (r.authority != null) {
+        try w.lower(b.scheme.?);
+        try w.raw(":");
+        try w.authorityOf(r.authority);
+        try w.path(r.path);
+        try w.query(r.query);
+    } else {
+        try w.lower(b.scheme.?);
+        try w.raw(":");
+        try w.authorityOf(b.authority);
+        if (r.path.len == 0) {
+            try w.path(b.path);
+            try w.query(r.query orelse b.query);
+        } else {
+            if (r.path[0] == '/') {
+                try w.path(r.path);
+            } else {
+                // Merge: the base's path up to its last slash, then the
+                // reference's; `/` alone when the base has an authority and
+                // no path.
+                const start = w.len;
+                const dir_end = if (std.mem.findScalarLast(u8, b.path, '/')) |i| i + 1 else 0;
+                if (b.path.len == 0) try w.raw("/") else try w.encoded(b.path[0..dir_end]);
+                try w.encoded(r.path);
+                w.len = start + removeDotSegments(out[start..w.len]).len;
+            }
+            try w.query(r.query);
+        }
+    }
+    if (r.fragment orelse b.fragment) |f| {
+        try w.raw("#");
+        try w.encoded(f);
+    }
+    return out[0..w.len];
+}
+
+const Parts = struct {
+    scheme: ?[]const u8 = null,
+    authority: ?[]const u8 = null,
+    path: []const u8 = "",
+    query: ?[]const u8 = null,
+    fragment: ?[]const u8 = null,
+};
+
+/// RFC 3986 Appendix B's split of a reference into its parts.
+fn split(text: []const u8) Parts {
+    var p: Parts = .{};
+    var rest = text;
+    if (std.mem.findScalar(u8, rest, '#')) |i| {
+        p.fragment = rest[i + 1 ..];
+        rest = rest[0..i];
+    }
+    if (std.mem.findScalar(u8, rest, '?')) |i| {
+        p.query = rest[i + 1 ..];
+        rest = rest[0..i];
+    }
+    if (std.mem.findScalar(u8, rest, ':')) |colon| {
+        const scheme = rest[0..colon];
+        const slash = std.mem.findScalar(u8, rest, '/') orelse rest.len;
+        if (colon < slash and colon > 0 and std.ascii.isAlphabetic(scheme[0]) and isSchemeText(scheme)) {
+            p.scheme = scheme;
+            rest = rest[colon + 1 ..];
+        }
+    }
+    if (std.mem.startsWith(u8, rest, "//")) {
+        const end = std.mem.findScalarPos(u8, rest, 2, '/') orelse rest.len;
+        p.authority = rest[2..end];
+        rest = rest[end..];
+    }
+    p.path = rest;
+    return p;
+}
+
+fn isSchemeText(text: []const u8) bool {
+    for (text) |c| if (!std.ascii.isAlphanumeric(c) and c != '+' and c != '-' and c != '.') return false;
+    return true;
+}
+
+/// Bytes into a fixed buffer, with percent-encoding where a URL needs it.
+const Writer = struct {
+    out: []u8,
+    len: usize = 0,
+
+    fn raw(w: *Writer, bytes: []const u8) ResolveError!void {
+        if (w.out.len - w.len < bytes.len) return error.NoSpaceLeft;
+        @memcpy(w.out[w.len..][0..bytes.len], bytes);
+        w.len += bytes.len;
+    }
+
+    fn lower(w: *Writer, bytes: []const u8) ResolveError!void {
+        const start = w.len;
+        try w.raw(bytes);
+        for (w.out[start..w.len]) |*c| c.* = std.ascii.toLower(c.*);
+    }
+
+    fn encoded(w: *Writer, bytes: []const u8) ResolveError!void {
+        for (bytes) |c| {
+            if (c > 0x20 and c < 0x7f) {
+                try w.raw(&.{c});
+            } else {
+                const hex = "0123456789ABCDEF";
+                try w.raw(&.{ '%', hex[c >> 4], hex[c & 15] });
+            }
+        }
+    }
+
+    fn authorityOf(w: *Writer, authority: ?[]const u8) ResolveError!void {
+        const a = authority orelse return;
+        try w.raw("//");
+        try w.encoded(a);
+    }
+
+    fn path(w: *Writer, p: []const u8) ResolveError!void {
+        const start = w.len;
+        try w.encoded(p);
+        w.len = start + removeDotSegments(w.out[start..w.len]).len;
+    }
+
+    fn query(w: *Writer, q: ?[]const u8) ResolveError!void {
+        const text = q orelse return;
+        try w.raw("?");
+        try w.encoded(text);
+    }
+};
+
+/// RFC 3986 §5.2.4, in place: the output never outgrows the input read.
+fn removeDotSegments(p: []u8) []u8 {
+    var in: usize = 0;
+    var out: usize = 0;
+    while (in < p.len) {
+        const rest = p[in..];
+        if (std.mem.startsWith(u8, rest, "../")) {
+            in += 3;
+        } else if (std.mem.startsWith(u8, rest, "./")) {
+            in += 2;
+        } else if (std.mem.startsWith(u8, rest, "/./")) {
+            in += 2;
+        } else if (std.mem.eql(u8, rest, "/.")) {
+            in += 1;
+            p[in] = '/';
+        } else if (std.mem.startsWith(u8, rest, "/../")) {
+            in += 3;
+            out = std.mem.findScalarLast(u8, p[0..out], '/') orelse 0;
+        } else if (std.mem.eql(u8, rest, "/..")) {
+            in += 2;
+            p[in] = '/';
+            out = std.mem.findScalarLast(u8, p[0..out], '/') orelse 0;
+        } else if (std.mem.eql(u8, rest, ".") or std.mem.eql(u8, rest, "..")) {
+            in = p.len;
+        } else {
+            const first_end = std.mem.findScalarPos(u8, p, in + 1, '/') orelse p.len;
+            @memmove(p[out..][0 .. first_end - in], p[in..first_end]);
+            out += first_end - in;
+            in = first_end;
+        }
+    }
+    return p[0..out];
+}
+
 const testing = std.testing;
 
 test "a URL gives its host, port and origin-form target" {
@@ -125,4 +314,64 @@ test "a URL that could smuggle a byte onto the wire, or names another scheme, is
     }) |text| try testing.expectError(error.InvalidUrl, parse(text));
     try testing.expectError(error.UnsupportedScheme, parse("ftp://example.com/"));
     try testing.expectError(error.UnsupportedScheme, parse("ws://example.com/"));
+}
+
+test "references resolve as RFC 3986's examples resolve" {
+    const base = "http://a/b/c/d;p?q";
+    const cases = [_][2][]const u8{
+        .{ "g:h", "g:h" },                         .{ "g", "http://a/b/c/g" },
+        .{ "./g", "http://a/b/c/g" },              .{ "g/", "http://a/b/c/g/" },
+        .{ "/g", "http://a/g" },                   .{ "//g", "http://g" },
+        .{ "?y", "http://a/b/c/d;p?y" },           .{ "g?y", "http://a/b/c/g?y" },
+        .{ "#s", "http://a/b/c/d;p?q#s" },         .{ "g#s", "http://a/b/c/g#s" },
+        .{ "g?y#s", "http://a/b/c/g?y#s" },        .{ ";x", "http://a/b/c/;x" },
+        .{ "g;x", "http://a/b/c/g;x" },            .{ "", "http://a/b/c/d;p?q" },
+        .{ ".", "http://a/b/c/" },                 .{ "./", "http://a/b/c/" },
+        .{ "..", "http://a/b/" },                  .{ "../", "http://a/b/" },
+        .{ "../g", "http://a/b/g" },               .{ "../..", "http://a/" },
+        .{ "../../", "http://a/" },                .{ "../../g", "http://a/g" },
+        .{ "../../../g", "http://a/g" },           .{ "../../../../g", "http://a/g" },
+        .{ "/./g", "http://a/g" },                 .{ "/../g", "http://a/g" },
+        .{ "g.", "http://a/b/c/g." },              .{ ".g", "http://a/b/c/.g" },
+        .{ "g..", "http://a/b/c/g.." },            .{ "..g", "http://a/b/c/..g" },
+        .{ "./../g", "http://a/b/g" },             .{ "./g/.", "http://a/b/c/g/" },
+        .{ "g/./h", "http://a/b/c/g/h" },          .{ "g/../h", "http://a/b/c/h" },
+        .{ "g;x=1/./y", "http://a/b/c/g;x=1/y" },  .{ "g;x=1/../y", "http://a/b/c/y" },
+        .{ "g?y/./x", "http://a/b/c/g?y/./x" },    .{ "g?y/../x", "http://a/b/c/g?y/../x" },
+        .{ "g#s/./x", "http://a/b/c/g#s/./x" },    .{ "g#s/../x", "http://a/b/c/g#s/../x" },
+        .{ "HTTPS://Other/x", "https://Other/x" },
+    };
+    var buf: [128]u8 = undefined;
+    for (cases) |case| {
+        const got = try resolve(base, case[0], &buf);
+        testing.expectEqualStrings(case[1], got) catch |err| {
+            std.debug.print("{s}\n", .{case[0]});
+            return err;
+        };
+    }
+}
+
+test "a redirect keeps the request's fragment and encodes what a URL cannot hold" {
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings("https://h/new#top", try resolve("https://h/old#top", "/new", &buf));
+    try testing.expectEqualStrings("https://h/a%20b/caf%C3%A9", try resolve("https://h/x", "/a b/caf\xc3\xa9", &buf));
+    try testing.expectEqualStrings("http://h", try resolve("http://h", "", &buf));
+    try testing.expectError(error.InvalidUrl, resolve("/relative", "x", &buf));
+    var tiny: [8]u8 = undefined;
+    try testing.expectError(error.NoSpaceLeft, resolve("http://host/", "/long/path", &tiny));
+    try testing.expect(sameOrigin(try parse("http://A.example/x"), try parse("http://a.example:80/y")));
+    try testing.expect(!sameOrigin(try parse("http://a.example/"), try parse("https://a.example/")));
+    try testing.expect(!sameOrigin(try parse("http://a.example/"), try parse("http://a.example:8080/")));
+}
+
+test "fuzz: any reference resolves to a URL or is refused, never past its buffer" {
+    try testing.fuzz({}, struct {
+        fn one(_: void, smith: *testing.Smith) anyerror!void {
+            var raw: [96]u8 = undefined;
+            const reference = raw[0..smith.slice(&raw)];
+            var buf: [512]u8 = undefined;
+            const got = resolve("https://h.example/a/b?c#d", reference, &buf) catch return;
+            try testing.expect(got.len <= buf.len);
+        }
+    }.one, .{ .corpus = &.{ "../x", "//other/y?z", "g;x=1/../y" } });
 }

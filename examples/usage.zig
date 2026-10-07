@@ -22,10 +22,14 @@ pub fn main(init: std.process.Init) !void {
     // --- README:usage ---
     const io = init.io;
 
-    // One client for the program: it keeps connections for reuse, and may
-    // be shared by several tasks.
+    // One client for the program: it keeps connections for reuse, follows
+    // redirects, tries failed requests again where that is safe, and may be
+    // shared by several tasks. Cookies go in a jar of the caller's.
+    var jar: uplink.CookieJar = .init(gpa, .{});
+    defer jar.deinit();
     var client: uplink.Client = .init(gpa, .{
         .timeouts = .{ .connect = .fromSeconds(10), .activity = .fromSeconds(30) },
+        .cookies = &jar,
         .user_agent = "example/1.0",
     });
     defer client.deinit(io);
@@ -36,6 +40,8 @@ pub fn main(init: std.process.Init) !void {
         .url = url,
         .headers = &.{.{ .name = "Content-Type", .value = "text/plain" }},
         .body = .{ .bytes = "ping" },
+        // The whole request, retries and redirects included.
+        .timeout = .{ .duration = .{ .raw = .fromSeconds(60), .clock = .awake } },
         .diagnostics = &diagnostics,
     }) catch |err| {
         std.log.err("{t} while at {t}", .{ err, diagnostics.stage });

@@ -2,6 +2,11 @@
 //! for the response. A body of a declared length must be written exactly;
 //! otherwise it goes in chunks.
 //!
+//! `finish` follows the client's policy from the first response on, as
+//! `send` does, except that a body the caller streamed is never sent
+//! again: a 307 or 308 fails with `BodyNotReplayable`, a 401 or 407 and a
+//! status the retries cover are handed back.
+//!
 //! `finish` leaves the value valid whatever happens: `deinit` is still owed,
 //! closes the connection when the exchange did not complete, and does
 //! nothing more after a successful `finish`. An `Outgoing` must not move
@@ -10,79 +15,104 @@
 const std = @import("std");
 const Io = std.Io;
 const h1 = @import("../wire/h1.zig");
-const Method = @import("../wire/Method.zig");
 const Connection = @import("../transport/Connection.zig");
-const Context = @import("../transport/Context.zig");
-const Diagnostics = @import("../transport/Diagnostics.zig");
-const Pool = @import("../pool/Pool.zig");
 const Response = @import("Response.zig");
+const Run = @import("Run.zig");
 
 const Outgoing = @This();
 
-/// Private: what the request goes over.
-ctx: *Context,
-pool: *Pool,
+/// Private: the request's run, and the connection it is written on.
+run: Run,
 conn: ?*Connection,
-method: Method,
-limits: h1.Limits,
-decompress: bool,
-diagnostics: ?*Diagnostics,
 /// Private: the body writer's buffer, from the pool.
 buffer: []u8,
 body: Writer,
+/// Private: the server's answer before the body, which it refused.
+early: ?Response = null,
 
 const Writer = union(enum) {
     length: h1.LengthWriter,
     chunked: h1.ChunkedWriter,
+    /// The server answered before the body: it goes nowhere.
+    dropped: Io.Writer.Discarding,
 };
 
 /// Errors from `finish`.
 pub const FinishError = error{
+    InvalidUrl,
+    UnsupportedScheme,
+    InvalidHeader,
+    NameNotResolved,
     ConnectionFailed,
     TimedOut,
     TlsFailed,
     ClientCertificateRejected,
-    Canceled,
+    ClientCertificateSchemeUnsupported,
+    CertificateBundleUnreadable,
+    InvalidProxy,
+    ProxyRefused,
+    ProxyAuthenticationRequired,
+    ProxyAuthMethodUnsupported,
+    ProxyAddressUnsupported,
+    ProxyHostUnreachable,
+    ProxyProtocolError,
     HttpProtocolError,
-    OutOfMemory,
     /// Fewer bytes were written than the declared length.
     BodyIncomplete,
+    InvalidBody,
+    BodyReadFailed,
+    BodyNotReplayable,
+    TooManyRedirects,
+    InsecureRedirect,
+    InvalidRedirect,
+    CredentialsUnavailable,
+    PrepareFailed,
+    ConcurrencyUnavailable,
+    OutOfMemory,
+    Canceled,
     /// More bytes were written than the declared length.
     BodyTooLong,
     /// `finish` was already called, or the connection is gone.
     ExchangeOver,
 };
 
-/// Set up the body writer for a head already written to `conn`.
-pub fn init(ctx: *Context, pool: *Pool, conn: *Connection, buffer: []u8, method: Method, length: ?u64, limits: h1.Limits, decompress: bool, diagnostics: ?*Diagnostics) Outgoing {
+/// Set up the body writer for a head already written on `conn`.
+pub fn init(run: Run, conn: *Connection, buffer: []u8, length: ?u64) Outgoing {
     const out = conn.writer();
     return .{
-        .ctx = ctx,
-        .pool = pool,
+        .run = run,
         .conn = conn,
-        .method = method,
-        .limits = limits,
-        .decompress = decompress,
-        .diagnostics = diagnostics,
         .buffer = buffer,
         .body = if (length) |n| .{ .length = .init(out, n, buffer) } else .{ .chunked = .init(out, buffer) },
     };
+}
+
+/// A request the server answered before its body: what is written is
+/// dropped, and `finish` returns `response`.
+pub fn refused(run: Run, response: Response, buffer: []u8) Outgoing {
+    return .{ .run = run, .conn = null, .buffer = buffer, .body = .{ .dropped = .init(buffer) }, .early = response };
 }
 
 /// Where the body is written. Writing past a declared length fails, and
 /// `finish` then says `BodyTooLong`.
 pub fn writer(o: *Outgoing) *Io.Writer {
     return switch (o.body) {
-        inline else => |*w| &w.interface,
+        .length => |*w| &w.interface,
+        .chunked => |*w| &w.interface,
+        .dropped => |*d| &d.writer,
     };
 }
 
-/// End the body and read the response's head. On success the connection
-/// belongs to the response.
+/// End the body, read the response, and follow the policy. On success the
+/// connection belongs to the response.
 pub fn finish(o: *Outgoing, io: Io) FinishError!Response {
+    if (o.early) |answer| {
+        o.early = null;
+        return o.run.complete(io, answer);
+    }
     const conn = o.conn orelse return error.ExchangeOver;
     conn.io = io;
-    if (o.diagnostics) |d| d.stage = .write;
+    if (o.run.request.diagnostics) |d| d.stage = .write;
     switch (o.body) {
         .length => |*lw| {
             if (lw.overflowed) return error.BodyTooLong;
@@ -90,18 +120,13 @@ pub fn finish(o: *Outgoing, io: Io) FinishError!Response {
             if (lw.remaining != 0) return error.BodyIncomplete;
         },
         .chunked => |*cw| cw.end() catch return conn.writeError(),
+        .dropped => unreachable, // unreachable: a dropped body has its answer in `early`, taken above
     }
     conn.flush() catch return conn.writeError();
-    var progress = false;
-    const response = try Response.receive(io, o.ctx, o.pool, conn, .{
-        .method = o.method,
-        .limits = o.limits,
-        .decompress = o.decompress,
-        .diagnostics = o.diagnostics,
-        .progress = &progress,
-    });
+    const first = try o.run.receive(io, conn, false);
+    // The response holds the connection now, and the run the response.
     o.conn = null;
-    return response;
+    return o.run.complete(io, first);
 }
 
 fn writeFailed(o: *Outgoing, conn: *Connection) FinishError {
@@ -109,10 +134,13 @@ fn writeFailed(o: *Outgoing, conn: *Connection) FinishError {
     return conn.writeError();
 }
 
-/// Close the connection unless `finish` handed it to a response, and give
-/// the buffer back.
+/// Close the connection unless `finish` handed it on, and give back what
+/// the request borrowed.
 pub fn deinit(o: *Outgoing, io: Io) void {
-    if (o.conn) |c| Response.release(io, o.ctx, o.pool, c, false);
-    o.ctx.buffers.release(io, o.buffer);
+    const c = o.run.shared;
+    if (o.conn) |conn| Response.release(io, &c.context, &c.pool, conn, false);
+    if (o.early) |*answer| answer.deinit(io);
+    c.context.buffers.release(io, o.buffer);
+    o.run.deinit(io);
     o.* = undefined;
 }

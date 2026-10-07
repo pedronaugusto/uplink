@@ -15,6 +15,8 @@ pub const BufferPool = @import("transport/BufferPool.zig");
 pub const Timer = @import("transport/Timer.zig");
 /// Why an exchange failed, in detail.
 pub const Diagnostics = @import("transport/Diagnostics.zig");
+/// Every step of a request, with its timing, as it happens.
+pub const Observer = @import("transport/Observer.zig");
 
 test {
     _ = Connection;
@@ -24,4 +26,5 @@ test {
     _ = BufferPool;
     _ = Timer;
     _ = Diagnostics;
+    _ = Observer;
 }
