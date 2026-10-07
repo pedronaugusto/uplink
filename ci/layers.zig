@@ -66,6 +66,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/transport/Proxy.zig",
         "src/transport/Diagnostics.zig",
         "src/transport/BufferPool.zig",
+        "src/transport/Observer.zig",
         "src/transport/Timer.zig",
     } },
     .{ .name = "transport shared", .patterns = &.{
@@ -85,16 +86,26 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/pool.zig",
     } },
     .{ .name = "client values", .patterns = &.{
-        "src/client/Request.zig",
+        "src/client/policy.zig",
+        "src/client/Credentials.zig",
+        "src/client/Prepare.zig",
         "src/client/Body.zig",
+    } },
+    .{ .name = "client request", .patterns = &.{
+        "src/client/Request.zig",
+        "src/client/CookieJar.zig",
+        "src/client/OriginAuth.zig",
+        "src/client/Upgraded.zig",
     } },
     .{ .name = "client response", .patterns = &.{
         "src/client/Response.zig",
     } },
-    .{ .name = "client outgoing", .patterns = &.{
-        "src/client/Outgoing.zig",
+    .{ .name = "client shared", .patterns = &.{
+        "src/client/Shared.zig",
     } },
-    .{ .name = "client", .patterns = &.{
+    .{ .name = "client exchange", .patterns = &.{
+        "src/client/Run.zig",
+        "src/client/Outgoing.zig",
         "src/client/Client.zig",
     } },
     .{ .name = "client namespace", .patterns = &.{

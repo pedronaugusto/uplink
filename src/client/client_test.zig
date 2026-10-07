@@ -136,16 +136,40 @@ test "gzip and deflate bodies are decoded, and other codings handed over as they
         try testing.expectEqual(@as(u64, 1), client.stats().connections_opened);
         const seen = try server.received(gpa);
         defer gpa.free(seen);
-        try testing.expect(std.mem.find(u8, seen, "Accept-Encoding: gzip, deflate\r\n") != null);
+        try testing.expect(std.mem.find(u8, seen, "Accept-Encoding: gzip, deflate, zstd\r\n") != null);
         var raw: Client = .init(gpa, .{ .decompress = false });
         defer raw.deinit(io);
         const undecoded = try get(&raw, io, server.url(&buf, "/"));
         defer gpa.free(undecoded);
         try testing.expectEqualSlices(u8, coded, undecoded);
     }
-    const zstd = try bodyOf("HTTP/1.1 200 OK\r\nContent-Encoding: zstd\r\nContent-Length: 4\r\n\r\n\x28\xb5\x2f\xfd", .{});
-    defer gpa.free(zstd);
-    try testing.expectEqualSlices(u8, "\x28\xb5\x2f\xfd", zstd);
+    const br = try bodyOf("HTTP/1.1 200 OK\r\nContent-Encoding: br\r\nContent-Length: 4\r\n\r\n\x0b\x01\x80\x03", .{});
+    defer gpa.free(br);
+    try testing.expectEqualSlices(u8, "\x0b\x01\x80\x03", br);
+}
+
+/// `text` compressed by the zstd tool at level 19.
+const zstd_frame = "\x28\xb5\x2f\xfd\x24\x3d\x55\x01\x00\x34\x02\x61\x20\x62\x6f\x64\x79\x20\x77\x6f\x72\x74\x68\x20\x63\x6f\x6d\x70\x72\x65\x73\x73\x69\x6e\x67\x3a\x20\x72\x65\x70\x65\x61\x74\x65\x64\x20\x01\x00\xa3\x5d\x9e\x30\xd2\x3a\x75";
+
+/// `hello` in one raw block, in a frame declaring a window of 2^`log`.
+fn rawFrame(comptime log: u5) []const u8 {
+    return "\x28\xb5\x2f\xfd\x00" ++ .{@as(u8, log - 10) << 3} ++ "\x29\x00\x00hello";
+}
+
+test "zstd bodies are decoded, and one whose window passes the client's cap refused" {
+    const gpa = testing.allocator;
+    const text = "a body worth compressing: repeated repeated repeated repeated";
+    for (0..2) |_| {
+        const body = try bodyOf(std.fmt.comptimePrint("HTTP/1.1 200 OK\r\nContent-Encoding: zstd\r\nContent-Length: {d}\r\n\r\n", .{zstd_frame.len}) ++ zstd_frame, .{});
+        defer gpa.free(body);
+        try testing.expectEqualStrings(text, body);
+    }
+    const head = "HTTP/1.1 200 OK\r\nContent-Encoding: zstd\r\nContent-Length: 14\r\n\r\n";
+    const megabyte = try bodyOf(head ++ comptime rawFrame(20), .{});
+    defer gpa.free(megabyte);
+    try testing.expectEqualStrings("hello", megabyte);
+    try testing.expectError(error.HttpProtocolError, bodyOf(head ++ comptime rawFrame(24), .{}));
+    try testing.expectError(error.HttpProtocolError, bodyOf(head ++ comptime rawFrame(20), .{ .max_zstd_window = 512 << 10 }));
 }
 
 test "a head longer than the connection's buffer is read, and one past the limit refused" {
@@ -448,7 +472,7 @@ test "a request through an HTTP proxy is sent whole, and the proxy's Digest chal
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     var proxy_url: [64]u8 = undefined;
-    var client: Client = .init(gpa, .{ .proxy = try Proxy.parse(arena.allocator(), try std.mem.print(&proxy_url, "http://user:secret@127.0.0.1:{d}", .{proxy.port}), .curl) });
+    var client: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&proxy_url, "http://user:secret@127.0.0.1:{d}", .{proxy.port}), .curl) } });
     defer client.deinit(io);
     var buf: [64]u8 = undefined;
     const body = try get(&client, io, server.url(&buf, "/repo.git/info/refs"));
@@ -470,7 +494,7 @@ test "a proxy is refused by name: schemes not spoken, a refusal, credentials ref
     {
         const proxy = try TestProxy.start(gpa, io, .{ .credential = "a:b", .challenge = "Negotiate, NTLM" });
         defer proxy.stop();
-        var client: Client = .init(gpa, .{ .proxy = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "http://a:b@127.0.0.1:{d}", .{proxy.port}), .curl) });
+        var client: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "http://a:b@127.0.0.1:{d}", .{proxy.port}), .curl) } });
         defer client.deinit(io);
         var diagnostics: Diagnostics = .{};
         try testing.expectError(error.ProxyAuthMethodUnsupported, client.send(io, .{ .url = "https://git.test/", .diagnostics = &diagnostics }));
@@ -484,7 +508,7 @@ test "a proxy is refused by name: schemes not spoken, a refusal, credentials ref
     {
         const proxy = try TestProxy.start(gpa, io, .{ .refuse = 403 });
         defer proxy.stop();
-        var client: Client = .init(gpa, .{ .proxy = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "127.0.0.1:{d}", .{proxy.port}), .curl) });
+        var client: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "127.0.0.1:{d}", .{proxy.port}), .curl) } });
         defer client.deinit(io);
         var diagnostics: Diagnostics = .{};
         try testing.expectError(error.ProxyRefused, client.send(io, .{ .url = "https://git.test/", .diagnostics = &diagnostics }));
@@ -494,7 +518,7 @@ test "a proxy is refused by name: schemes not spoken, a refusal, credentials ref
     {
         const proxy = try TestProxy.start(gpa, io, .{ .kind = .socks, .credential = "user:right" });
         defer proxy.stop();
-        var client: Client = .init(gpa, .{ .proxy = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "socks5h://user:wrong@127.0.0.1:{d}", .{proxy.port}), .curl) });
+        var client: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "socks5h://user:wrong@127.0.0.1:{d}", .{proxy.port}), .curl) } });
         defer client.deinit(io);
         try testing.expectError(error.ProxyAuthenticationRequired, client.send(io, .{ .url = "http://git.test/" }));
     }
@@ -511,7 +535,7 @@ test "SOCKS 4, 4a, 5 and 5h reach the server, looking the name up where each say
     defer arena.deinit();
     for ([_][]const u8{ "socks4", "socks4a", "socks5", "socks5h" }) |scheme| {
         var url_buf: [96]u8 = undefined;
-        var client: Client = .init(gpa, .{ .proxy = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "{s}://127.0.0.1:{d}", .{ scheme, proxy.port }), .curl) });
+        var client: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "{s}://127.0.0.1:{d}", .{ scheme, proxy.port }), .curl) } });
         defer client.deinit(io);
         var target_buf: [64]u8 = undefined;
         const body = get(&client, io, try std.mem.print(&target_buf, "http://localhost:{d}/", .{server.port})) catch |err| {

@@ -10,9 +10,10 @@
 //! where a graceful one leaves a pending receive waiting for the peer). The
 //! connection then reports `TimedOut`.
 //!
-//! It ticks while operations are armed, at a tenth of the shortest timeout,
-//! and parks when none has been for a tick, so an idle client costs no
-//! wakeups. The first operation armed after that wakes it.
+//! It ticks while operations are armed, at a tenth of the shortest timeout
+//! it has been asked to keep, and parks when none has been for a tick, so
+//! an idle client costs no wakeups. The first operation armed after that
+//! wakes it, and a shorter timeout than any before wakes it to tick faster.
 
 const std = @import("std");
 const Io = std.Io;
@@ -32,8 +33,11 @@ armed: std.atomic.Value(u32) = .init(0),
 parked: std.atomic.Value(u32) = .init(0),
 /// Private: the task, once started.
 task: ?Io.Future(void) = null,
-/// How often the task looks at the armed deadlines.
-tick: Io.Duration,
+/// How often the task looks at the armed deadlines, in nanoseconds.
+tick: std.atomic.Value(i64),
+/// Private: bumped to cut the task's wait short; the futex it waits on
+/// between ticks.
+nudge: std.atomic.Value(u32) = .init(0),
 
 /// One connection's operation deadline.
 pub const Watch = struct {
@@ -48,10 +52,28 @@ pub const Watch = struct {
     fired: std.atomic.Value(bool) = .init(false),
 };
 
-/// A timer for timeouts no shorter than `shortest`.
-pub fn init(shortest: Io.Duration) Timer {
-    const tenth = @divTrunc(shortest.nanoseconds, 10);
-    return .{ .tick = .fromNanoseconds(std.math.clamp(tenth, std.time.ns_per_ms, std.time.ns_per_s)) };
+/// A timer for timeouts no shorter than `shortest`, or, null, for none
+/// known yet.
+pub fn init(shortest: ?Io.Duration) Timer {
+    return .{ .tick = .init(tickFor(shortest orelse .fromSeconds(10))) };
+}
+
+/// A tenth of `d`, between a millisecond and a second.
+fn tickFor(d: Io.Duration) i64 {
+    return @intCast(std.math.clamp(@divTrunc(d.nanoseconds, 10), std.time.ns_per_ms, std.time.ns_per_s));
+}
+
+/// Keep timeouts as short as `d` too: the tick shortens to match, at once.
+pub fn tighten(t: *Timer, io: Io, d: Io.Duration) void {
+    const want = tickFor(d);
+    var current = t.tick.load(.monotonic);
+    while (want < current) {
+        current = t.tick.cmpxchgWeak(current, want, .monotonic, .monotonic) orelse {
+            _ = t.nudge.fetchAdd(1, .release);
+            io.futexWake(u32, &t.nudge.raw, 1);
+            return;
+        };
+    }
 }
 
 /// Stop the task. Every watch must have been removed.
@@ -109,7 +131,9 @@ fn run(t: *Timer, io: Io) void {
                 continue;
             }
         } else idle_ticks = 0;
-        io.sleep(t.tick, .awake) catch return;
+        const seen = t.nudge.load(.acquire);
+        const tick: Io.Duration = .fromNanoseconds(t.tick.load(.monotonic));
+        io.futexWaitTimeout(u32, &t.nudge.raw, seen, .{ .duration = .{ .raw = tick, .clock = .awake } }) catch return;
         t.scan(io);
     }
 }
@@ -162,8 +186,13 @@ test "a deadline passed shuts the operation's socket, and one disarmed in time d
     try testing.expect(watch.fired.load(.acquire));
 }
 
-test "the tick is a tenth of the shortest timeout, between a millisecond and a second" {
-    try testing.expectEqual(@as(i96, std.time.ns_per_ms), Timer.init(.fromMilliseconds(2)).tick.nanoseconds);
-    try testing.expectEqual(@as(i96, 3 * std.time.ns_per_s / 10), Timer.init(.fromSeconds(3)).tick.nanoseconds);
-    try testing.expectEqual(@as(i96, std.time.ns_per_s), Timer.init(.fromSeconds(300)).tick.nanoseconds);
+test "the tick is a tenth of the shortest timeout, between a millisecond and a second, and only shortens" {
+    try testing.expectEqual(@as(i64, std.time.ns_per_ms), Timer.init(.fromMilliseconds(2)).tick.load(.monotonic));
+    try testing.expectEqual(@as(i64, 3 * std.time.ns_per_s / 10), Timer.init(.fromSeconds(3)).tick.load(.monotonic));
+    try testing.expectEqual(@as(i64, std.time.ns_per_s), Timer.init(.fromSeconds(300)).tick.load(.monotonic));
+    var t: Timer = .init(null);
+    t.tighten(testing.io, .fromMilliseconds(50));
+    try testing.expectEqual(@as(i64, 5 * std.time.ns_per_ms), t.tick.load(.monotonic));
+    t.tighten(testing.io, .fromSeconds(5));
+    try testing.expectEqual(@as(i64, 5 * std.time.ns_per_ms), t.tick.load(.monotonic));
 }

@@ -203,7 +203,7 @@ test "TLS to the server runs inside a CONNECT tunnel and inside SOCKS" {
         const proxy_url = try std.mem.print(&proxy_url_buf, "{s}://user:secret@127.0.0.1:{d}", .{ if (kind == .http) "http" else "socks5h", proxy.port });
         var client: Client = .init(gpa, .{
             .tls = .{ .trust = &trust },
-            .proxy = try Proxy.parse(arena_state.allocator(), proxy_url, .curl),
+            .proxy = .{ .fixed = try Proxy.parse(arena_state.allocator(), proxy_url, .curl) },
         });
         defer client.deinit(io);
         const page = try fetch(gpa, io, &client, server.port, null);

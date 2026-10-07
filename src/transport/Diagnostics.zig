@@ -23,12 +23,19 @@ proxy_status: ?u16 = null,
 proxy_offered: Offered = .{},
 /// Which timeout ran out.
 timeout: ?Timeout = null,
+/// Redirects followed.
+redirects: u8 = 0,
+/// Times the request was sent again after a failure or a status the
+/// retries cover; a stale kept connection's one resend is not counted.
+retries: u8 = 0,
 
-/// `connect` covers the name's lookup too: the two run as one race.
-/// `connect` covers the name's lookup too: the two run as one race.
-pub const Stage = enum { none, connect, proxy_tls, tunnel, tls, write, head, body };
+/// `wait` is for a connection under the pool's per-route limit; `connect`
+/// covers the name's lookup too: the two run as one race.
+pub const Stage = enum { none, wait, connect, proxy_tls, tunnel, tls, write, head, body };
 
-pub const Timeout = enum { connect, handshake, activity };
+/// `low_speed` is `Timeouts.low_speed`; `deadline` the request's own
+/// `timeout`.
+pub const Timeout = enum { connect, handshake, activity, low_speed, deadline };
 
 /// Scheme names, `, `-joined, in a fixed buffer: cut, and `truncated` set,
 /// when they do not fit.

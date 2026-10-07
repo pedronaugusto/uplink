@@ -32,6 +32,52 @@ pub fn lookup(r: Resolver, io: Io, host: []const u8, port: u16, family: ?IpAddre
     return r.lookupFn(io, r.context, host, port, family, out);
 }
 
+/// Errors from `lookupWithin`.
+pub const LookupWithinError = error{
+    InvalidHostName,
+    NameNotResolved,
+    ConcurrencyUnavailable,
+    Canceled,
+    /// `timeout` ran out first.
+    TimedOut,
+};
+
+/// `lookup`, abandoned once `timeout` runs out. Keeping the bound needs a
+/// task to race the lookup against; with none to spare the lookup runs
+/// unbounded, and `bounded` is set false.
+pub fn lookupWithin(r: Resolver, io: Io, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress, timeout: ?Io.Duration, bounded: *bool) LookupWithinError![]IpAddress {
+    bounded.* = true;
+    const limit = timeout orelse return r.lookupMapped(io, host, port, family, out);
+    if (resolve.literal(host, port) != null) return r.lookupMapped(io, host, port, family, out);
+    const Race = union(enum) {
+        found: LookupError![]IpAddress,
+        expired: Io.Cancelable!void,
+    };
+    var buffer: [2]Race = undefined;
+    var race: Io.Select(Race) = .init(io, &buffer);
+    defer while (race.cancel()) |_| {};
+    race.concurrent(.found, lookup, .{ r, io, host, port, family, out }) catch {
+        bounded.* = false;
+        return r.lookupMapped(io, host, port, family, out);
+    };
+    race.concurrent(.expired, Io.sleep, .{ io, limit, .awake }) catch {
+        bounded.* = false;
+        while (race.cancel()) |late| switch (late) {
+            .found => |result| return result,
+            .expired => {},
+        };
+        unreachable; // unreachable: the lookup task was started above
+    };
+    return switch (try race.await()) {
+        .found => |result| result,
+        .expired => |result| if (result) |_| error.TimedOut else |err| err,
+    };
+}
+
+fn lookupMapped(r: Resolver, io: Io, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress) LookupWithinError![]IpAddress {
+    return r.lookup(io, host, port, family, out);
+}
+
 /// The system's lookup, with no task waiting on `io.async` work (see
 /// `resolve`).
 pub const system: Resolver = .{ .context = null, .lookupFn = systemLookup };
