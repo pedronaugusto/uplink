@@ -123,3 +123,14 @@ pub const required = blk: {
     };
     break :blk paths;
 };
+
+/// Tokens only their owner may spell. No uplink task waits on work started
+/// with `io.async` or `Group.async`, which Zig 0.17 no longer promises runs
+/// beside its caller: work another task waits on is started with
+/// `io.concurrent`, or done inline. Nothing owns them.
+pub const owned: []const gantry.rules.TokenRule = &.{
+    .{ .name = "no waiting on async work", .tokens = &.{
+        "async",
+        "groupAsync",
+    }, .owners = &.{} },
+};

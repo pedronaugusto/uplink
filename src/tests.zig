@@ -11,4 +11,6 @@ test {
     _ = @import("testing/tls_fork.zig");
     _ = @import("client/client_test.zig");
     _ = @import("client/tls_test.zig");
+    _ = @import("transport/verify_test.zig");
+    _ = @import("wire/differential_test.zig");
 }
