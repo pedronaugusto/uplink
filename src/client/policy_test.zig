@@ -23,6 +23,7 @@ const Observer = @import("../transport/Observer.zig");
 const Proxy = @import("../transport/Proxy.zig");
 const Resolver = @import("../net/Resolver.zig");
 const sse = @import("../wire/sse.zig");
+const url_mod = @import("../wire/url.zig");
 
 /// A buffer an answer is printed into, one per server task.
 threadlocal var answer_buf: [8 << 10]u8 = undefined;
@@ -154,6 +155,38 @@ test "a redirect to another origin drops the caller's credentials and cookies" {
     var response = try client.send(io, .{ .url = first.url(&buf, "/"), .redirects = .{ .follow = .{ .same_origin_only = true } } });
     defer response.deinit(io);
     try testing.expectEqual(std.http.Status.found, response.status);
+}
+
+test "a redirect off the origin keeps the proxy's answer, and the jar's cookies for where it leads" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const target = try Server.start(gpa, io, .{ .answer = redirecting });
+    defer target.stop();
+    const first = try Server.start(gpa, io, .{ .context = &target.port, .answer = elsewhere });
+    defer first.stop();
+    const proxy = try TestProxy.start(gpa, io, .{ .credential = "u:p" });
+    defer proxy.stop();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    var jar: CookieJar = .init(gpa, .{});
+    defer jar.deinit();
+    var target_url: [64]u8 = undefined;
+    try jar.store(io, try url_mod.parse(target.url(&target_url, "/")), "there=1");
+    var proxy_url: [64]u8 = undefined;
+    var client: Client = .init(gpa, .{
+        .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&proxy_url, "http://u:p@127.0.0.1:{d}", .{proxy.port}), .curl) },
+        .cookies = &jar,
+    });
+    defer client.deinit(io);
+    var buf: [64]u8 = undefined;
+    const body = try get(&client, io, .{ .url = first.url(&buf, "/"), .headers = &.{.{ .name = "Cookie", .value = "mine=1" }} });
+    defer gpa.free(body);
+    try testing.expectEqualStrings("GET||-|-|there=1", body);
+    const log = try proxy.lines(gpa);
+    defer gpa.free(log);
+    // A challenge, the answer, and the redirected request answered at once.
+    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, log, "\n"));
+    try testing.expect(std.mem.endsWith(u8, log, "/echo HTTP/1.1 [Basic ]\n"));
 }
 
 /// 503 to each connection's first request, then the request echoed.
