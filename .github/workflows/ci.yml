@@ -1,3 +1,4 @@
+# uplink's gate: preflight's fast, merge and release tiers, pinned with the package.
 name: CI
 on:
   push:
