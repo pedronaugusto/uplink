@@ -25,6 +25,7 @@ const fields = @import("../wire/fields.zig");
 const socks = @import("../wire/socks.zig");
 const resolve = @import("../net/resolve.zig");
 const dial = @import("../net/dial.zig");
+const sys = @import("../net/sys.zig");
 const Context = @import("Context.zig");
 const Diagnostics = @import("Diagnostics.zig");
 const Proxy = @import("Proxy.zig");
@@ -251,16 +252,24 @@ pub fn unpark(conn: *Connection, io: Io, diagnostics: ?*Diagnostics) Allocator.E
     if (conn.output.interface.buffer.len == 0) conn.output.interface.buffer = try conn.ctx.buffers.acquire(io, .record);
 }
 
-/// Whether a kept connection still looks usable: one read that does not
-/// wait. Nothing to read is alive. The end of the stream, an error, or
-/// bytes on a plain connection — a server that sent something nobody
-/// asked for — is dead. Bytes on a TLS connection are kept for the session
-/// to read: a ticket or a key update looks the same as the start of a
-/// close. Where the `Io` cannot read without waiting, the connection is
-/// taken as alive, and a failure on it is retried as a stale one.
+/// Whether a kept connection still looks usable: one look at its socket
+/// that neither waits nor takes anything, or where the system has no such
+/// look, one read through the `Io` that does not wait. Nothing to read is
+/// alive. The end of the stream, an error, or bytes on a plain connection —
+/// a server that sent something nobody asked for — is dead. Bytes on a TLS
+/// connection are left for the session to read: a ticket or a key update
+/// looks the same as the start of a close. Where the `Io` cannot read
+/// without waiting either, the connection is taken as alive, and a failure
+/// on it is retried as a stale one.
 pub fn alive(conn: *Connection, io: Io) Io.Cancelable!bool {
     const r = &conn.input.interface;
-    if (r.seek != r.end) return conn.session_on[0] or conn.session_on[1];
+    const secure = conn.session_on[0] or conn.session_on[1];
+    if (r.seek != r.end) return secure;
+    if (sys.peek(conn.stream.socket.handle)) |seen| return switch (seen) {
+        .idle => true,
+        .readable => secure,
+        .closed => false,
+    };
     r.seek = 0;
     r.end = 0;
     var data: [1][]u8 = .{r.buffer};
@@ -273,7 +282,7 @@ pub fn alive(conn: *Connection, io: Io) Io.Cancelable!bool {
     const n = (result.net_read catch return false).data_len;
     if (n == 0) return false;
     r.end = n;
-    return conn.session_on[0] or conn.session_on[1];
+    return secure;
 }
 
 /// Whether the connection may carry another exchange: no operation failed

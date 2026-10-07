@@ -71,9 +71,10 @@ TLS to an `https` proxy, a `CONNECT` tunnel or a SOCKS negotiation, TLS to the
 server. A request to an `http` server through an HTTP proxy goes in absolute
 form instead, as curl sends it. Idle connections are kept per route, two by
 default and sixty-four in all, the most recently used taken first. Before a
-kept connection is used it is checked with one read that does not wait: a
+kept connection is used its socket is looked at once, a `recv` that peeks and
+does not wait (on Windows, a read through the `Io` that does not wait): a
 plain connection with its end or unexpected bytes waiting is closed, and a TLS
-one keeps its bytes for the session to read. A request that still fails on a
+one leaves its bytes for the session to read. A request that still fails on a
 kept connection before a byte of the response arrives is sent again on a new
 one, once, when it had no body or its method is idempotent.
 
@@ -108,7 +109,7 @@ carries is checked before a byte is written, so nothing a caller passes can
 add a line. A response's head goes into a buffer from the client's pool, its
 fields beside it and its body reader's buffer after them; a connection put
 away idle gives its socket buffers back too. A small exchange on a kept
-connection is one `writev`, one read and one readiness check.
+connection is one `writev`, one read and one look at the socket.
 
 **TLS** is the standard library's client with client authentication added: a
 copy of std's `Client.zig` held byte for byte to std and a recorded diff by a
@@ -167,7 +168,7 @@ against a server and a proxy (HTTP with Basic and Digest, SOCKS 4, 4a, 5 and
 written and streamed requests, connections the server closed idle or
 mid-request, every timeout with and without a task to spare, tasks sharing
 one client. Two tests count what an exchange costs on a warm client: no
-allocation, and one write, one read and one readiness check. TLS is proved
+allocation, and one write, one read and one look at the socket. TLS is proved
 against `openssl s_server` with certificates made for each run in a scratch
 `HOME`: TLS 1.3 and 1.2, authorities given and refused, client certificates of
 every key kind and format, a certificate checked at a stepped clock, and TLS

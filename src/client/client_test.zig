@@ -474,7 +474,7 @@ const Counted = struct {
     }
 };
 
-test "a small exchange on a kept connection is one write, one read and one readiness check" {
+test "a small exchange on a kept connection is one write and one read, and a look at the socket that waits for nothing" {
     const server = try Server.start(testing.allocator, testing.io, Server.fixed(ok_answer));
     defer server.stop();
     var counted: Counted.L = .init(testing.io, .{});
@@ -492,7 +492,9 @@ test "a small exchange on a kept connection is one write, one read and one readi
     }
     try testing.expectEqual(@as(u32, 10), counted.state.writes.load(.monotonic));
     try testing.expectEqual(@as(u32, 10), counted.state.reads.load(.monotonic));
-    try testing.expectEqual(@as(u32, 10), counted.state.polls.load(.monotonic));
+    // The look is a `recv` that peeks, past the `Io`; Windows has none, and
+    // asks the `Io` instead.
+    try testing.expectEqual(@as(u32, if (builtin.target.os.tag == .windows) 10 else 0), counted.state.polls.load(.monotonic));
 }
 
 test "a request through an HTTP proxy is sent whole, and the proxy's Digest challenge answered" {

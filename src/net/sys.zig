@@ -1,5 +1,6 @@
 //! The few calls on a socket that `std.Io` does not make: socket options,
-//! and `getaddrinfo` on the caller's own task. Everything else uplink does
+//! a look that neither waits nor takes anything, and `getaddrinfo` on the
+//! caller's own task. Everything else uplink does
 //! to a socket goes through the caller's `Io`.
 
 const std = @import("std");
@@ -67,6 +68,34 @@ pub fn abort(io: Io, handle: Io.net.Socket.Handle) void {
     }
     // ziglint-ignore: Z026 a socket that cannot be shut down is ended already, which is what this asks
     io.vtable.netShutdown(io.userdata, handle, .both) catch {};
+}
+
+/// What a look at an idle socket finds.
+pub const Peek = enum {
+    /// Nothing waiting: the peer has said nothing.
+    idle,
+    /// Bytes waiting.
+    readable,
+    /// The peer closed it, or it failed.
+    closed,
+};
+
+/// Look at a socket without waiting and without taking anything from it:
+/// one `recv` with `MSG_PEEK` and `MSG_DONTWAIT`, a few times cheaper than
+/// a readiness check through the `Io`. Null where the system has no such
+/// call: Windows and WASI.
+pub fn peek(handle: Io.net.Socket.Handle) ?Peek {
+    if (os == .windows or os == .wasi) return null;
+    var byte: [1]u8 = undefined;
+    while (true) {
+        const rc = std.posix.system.recvfrom(handle, &byte, byte.len, std.posix.MSG.PEEK | std.posix.MSG.DONTWAIT, null, null);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => return if (rc == 0) .closed else .readable,
+            .AGAIN => return .idle,
+            .INTR => continue,
+            else => return .closed,
+        }
+    }
 }
 
 /// Whether this target has a name lookup that runs on the caller's own
