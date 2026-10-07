@@ -397,3 +397,36 @@ test "no_proxy is read as each program reads it" {
     try testing.expect(bypassed("[::ffff:10.0.0.1]:80", "10.0.0.1", 80, .go));
     try testing.expect(!bypassed("10.0.0.1", "git.example.com", 80, .go));
 }
+
+test "Go's rules go around the proxy for loopback, and for what NO_PROXY names, with a port or without" {
+    const Case = struct { host: []const u8, port: u16 = 443, list: []const u8, around: bool };
+    for ([_]Case{
+        .{ .host = "localhost", .list = "", .around = true },
+        .{ .host = "127.0.0.1", .list = "", .around = true },
+        .{ .host = "127.8.9.10", .list = "", .around = true },
+        .{ .host = "::1", .list = "", .around = true },
+        .{ .host = "[::1]", .list = "", .around = true },
+        .{ .host = "git.example.com", .list = "", .around = false },
+        .{ .host = "git.example.com", .list = "*", .around = true },
+        .{ .host = "git.example.com", .list = "example.com", .around = true },
+        .{ .host = "example.com", .list = "example.com", .around = true },
+        .{ .host = "badexample.com", .list = "example.com", .around = false },
+        .{ .host = "example.com", .list = ".example.com", .around = false },
+        .{ .host = "git.example.com", .list = ".example.com", .around = true },
+        .{ .host = "example.com", .list = "*.example.com", .around = false },
+        .{ .host = "git.EXAMPLE.com", .list = " other.org , Example.com ", .around = true },
+        .{ .host = "git.example.com", .port = 443, .list = "example.com:8443", .around = false },
+        .{ .host = "git.example.com", .port = 8443, .list = "example.com:8443", .around = true },
+        .{ .host = "10.1.2.3", .list = "10.0.0.0/8", .around = true },
+        .{ .host = "11.1.2.3", .list = "10.0.0.0/8", .around = false },
+        .{ .host = "192.168.1.5", .list = "192.168.1.5", .around = true },
+        .{ .host = "192.168.1.5", .port = 80, .list = "192.168.1.5:8080", .around = false },
+        .{ .host = "fd00::1", .list = "fd00::/8", .around = true },
+        .{ .host = "10.1.2.3", .list = "10.1.2.3.example", .around = false },
+    }) |case| {
+        testing.expectEqual(case.around, bypassed(case.list, case.host, case.port, .go)) catch |err| {
+            std.debug.print("{s}:{d} with NO_PROXY={s}\n", .{ case.host, case.port, case.list });
+            return err;
+        };
+    }
+}
