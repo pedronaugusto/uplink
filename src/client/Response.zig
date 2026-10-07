@@ -86,12 +86,28 @@ pub const CollectError = error{
 /// came, for the caller to decode. Reads keep the client's timeouts. `io`
 /// is the one the reads run on until the response is released.
 pub fn reader(r: *Response, io: Io) *Io.Reader {
+    return r.open(io, null);
+}
+
+/// `reader`, buffered through `buffer` in place of the room the response's
+/// head leaves, which is at least 1 KiB: for a caller that peeks or takes
+/// more of the body at once, as a protocol of long framed lines does. A
+/// body the client decodes is buffered in the decoder's window, 64 KiB,
+/// and leaves `buffer` unused. It takes effect when called in place of the
+/// first `reader`, and `buffer` must outlive the reads.
+pub fn readerBuffered(r: *Response, io: Io, buffer: []u8) *Io.Reader {
+    return r.open(io, buffer);
+}
+
+fn open(r: *Response, io: Io, buffer: ?[]u8) *Io.Reader {
     if (r.conn) |c| c.io = io;
     if (!r.started) {
         r.started = true;
         r.body.in = if (r.conn) |c| c.reader() else Io.Reader.ending;
         switch (r.decoder) {
-            .none => {},
+            .none => if (buffer) |b| {
+                r.body.interface.buffer = b;
+            },
             .flate => |*f| f.state = .init(&r.body.interface, f.container, r.window),
         }
     }

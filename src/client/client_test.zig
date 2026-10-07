@@ -148,6 +148,39 @@ test "gzip and deflate bodies are decoded, and other codings handed over as they
     try testing.expectEqualSlices(u8, "\x28\xb5\x2f\xfd", zstd);
 }
 
+test "a body read through the caller's buffer is peeked as far as that buffer holds" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const body_len = 70_000;
+    const Ctx = struct {
+        fn answerFn(context: ?*anyopaque, _: Server.Request) Server.Answer {
+            const bytes: *const []const u8 = @ptrCast(@alignCast(context.?)); // safe: the test passes a pointer to its answer
+            return .{ .bytes = bytes.* };
+        }
+    };
+    const head = std.fmt.comptimePrint("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n", .{body_len});
+    const answer = try gpa.alloc(u8, head.len + body_len);
+    defer gpa.free(answer);
+    @memcpy(answer[0..head.len], head);
+    for (answer[head.len..], 0..) |*b, i| b.* = @truncate(i);
+    const answer_slice: []const u8 = answer;
+    const server = try Server.start(gpa, io, .{ .context = @ptrCast(@constCast(&answer_slice)), .answer = Ctx.answerFn });
+    defer server.stop();
+    var client: Client = .init(gpa, .{});
+    defer client.deinit(io);
+    var url_buf: [64]u8 = undefined;
+    var response = try client.send(io, .{ .url = server.url(&url_buf, "/") });
+    defer response.deinit(io);
+    const buffer = try gpa.alloc(u8, 64 << 10);
+    defer gpa.free(buffer);
+    const r = response.readerBuffered(io, buffer);
+    // A pkt-line is up to 65520 bytes, read whole where it lies.
+    const line = try r.peek(65520);
+    try testing.expectEqualSlices(u8, answer[head.len..][0..65520], line);
+    try testing.expectEqual(body_len, try r.discardRemaining());
+    try testing.expectEqual(@as(u32, 1), client.stats().in_use);
+}
+
 test "a range or a HEAD is asked for without a coding, whose bytes and length it would count instead" {
     const gpa = testing.allocator;
     const io = testing.io;
