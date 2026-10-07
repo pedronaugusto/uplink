@@ -40,7 +40,10 @@ pub const Options = struct {
     /// Turn Nagle's algorithm off on every socket.
     nodelay: bool = true,
     /// Send `Accept-Encoding: gzip, deflate` unless a request names its
-    /// own, and decode gzip and deflate bodies.
+    /// own, and decode gzip and deflate bodies. A request with a `Range`,
+    /// or a `HEAD`, is sent without it, as Go sends them: a range of coded
+    /// bytes cannot be decoded from its middle, and a `HEAD` would report
+    /// the coded length.
     decompress: bool = true,
     /// Sent as `User-Agent` unless a request names its own.
     user_agent: ?[]const u8 = null,
@@ -338,7 +341,7 @@ fn writeHead(c: *Client, io: Io, conn: *Connection, request: Request, url: url_m
         _ = try c.context.proxy_auth.writeField(io, w, c.options.proxy.?.credential, request.method.name, path);
     }
     if (c.options.user_agent) |ua| if (!named(request.headers, "user-agent")) try h1.writeField(w, .{ .name = "User-Agent", .value = ua });
-    if (c.options.decompress and !named(request.headers, "accept-encoding")) try w.writeAll("Accept-Encoding: gzip, deflate\r\n");
+    if (c.options.decompress and offersCodings(request)) try w.writeAll("Accept-Encoding: gzip, deflate\r\n");
     for (request.headers) |h| try h1.writeField(w, h);
     switch (framing) {
         .none, .until_close => {},
@@ -351,6 +354,13 @@ fn writeHead(c: *Client, io: Io, conn: *Connection, request: Request, url: url_m
 fn named(headers: []const std.http.Header, name: []const u8) bool {
     for (headers) |h| if (std.ascii.eqlIgnoreCase(h.name, name)) return true;
     return false;
+}
+
+/// Whether the client offers its codings for `request`: not when the
+/// request names its own, asks for a range, whose bytes would be the coded
+/// ones, or is a `HEAD`, whose length would be the coded one.
+fn offersCodings(request: Request) bool {
+    return !request.method.eql(.HEAD) and !named(request.headers, "accept-encoding") and !named(request.headers, "range");
 }
 
 /// Take a 407's challenges for the next request.

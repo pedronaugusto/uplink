@@ -148,6 +148,29 @@ test "gzip and deflate bodies are decoded, and other codings handed over as they
     try testing.expectEqualSlices(u8, "\x28\xb5\x2f\xfd", zstd);
 }
 
+test "a range or a HEAD is asked for without a coding, whose bytes and length it would count instead" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const server = try Server.start(gpa, io, Server.fixed(ok_answer));
+    defer server.stop();
+    var client: Client = .init(gpa, .{});
+    defer client.deinit(io);
+    var buf: [64]u8 = undefined;
+    var ranged = try client.send(io, .{ .url = server.url(&buf, "/object"), .headers = &.{.{ .name = "Range", .value = "bytes=10-" }} });
+    ranged.deinit(io);
+    var head = try client.send(io, .{ .method = .HEAD, .url = server.url(&buf, "/object") });
+    head.deinit(io);
+    var plain = try client.send(io, .{ .url = server.url(&buf, "/object") });
+    plain.deinit(io);
+    const seen = try server.received(gpa);
+    defer gpa.free(seen);
+    var want_buf: [512]u8 = undefined;
+    const want = try std.mem.print(&want_buf, "GET /object HTTP/1.1\r\nHost: 127.0.0.1:{0d}\r\nRange: bytes=10-\r\n\r\n" ++
+        "HEAD /object HTTP/1.1\r\nHost: 127.0.0.1:{0d}\r\n\r\n" ++
+        "GET /object HTTP/1.1\r\nHost: 127.0.0.1:{0d}\r\nAccept-Encoding: gzip, deflate\r\n\r\n", .{server.port});
+    try testing.expectEqualStrings(want, seen);
+}
+
 test "a head longer than the connection's buffer is read, and one past the limit refused" {
     const gpa = testing.allocator;
     const pad: [40 << 10]u8 = @splat('b');

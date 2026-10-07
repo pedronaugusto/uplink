@@ -15,7 +15,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or its method is idempotent. `stats` reads the client's counters without a
   lock.
 - `Response`: the head, read through a pooled buffer, and the body by its
-  framing, decoded for gzip and deflate. `collect`, `failure` and `deinit`,
+  framing, decoded for gzip and deflate, which the client offers on every
+  request but a `HEAD` or a range. `collect`, `failure` and `deinit`,
   which keeps the connection when the body was read to its end.
 - Proxies: HTTP (absolute form, or a `CONNECT` tunnel with TLS to the server
   inside it), HTTPS, and SOCKS 4, 4a, 5 and 5h; Basic and Digest (MD5,
