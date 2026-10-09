@@ -170,7 +170,7 @@ test "zstd bodies are decoded, and one whose window passes the client's cap refu
     defer gpa.free(megabyte);
     try testing.expectEqualStrings("hello", megabyte);
     try testing.expectError(error.HttpProtocolError, bodyOf(head ++ comptime rawFrame(24), .{}));
-    try testing.expectError(error.HttpProtocolError, bodyOf(head ++ comptime rawFrame(20), .{ .max_zstd_window = 512 << 10 }));
+    try testing.expectError(error.HttpProtocolError, bodyOf(head ++ comptime rawFrame(20), .{ .max_zstd_window = .fromRaw(512 << 10) }));
 }
 
 test "a body read through the caller's buffer is peeked as far as that buffer holds" {

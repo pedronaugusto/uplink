@@ -50,8 +50,8 @@ pub fn deinit(c: *Client, io: Io) void {
     while (s.pool.drain(io)) |k| switch (k) {
         .h1 => |conn| Response.closeConnection(io, &s.pool, conn),
     };
-    s.pool.deinit();
-    s.origin_auth.deinit();
+    s.pool.deinit(io);
+    s.origin_auth.deinit(io);
     s.context.deinit(io);
     c.* = undefined;
 }

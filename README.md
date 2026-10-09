@@ -17,7 +17,8 @@ I/O.
 
 Requires Zig 0.17.0. Fetch with `zig fetch --save
 git+https://github.com/pedronaugusto/uplink` and add the `uplink` module to
-your module's imports. It depends on `std` only.
+your module's imports. It depends on `std` and
+[aegis](https://github.com/pedronaugusto/aegis).
 
 ## Usage
 
@@ -34,7 +35,7 @@ const io = init.io;
 // redirects, tries failed requests again where that is safe, and may be
 // shared by several tasks. Cookies go in a jar of the caller's.
 var jar: uplink.CookieJar = .init(gpa, .{});
-defer jar.deinit();
+defer jar.deinit(io);
 var client: uplink.Client = .init(gpa, .{
     .timeouts = .{ .connect = .fromSeconds(10), .activity = .fromSeconds(30) },
     .cookies = &jar,
@@ -90,7 +91,8 @@ method is idempotent; statuses such as 429 and 503 are tried again when the
 retries name them, after `Retry-After`. A 401 is answered from the caller's
 `Credentials`, asked once per origin, and the answer, Basic, Digest or
 Bearer, is sent with every later request to that origin and no other; the
-store is told whether it was taken, as git's credential helpers want. A
+store is told whether it was taken, as git's credential helpers want. The answer is kept in aegis secret memory and wiped when it is
+forgotten. A
 `CookieJar` keeps cookies by RFC 6265bis and reads and writes the Netscape
 cookie file. A `Prepare` hook sees every attempt before it is written, so a
 signature is made again for each redirect and retry, and an `Observer` is

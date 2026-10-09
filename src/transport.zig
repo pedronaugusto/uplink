@@ -13,6 +13,8 @@ pub const ProxyAuth = @import("transport/ProxyAuth.zig");
 pub const BufferPool = @import("transport/BufferPool.zig");
 /// The task that keeps read and write timeouts.
 pub const Timer = @import("transport/Timer.zig");
+/// The awake clock as a checked number.
+pub const awake = @import("transport/awake.zig");
 /// Why an exchange failed, in detail.
 pub const Diagnostics = @import("transport/Diagnostics.zig");
 /// Every step of a request, with its timing, as it happens.
@@ -25,6 +27,7 @@ test {
     _ = ProxyAuth;
     _ = BufferPool;
     _ = Timer;
+    _ = awake;
     _ = Diagnostics;
     _ = Observer;
 }

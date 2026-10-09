@@ -3,6 +3,7 @@
 //! options. A client is one of these; each request's run points at it.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const h1 = @import("../wire/h1.zig");
@@ -47,7 +48,7 @@ pub const Options = struct {
     /// The largest zstd window decoded: a body asking for more is refused
     /// as it is read. A client keeps one window of this size, plus a
     /// block, once it has decoded zstd.
-    max_zstd_window: u32 = 8 << 20,
+    max_zstd_window: aegis.units.Bytes(u32) = .fromRaw(8 << 20),
     redirects: policy.Redirects = .default,
     retries: policy.Retries = .{},
     /// Where cookies are kept and sent from; null keeps none.

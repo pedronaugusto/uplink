@@ -26,7 +26,7 @@ pub fn main(init: std.process.Init) !void {
     // redirects, tries failed requests again where that is safe, and may be
     // shared by several tasks. Cookies go in a jar of the caller's.
     var jar: uplink.CookieJar = .init(gpa, .{});
-    defer jar.deinit();
+    defer jar.deinit(io);
     var client: uplink.Client = .init(gpa, .{
         .timeouts = .{ .connect = .fromSeconds(10), .activity = .fromSeconds(30) },
         .cookies = &jar,

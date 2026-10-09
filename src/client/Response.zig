@@ -142,7 +142,7 @@ fn open(r: *Response, io: Io, buffer: ?[]u8) *Io.Reader {
                 r.body.interface.buffer = b;
             },
             .flate => |f| f.state = .init(&r.body.interface, f.container, r.window[0..flate_window]),
-            .zstd => |z| z.* = .init(&r.body.interface, r.window[0..r.ctx.zstdBufferLen()], .{ .window_len = r.ctx.zstd_max_window }),
+            .zstd => |z| z.* = .init(&r.body.interface, r.window[0..r.ctx.zstdBufferLen()], .{ .window_len = r.ctx.zstd_max_window.raw() }),
         }
     }
     return switch (r.decoder) {
@@ -241,7 +241,7 @@ pub fn releaseHead(r: *Response, io: Io) void {
 /// Read what is left of the body, as it came, when it is no more than the
 /// pool's `drain_limit`, so the connection can be kept.
 fn drain(r: *Response, io: Io) void {
-    var left: usize = r.pool.options.drain_limit;
+    var left: usize = r.pool.options.drain_limit.raw();
     if (left == 0) return;
     if (!r.started) {
         r.started = true;

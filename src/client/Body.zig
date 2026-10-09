@@ -201,7 +201,7 @@ test "a chunked body is decoded where it lies, and what follows it is left" {
 
 test "a chunked body's trailer fields are gathered, and an empty section takes nothing" {
     var pool: BufferPool = .init(testing.allocator, 1);
-    defer pool.deinit();
+    defer pool.deinit(testing.io);
     var in: Io.Reader = .fixed("3\r\nabc\r\n0\r\nChecksum: 9\r\n\r\nNEXT");
     var buf: [2]u8 = undefined;
     var b: Body = .init(&in, .chunked, &buf);

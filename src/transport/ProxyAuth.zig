@@ -4,6 +4,7 @@
 //! more with the fresh one.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const auth = @import("../wire/auth.zig");
@@ -12,24 +13,24 @@ const Proxy = @import("Proxy.zig");
 
 const ProxyAuth = @This();
 
-/// Private: held for `answer`.
-mutex: Io.Mutex = .init,
 /// Private: the scheme chosen, once the proxy asked or Basic was asked for
-/// from the start.
-answer: ?Answer = null,
+/// from the start, reached only through the lock beside it.
+answer: aegis.BlockingGuarded(?Answer),
 
 const Answer = union(enum) {
     basic,
     digest: auth.Digest,
 };
 
-pub const init: ProxyAuth = .{};
+pub const init: ProxyAuth = .{ .answer = .init(null) };
 
-pub fn deinit(pa: *ProxyAuth) void {
-    if (pa.answer) |*a| switch (a.*) {
+pub fn deinit(pa: *ProxyAuth, io: Io) void {
+    var held = pa.answer.acquireUncancelable(io);
+    if (held.value().*) |*a| switch (a.*) {
         .basic => {},
         .digest => |*d| d.deinit(),
     };
+    held.deinit(io);
     pa.* = undefined;
 }
 
@@ -38,10 +39,11 @@ pub fn deinit(pa: *ProxyAuth) void {
 /// proxy is answered. Returns whether a field was written.
 pub fn writeField(pa: *ProxyAuth, io: Io, w: *Io.Writer, credential: ?Proxy.Credential, method: []const u8, uri: []const u8) Io.Writer.Error!bool {
     const c = credential orelse return false;
-    pa.mutex.lockUncancelable(io);
-    defer pa.mutex.unlock(io);
-    if (pa.answer == null and c.method == .basic) pa.answer = .basic;
-    const answer = &(pa.answer orelse return false);
+    var held = pa.answer.acquireUncancelable(io);
+    defer held.deinit(io);
+    const current = held.value();
+    if (current.* == null and c.method == .basic) current.* = .basic;
+    const answer = &(current.* orelse return false);
     try w.writeAll("Proxy-Authorization: ");
     switch (answer.*) {
         .basic => try auth.writeBasic(w, c.user, c.password),
@@ -78,9 +80,10 @@ pub fn challenged(pa: *ProxyAuth, gpa: Allocator, io: Io, credential: ?Proxy.Cre
         };
         try challenges.appendSlice(arena, list);
     }
-    pa.mutex.lockUncancelable(io);
-    defer pa.mutex.unlock(io);
-    if (pa.answer) |*previous| {
+    var held = pa.answer.acquireUncancelable(io);
+    defer held.deinit(io);
+    const current = held.value();
+    if (current.*) |*previous| {
         // Answered and refused, unless the nonce only went stale.
         if (previous.* != .digest) return false;
         const fresh = for (challenges.items) |ch| {
@@ -90,7 +93,7 @@ pub fn challenged(pa: *ProxyAuth, gpa: Allocator, io: Io, credential: ?Proxy.Cre
         } else return false;
         const next: auth.Digest = try .init(gpa, fresh, &cnonce(io));
         previous.digest.deinit();
-        pa.answer = .{ .digest = next };
+        current.* = .{ .digest = next };
         return true;
     }
     switch (auth.pick(challenges.items, c.method, offered)) {
@@ -98,9 +101,9 @@ pub fn challenged(pa: *ProxyAuth, gpa: Allocator, io: Io, credential: ?Proxy.Cre
             // Made apart and then stored: `answer` keeps its old value when
             // the copies cannot be made.
             const digest: auth.Digest = try .init(gpa, ch, &cnonce(io));
-            pa.answer = .{ .digest = digest };
+            current.* = .{ .digest = digest };
         },
-        .basic => pa.answer = .basic,
+        .basic => current.* = .basic,
         .unsupported => return error.ProxyAuthMethodUnsupported,
     }
     return true;
@@ -129,7 +132,7 @@ test "Basic is sent from the start when asked for, else only once the proxy asks
     var buf: [256]u8 = undefined;
     var w: Io.Writer = .fixed(&buf);
     var pa: ProxyAuth = .init;
-    defer pa.deinit();
+    defer pa.deinit(io);
     try testing.expect(!try pa.writeField(io, &w, .{ .user = "a", .password = "b" }, "GET", "/"));
     try testing.expect(try pa.writeField(io, &w, .{ .user = "a", .password = "b", .method = .basic }, "GET", "/"));
     try testing.expectEqualStrings("Proxy-Authorization: Basic YTpi\r\n", w.buffered());
@@ -138,7 +141,7 @@ test "Basic is sent from the start when asked for, else only once the proxy asks
 test "a Digest challenge is answered, a stale nonce answered again, and a refusal not" {
     const io = testing.io;
     var pa: ProxyAuth = .init;
-    defer pa.deinit();
+    defer pa.deinit(io);
     var offered_buf: [64]u8 = undefined;
     var offered: Io.Writer = .fixed(&offered_buf);
     const credential: Proxy.Credential = .{ .user = "a", .password = "b" };
@@ -153,7 +156,7 @@ test "a Digest challenge is answered, a stale nonce answered again, and a refusa
     try testing.expect(std.mem.find(u8, w.buffered(), "nonce=\"n2\"") != null);
     try testing.expect(!try pa.challenged(testing.allocator, io, credential, &headersOf("Digest realm=\"p\", nonce=\"n3\""), &offered));
     var unanswered: ProxyAuth = .init;
-    defer unanswered.deinit();
+    defer unanswered.deinit(io);
     try testing.expectError(error.ProxyAuthMethodUnsupported, unanswered.challenged(testing.allocator, io, credential, &headersOf("Negotiate"), &offered));
     try testing.expectEqualStrings("Negotiate", offered.buffered());
     try testing.expect(!try unanswered.challenged(testing.allocator, io, null, &headersOf("Basic"), &offered));
@@ -164,7 +167,7 @@ test "a challenge leaves nothing allocated when allocation stops" {
     const Check = struct {
         fn run(gpa: Allocator) !void {
             var pa: ProxyAuth = .init;
-            defer pa.deinit();
+            defer pa.deinit(testing.io);
             var offered_buf: [64]u8 = undefined;
             var offered: Io.Writer = .fixed(&offered_buf);
             _ = try pa.challenged(gpa, testing.io, .{ .user = "a", .password = "b" }, &headersOf("Negotiate, Digest realm=\"r\", nonce=\"n\", opaque=\"o\""), &offered);

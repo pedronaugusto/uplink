@@ -16,28 +16,38 @@
 //! wakes it, and a shorter timeout than any before wakes it to tick faster.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 
+const awake = @import("awake.zig");
 const sys = @import("../net/sys.zig");
 
 const Timer = @This();
 
-/// Private: held for `watches`, by the task while it scans.
-mutex: Io.Mutex = .init,
-/// Private: every watched connection.
-watches: std.DoublyLinkedList = .{},
+/// Private: the watched connections and the task, reached only through the
+/// lock beside them, which the task holds while it scans.
+state: aegis.BlockingGuarded(State) = .init(.{}),
+// The four below are the arm and disarm of every operation, atomics with no
+// lock by design (the hot path of a timed read or write), measured against
+// a locked version.
 /// Private: how many watches have an operation armed.
 armed: std.atomic.Value(u32) = .init(0),
 /// Private: 1 while the task waits for an operation to be armed; the futex
 /// it waits on.
 parked: std.atomic.Value(u32) = .init(0),
-/// Private: the task, once started.
-task: ?Io.Future(void) = null,
 /// How often the task looks at the armed deadlines, in nanoseconds.
 tick: std.atomic.Value(i64),
 /// Private: bumped to cut the task's wait short; the futex it waits on
 /// between ticks.
 nudge: std.atomic.Value(u32) = .init(0),
+
+/// What the lock guards.
+const State = struct {
+    /// Every watched connection.
+    watches: std.DoublyLinkedList = .{},
+    /// The task, once started.
+    task: ?Io.Future(void) = null,
+};
 
 /// One connection's operation deadline.
 pub const Watch = struct {
@@ -60,7 +70,7 @@ pub fn init(shortest: ?Io.Duration) Timer {
 
 /// A tenth of `d`, between a millisecond and a second.
 fn tickFor(d: Io.Duration) i64 {
-    return @intCast(std.math.clamp(@divTrunc(d.nanoseconds, 10), std.time.ns_per_ms, std.time.ns_per_s));
+    return @intCast(std.math.clamp(@divTrunc(d.nanoseconds, 10), std.time.ns_per_ms, std.time.ns_per_s)); // safe: clamped to between a millisecond and a second
 }
 
 /// Keep timeouts as short as `d` too: the tick shortens to match, at once.
@@ -78,33 +88,42 @@ pub fn tighten(t: *Timer, io: Io, d: Io.Duration) void {
 
 /// Stop the task. Every watch must have been removed.
 pub fn deinit(t: *Timer, io: Io) void {
-    std.debug.assert(t.watches.first == null);
-    if (t.task) |*task| task.cancel(io);
+    // The task is canceled outside the lock, which it may be waiting for.
+    var task = task: {
+        var held = t.state.acquireUncancelable(io);
+        defer held.deinit(io);
+        const state = held.value();
+        aegis.assert.pre(state.watches.first == null, "every watch was removed");
+        break :task state.task;
+    };
+    if (task) |*running| running.cancel(io);
     t.* = undefined;
 }
 
 /// Watch `w`, starting the task if it is not running. False when no task
 /// can run beside the caller's: the watch is not added.
 pub fn add(t: *Timer, io: Io, w: *Watch) bool {
-    t.mutex.lockUncancelable(io);
-    defer t.mutex.unlock(io);
-    if (t.task == null) t.task = io.concurrent(run, .{ t, io }) catch return false;
-    t.watches.append(&w.node);
+    var held = t.state.acquireUncancelable(io);
+    defer held.deinit(io);
+    const state = held.value();
+    if (state.task == null) state.task = io.concurrent(run, .{ t, io }) catch return false;
+    state.watches.append(&w.node);
     return true;
 }
 
 /// Stop watching `w`, which has nothing armed. Once this returns the task
 /// never touches `w` or its socket again.
 pub fn remove(t: *Timer, io: Io, w: *Watch) void {
-    std.debug.assert(w.deadline.load(.monotonic) == 0);
-    t.mutex.lockUncancelable(io);
-    defer t.mutex.unlock(io);
-    t.watches.remove(&w.node);
+    aegis.assert.pre(w.deadline.load(.monotonic) == 0, "nothing is armed on a watch being removed");
+    var held = t.state.acquireUncancelable(io);
+    defer held.deinit(io);
+    held.value().watches.remove(&w.node);
 }
 
 /// An operation on `w`'s socket starts, to end by `deadline` (awake clock).
 pub fn arm(t: *Timer, io: Io, w: *Watch, deadline: Io.Timestamp) void {
-    w.deadline.store(@intCast(@max(1, deadline.nanoseconds)), .release);
+    // A deadline an i64 of nanoseconds cannot hold is the latest instant.
+    w.deadline.store(@max(1, awake.of(deadline).raw()), .release);
     if (t.armed.fetchAdd(1, .seq_cst) == 0 and t.parked.load(.seq_cst) == 1) {
         t.parked.store(0, .seq_cst);
         io.futexWake(u32, &t.parked.raw, 1);
@@ -139,10 +158,10 @@ fn run(t: *Timer, io: Io) void {
 }
 
 fn scan(t: *Timer, io: Io) void {
-    t.mutex.lockUncancelable(io);
-    defer t.mutex.unlock(io);
-    const now: i64 = @intCast(Io.Clock.awake.now(io).nanoseconds);
-    var it = t.watches.first;
+    var held = t.state.acquireUncancelable(io);
+    defer held.deinit(io);
+    const now = awake.now(io).raw();
+    var it = held.value().watches.first;
     while (it) |node| : (it = node.next) {
         const w: *Watch = @fieldParentPtr("node", node);
         const deadline = w.deadline.load(.acquire);
@@ -195,4 +214,17 @@ test "the tick is a tenth of the shortest timeout, between a millisecond and a s
     try testing.expectEqual(@as(i64, 5 * std.time.ns_per_ms), t.tick.load(.monotonic));
     t.tighten(testing.io, .fromSeconds(5));
     try testing.expectEqual(@as(i64, 5 * std.time.ns_per_ms), t.tick.load(.monotonic));
+}
+
+test "a deadline past what an i64 holds is the latest instant, and never fires" {
+    const io = testing.io;
+    var timer: Timer = .init(null);
+    var watch: Watch = .{ .handle = undefined };
+    timer.arm(io, &watch, .fromNanoseconds(std.math.maxInt(i96)));
+    try testing.expectEqual(std.math.maxInt(i64), watch.deadline.load(.monotonic));
+    timer.disarm(&watch);
+    // One at or before the start is the earliest a deadline can be, not none.
+    timer.arm(io, &watch, .fromNanoseconds(std.math.minInt(i96)));
+    try testing.expectEqual(@as(i64, 1), watch.deadline.load(.monotonic));
+    timer.disarm(&watch);
 }

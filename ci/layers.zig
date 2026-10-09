@@ -62,6 +62,9 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "net", .patterns = &.{
         "src/net.zig",
     } },
+    .{ .name = "transport clock", .patterns = &.{
+        "src/transport/awake.zig",
+    } },
     .{ .name = "transport values", .patterns = &.{
         "src/transport/Proxy.zig",
         "src/transport/Diagnostics.zig",
@@ -122,6 +125,7 @@ pub const modules: []const gantry.NamedModule = &.{};
 
 pub const references: []const gantry.rules.ReferenceRule = &.{
     .{ .name = "named dependencies", .unresolved_only = true, .except_targets = &.{
+        "aegis",
         "builtin",
         "shakedown",
         "std",

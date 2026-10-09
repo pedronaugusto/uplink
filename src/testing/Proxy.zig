@@ -6,6 +6,7 @@
 //! was answered for.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const Server = @import("Server.zig");
@@ -20,10 +21,9 @@ options: Options,
 task: Io.Future(void) = undefined,
 group: Io.Group = .init,
 stopping: std.atomic.Value(bool) = .init(false),
-mutex: Io.Mutex = .init,
 /// Each request's first line, one to a line; SOCKS requests as `SOCKS <v>
 /// <host>:<port>`.
-log: std.ArrayList(u8) = .empty,
+log: aegis.BlockingGuarded(std.ArrayList(u8)),
 /// Connections accepted.
 accepted: std.atomic.Value(u32) = .init(0),
 /// Requests refused for want of credentials.
@@ -52,7 +52,7 @@ pub fn start(gpa: Allocator, io: Io, options: Options) !*Proxy {
     errdefer gpa.destroy(p);
     var listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
     errdefer listener.deinit(io);
-    p.* = .{ .io = io, .gpa = gpa, .listener = listener, .port = listener.socket.address.getPort(), .options = options };
+    p.* = .{ .io = io, .gpa = gpa, .listener = listener, .port = listener.socket.address.getPort(), .options = options, .log = .init(.empty) };
     p.task = io.concurrent(serve, .{p}) catch return error.SkipZigTest;
     return p;
 }
@@ -65,21 +65,23 @@ pub fn stop(p: *Proxy) void {
     p.task.await(io);
     p.group.cancel(io);
     p.listener.deinit(io);
-    p.log.deinit(p.gpa);
+    var held = p.log.acquireUncancelable(io);
+    held.value().deinit(p.gpa);
+    held.deinit(io);
     p.gpa.destroy(p);
 }
 
 /// A copy of the log, in `gpa`.
 pub fn lines(p: *Proxy, gpa: Allocator) ![]u8 {
-    p.mutex.lockUncancelable(p.io);
-    defer p.mutex.unlock(p.io);
-    return gpa.dupe(u8, p.log.items);
+    var held = p.log.acquireUncancelable(p.io);
+    defer held.deinit(p.io);
+    return gpa.dupe(u8, held.value().items);
 }
 
 fn note(p: *Proxy, comptime format: []const u8, args: anytype) void {
-    p.mutex.lockUncancelable(p.io);
-    defer p.mutex.unlock(p.io);
-    p.log.print(p.gpa, format ++ "\n", args) catch return;
+    var held = p.log.acquireUncancelable(p.io);
+    defer held.deinit(p.io);
+    held.value().print(p.gpa, format ++ "\n", args) catch return;
 }
 
 fn serve(p: *Proxy) void {

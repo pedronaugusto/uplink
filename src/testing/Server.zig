@@ -3,6 +3,7 @@
 //! records what it saw. Every connection runs as a task of its own.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -22,9 +23,8 @@ stopping: std.atomic.Value(bool) = .init(false),
 accepted: std.atomic.Value(u32) = .init(0),
 /// Requests answered.
 requests: std.atomic.Value(u32) = .init(0),
-mutex: Io.Mutex = .init,
 /// Every request's head and body, as received, one after another.
-log: std.ArrayList(u8) = .empty,
+log: aegis.BlockingGuarded(std.ArrayList(u8)),
 
 /// What to do with one request.
 pub const Handler = struct {
@@ -88,7 +88,7 @@ pub fn start(gpa: Allocator, io: Io, handler: Handler) !*Server {
     errdefer gpa.destroy(s);
     var listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
     errdefer listener.deinit(io);
-    s.* = .{ .io = io, .gpa = gpa, .listener = listener, .port = listener.socket.address.getPort(), .handler = handler };
+    s.* = .{ .io = io, .gpa = gpa, .listener = listener, .port = listener.socket.address.getPort(), .handler = handler, .log = .init(.empty) };
     s.task = io.concurrent(serve, .{s}) catch return error.SkipZigTest;
     return s;
 }
@@ -100,7 +100,7 @@ pub fn startUnix(gpa: Allocator, io: Io, path: []const u8, handler: Handler) !*S
     const address = try Io.net.UnixAddress.init(path);
     var listener = try address.listen(io, .{});
     errdefer listener.deinit(io);
-    s.* = .{ .io = io, .gpa = gpa, .listener = listener, .port = 0, .path = path, .handler = handler };
+    s.* = .{ .io = io, .gpa = gpa, .listener = listener, .port = 0, .path = path, .handler = handler, .log = .init(.empty) };
     s.task = io.concurrent(serve, .{s}) catch return error.SkipZigTest;
     return s;
 }
@@ -118,7 +118,9 @@ pub fn stop(s: *Server) void {
     s.task.await(io);
     s.group.cancel(io);
     s.listener.deinit(io);
-    s.log.deinit(s.gpa);
+    var held = s.log.acquireUncancelable(io);
+    held.value().deinit(s.gpa);
+    held.deinit(io);
     s.gpa.destroy(s);
 }
 
@@ -129,9 +131,9 @@ pub fn url(s: *const Server, buffer: []u8, path: []const u8) []const u8 {
 
 /// A copy of everything received, in `gpa`.
 pub fn received(s: *Server, gpa: Allocator) ![]u8 {
-    s.mutex.lockUncancelable(s.io);
-    defer s.mutex.unlock(s.io);
-    return gpa.dupe(u8, s.log.items);
+    var held = s.log.acquireUncancelable(s.io);
+    defer held.deinit(s.io);
+    return gpa.dupe(u8, held.value().items);
 }
 
 fn serve(s: *Server) void {
@@ -205,10 +207,11 @@ fn writeAnswer(io: Io, w: *Io.Writer, answer: Answer) !void {
 }
 
 fn record(s: *Server, head: []const u8, body: []const u8) void {
-    s.mutex.lockUncancelable(s.io);
-    defer s.mutex.unlock(s.io);
-    s.log.appendSlice(s.gpa, head) catch return;
-    s.log.appendSlice(s.gpa, body) catch return;
+    var held = s.log.acquireUncancelable(s.io);
+    defer held.deinit(s.io);
+    const log = held.value();
+    log.appendSlice(s.gpa, head) catch return;
+    log.appendSlice(s.gpa, body) catch return;
 }
 
 const Read = struct { head: []const u8, body: []const u8, len: usize };

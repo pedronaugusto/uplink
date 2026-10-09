@@ -169,7 +169,7 @@ test "a redirect off the origin keeps the proxy's answer, and the jar's cookies 
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     var jar: CookieJar = .init(gpa, .{});
-    defer jar.deinit();
+    defer jar.deinit(io);
     var target_url: [64]u8 = undefined;
     try jar.store(io, try url_mod.parse(target.url(&target_url, "/")), "there=1");
     var proxy_url: [64]u8 = undefined;
@@ -380,7 +380,7 @@ test "cookies set on a redirect go with the redirected request and every later o
     const server = try Server.start(gpa, io, .{ .answer = session });
     defer server.stop();
     var jar: CookieJar = .init(gpa, .{});
-    defer jar.deinit();
+    defer jar.deinit(io);
     var client: Client = .init(gpa, .{ .cookies = &jar });
     defer client.deinit(io);
     var buf: [64]u8 = undefined;
@@ -447,7 +447,7 @@ test "a body left unread is drained when it is small, so the connection is kept"
     defer server.stop();
     var buf: [64]u8 = undefined;
     for ([_]struct { u32, u64 }{ .{ 64 << 10, 1 }, .{ 10, 3 } }) |case| {
-        var client: Client = .init(gpa, .{ .pool = .{ .drain_limit = case[0] } });
+        var client: Client = .init(gpa, .{ .pool = .{ .drain_limit = .fromRaw(case[0]) } });
         defer client.deinit(io);
         for (0..3) |_| {
             var response = try client.send(io, .{ .url = server.url(&buf, "/") });
@@ -759,7 +759,7 @@ test "a warm client with cookies and a kept answer still allocates nothing per r
     defer server.stop();
     var counting: shakedown.alloc.Counting = .init(testing.allocator);
     var jar: CookieJar = .init(testing.allocator, .{});
-    defer jar.deinit();
+    defer jar.deinit(io);
     var store: Store = .{ .secret = .{ .password = .{ .user = "a", .password = "b" } } };
     var client: Client = .init(counting.allocator(), .{ .cookies = &jar, .credentials = store.credentials(), .timeouts = .{ .activity = .fromSeconds(30) } });
     defer client.deinit(io);

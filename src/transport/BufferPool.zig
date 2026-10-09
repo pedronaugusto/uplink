@@ -7,6 +7,7 @@
 //! buffers; one given back beyond that is freed.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const tls = @import("../tls.zig");
@@ -15,14 +16,16 @@ const BufferPool = @This();
 
 /// Private: where buffers come from and go back to.
 gpa: Allocator,
-/// Private: held for the free lists.
-mutex: Io.Mutex = .init,
-/// Private: free buffers of each class.
-free: [classes.len]?*Node = @splat(null),
-/// Private: how many each list holds.
-counts: [classes.len]u32 = @splat(0),
+/// Private: the free lists, reached only through the lock beside them.
+lists: aegis.BlockingGuarded(Lists),
 /// The most free buffers kept of each size.
 max_free: u32,
+
+/// The free buffers of each class and how many each list holds.
+const Lists = struct {
+    free: [classes.len]?*Node = @splat(null),
+    counts: [classes.len]u32 = @splat(0),
+};
 
 /// The sizes buffers come in.
 pub const Class = enum(u2) {
@@ -55,17 +58,20 @@ const Node = struct { next: ?*Node };
 
 /// An empty pool keeping up to `max_free` free buffers of each size.
 pub fn init(gpa: Allocator, max_free: u32) BufferPool {
-    return .{ .gpa = gpa, .max_free = max_free };
+    return .{ .gpa = gpa, .lists = .init(.{}), .max_free = max_free };
 }
 
 /// Free every kept buffer. Buffers still borrowed must not be given back.
-pub fn deinit(p: *BufferPool) void {
-    for (&p.free, classes) |*head, len| {
+pub fn deinit(p: *BufferPool, io: Io) void {
+    var held = p.lists.acquireUncancelable(io);
+    const lists = held.value();
+    for (&lists.free, classes) |*head, len| {
         while (head.*) |node| {
             head.* = node.next;
             p.gpa.free(bytesOf(node, len));
         }
     }
+    held.deinit(io);
     p.* = undefined;
 }
 
@@ -73,11 +79,12 @@ pub fn deinit(p: *BufferPool) void {
 pub fn acquire(p: *BufferPool, io: Io, class: Class) Allocator.Error![]u8 {
     const i = @backingInt(class);
     {
-        p.mutex.lockUncancelable(io);
-        defer p.mutex.unlock(io);
-        if (p.free[i]) |node| {
-            p.free[i] = node.next;
-            p.counts[i] -= 1;
+        var held = p.lists.acquireUncancelable(io);
+        defer held.deinit(io);
+        const lists = held.value();
+        if (lists.free[i]) |node| {
+            lists.free[i] = node.next;
+            lists.counts[i] -= 1;
             return bytesOf(node, classes[i]);
         }
     }
@@ -92,12 +99,13 @@ pub fn release(p: *BufferPool, io: Io, buffer: []u8) void {
     const i = @backingInt(class);
     const node: *Node = @ptrCast(@alignCast(buffer.ptr)); // safe: every buffer the pool hands out is aligned for a Node and longer than one
     {
-        p.mutex.lockUncancelable(io);
-        defer p.mutex.unlock(io);
-        if (p.counts[i] < p.max_free) {
-            node.* = .{ .next = p.free[i] };
-            p.free[i] = node;
-            p.counts[i] += 1;
+        var held = p.lists.acquireUncancelable(io);
+        defer held.deinit(io);
+        const lists = held.value();
+        if (lists.counts[i] < p.max_free) {
+            node.* = .{ .next = lists.free[i] };
+            lists.free[i] = node;
+            lists.counts[i] += 1;
             return;
         }
     }
@@ -106,9 +114,9 @@ pub fn release(p: *BufferPool, io: Io, buffer: []u8) void {
 
 /// How many buffers of `class` are kept free.
 pub fn kept(p: *BufferPool, io: Io, class: Class) u32 {
-    p.mutex.lockUncancelable(io);
-    defer p.mutex.unlock(io);
-    return p.counts[@backingInt(class)];
+    var held = p.lists.acquireUncancelable(io);
+    defer held.deinit(io);
+    return held.value().counts[@backingInt(class)];
 }
 
 fn bytesOf(node: *Node, len: usize) []align(alignment.toByteUnits()) u8 {
@@ -121,7 +129,7 @@ const testing = std.testing;
 test "a given-back buffer is handed out again, and past the cap it is freed" {
     const io = testing.io;
     var pool: BufferPool = .init(testing.allocator, 1);
-    defer pool.deinit();
+    defer pool.deinit(io);
     const a = try pool.acquire(io, .small);
     const b = try pool.acquire(io, .small);
     try testing.expectEqual(@as(usize, 4096), a.len);

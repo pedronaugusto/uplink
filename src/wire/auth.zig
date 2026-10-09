@@ -16,6 +16,7 @@
 //! spoken: `pick` names them unsupported.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
 const fields = @import("fields.zig");
@@ -179,15 +180,18 @@ pub fn pick(challenges: []const Challenge, method: Method, offered: *Writer) Pic
 pub fn writeBasic(w: *Writer, user: []const u8, password: []const u8) Writer.Error!void {
     try w.writeAll("Basic ");
     const encoder = std.base64.standard.Encoder;
-    // In pieces of three bytes, so nothing is gathered first.
-    var carry: [3]u8 = undefined;
+    // In pieces of three bytes, so nothing is gathered first. The piece
+    // in hand holds credential bytes, wiped when the answer is written.
+    var held: aegis.Secret([3]u8) = .init(undefined);
+    defer held.deinit();
+    const carry = held.exposeMut();
     var carried: usize = 0;
     for ([_][]const u8{ user, ":", password }) |part| for (part) |c| {
         carry[carried] = c;
         carried += 1;
         if (carried == 3) {
             var out: [4]u8 = undefined;
-            try w.writeAll(encoder.encode(&out, &carry));
+            try w.writeAll(encoder.encode(&out, carry));
             carried = 0;
         }
     };
@@ -308,10 +312,13 @@ pub const Digest = struct {
         // unreachable: a u32 is at most eight hex digits
         const nc = std.mem.print(&nc_buf, "{x:0>8}", .{d.nc}) catch unreachable;
 
-        var ha1_buf: [max_hex]u8 = undefined;
-        var ha1 = d.hash(&ha1_buf, &.{ user, ":", d.realm, ":", password });
-        var outer_buf: [max_hex]u8 = undefined;
-        if (d.session) ha1 = d.hash(&outer_buf, &.{ ha1, ":", d.nonce, ":", d.cnonce });
+        // HA1 stands for the password to a server that knows it: wiped.
+        var ha1_buf: aegis.Secret([max_hex]u8) = .init(undefined);
+        defer ha1_buf.deinit();
+        var ha1 = d.hash(ha1_buf.exposeMut(), &.{ user, ":", d.realm, ":", password });
+        var outer_buf: aegis.Secret([max_hex]u8) = .init(undefined);
+        defer outer_buf.deinit();
+        if (d.session) ha1 = d.hash(outer_buf.exposeMut(), &.{ ha1, ":", d.nonce, ":", d.cnonce });
         var ha2_buf: [max_hex]u8 = undefined;
         const ha2 = d.hash(&ha2_buf, &.{ method, ":", uri });
         var response_buf: [max_hex]u8 = undefined;
@@ -360,13 +367,19 @@ pub const Digest = struct {
     }
 
     fn hexOf(comptime H: type, out: *[max_hex]u8, parts: []const []const u8) []const u8 {
-        var h = H.init(.{});
+        // The hash state holds `parts`, the password among them for HA1, and
+        // the digest stands for it: all three are wiped.
+        var state: aegis.Secret(H) = .init(.init(.{}));
+        defer state.deinit();
+        const h = state.exposeMut();
         for (parts) |p| h.update(p);
-        var digest: [H.digest_length]u8 = undefined;
-        h.final(&digest);
-        const hex = std.fmt.bytesToHex(digest, .lower);
-        @memcpy(out[0..hex.len], &hex);
-        return out[0..hex.len];
+        var digest: aegis.Secret([H.digest_length]u8) = .init(undefined);
+        defer digest.deinit();
+        h.final(digest.exposeMut());
+        var hex: aegis.Secret([H.digest_length * 2]u8) = .init(std.fmt.bytesToHex(digest.expose().*, .lower));
+        defer hex.deinit();
+        @memcpy(out[0..hex.expose().len], hex.expose());
+        return out[0..hex.expose().len];
     }
 };
 

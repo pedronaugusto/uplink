@@ -6,6 +6,7 @@
 //! An address literal never reaches a resolver: `lookup` answers it itself.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const IpAddress = Io.net.IpAddress;
@@ -159,10 +160,9 @@ pub const Cache = struct {
     gpa: Allocator,
     inner: Resolver,
     options: Options,
-    /// Private: held for `entries`.
-    mutex: Io.Mutex = .init,
-    /// Private: names, lower-cased and owned, to their answers.
-    entries: std.StringHashMapUnmanaged(Entry) = .empty,
+    /// Private: names, lower-cased and owned, to their answers, reached
+    /// only through the lock beside them.
+    entries: aegis.BlockingGuarded(std.StringHashMapUnmanaged(Entry)),
 
     pub const Options = struct {
         /// How long an answer is kept: curl's default.
@@ -183,13 +183,17 @@ pub const Cache = struct {
     };
 
     pub fn init(gpa: Allocator, inner: Resolver, options: Options) Cache {
-        return .{ .gpa = gpa, .inner = inner, .options = options };
+        return .{ .gpa = gpa, .inner = inner, .options = options, .entries = .init(.empty) };
     }
 
-    pub fn deinit(c: *Cache) void {
-        var it = c.entries.keyIterator();
+    /// Free every answer. No task may be looking a name up.
+    pub fn deinit(c: *Cache, io: Io) void {
+        var held = c.entries.acquireUncancelable(io);
+        const entries = held.value();
+        var it = entries.keyIterator();
         while (it.next()) |k| c.gpa.free(k.*);
-        c.entries.deinit(c.gpa);
+        entries.deinit(c.gpa);
+        held.deinit(io);
         c.* = undefined;
     }
 
@@ -199,11 +203,12 @@ pub const Cache = struct {
 
     /// Forget every answer.
     pub fn clear(c: *Cache, io: Io) void {
-        c.mutex.lockUncancelable(io);
-        defer c.mutex.unlock(io);
-        var it = c.entries.keyIterator();
+        var held = c.entries.acquireUncancelable(io);
+        defer held.deinit(io);
+        const entries = held.value();
+        var it = entries.keyIterator();
         while (it.next()) |k| c.gpa.free(k.*);
-        c.entries.clearRetainingCapacity();
+        entries.clearRetainingCapacity();
     }
 
     fn cacheLookup(io: Io, context: ?*anyopaque, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress) LookupError![]IpAddress {
@@ -221,9 +226,9 @@ pub const Cache = struct {
     }
 
     fn cached(c: *Cache, io: Io, key: []const u8, now: Io.Timestamp, port: u16, family: ?IpAddress.Family, out: []IpAddress) ?[]IpAddress {
-        c.mutex.lockUncancelable(io);
-        defer c.mutex.unlock(io);
-        const e = c.entries.getPtr(key) orelse return null;
+        var held = c.entries.acquireUncancelable(io);
+        defer held.deinit(io);
+        const e = held.value().getPtr(key) orelse return null;
         if (now.nanoseconds >= e.expires.nanoseconds) return null;
         return pick(e.addresses[0..e.len], port, family, out);
     }
@@ -245,29 +250,30 @@ pub const Cache = struct {
     fn keep(c: *Cache, io: Io, key: []const u8, now: Io.Timestamp, addresses: []const IpAddress) void {
         var entry: Entry = .{ .addresses = undefined, .len = @intCast(@min(addresses.len, max_kept)), .expires = now.addDuration(c.options.ttl) };
         @memcpy(entry.addresses[0..entry.len], addresses[0..entry.len]);
-        c.mutex.lockUncancelable(io);
-        defer c.mutex.unlock(io);
-        if (c.entries.getPtr(key)) |e| {
+        var held = c.entries.acquireUncancelable(io);
+        defer held.deinit(io);
+        const entries = held.value();
+        if (entries.getPtr(key)) |e| {
             e.* = entry;
             return;
         }
-        if (c.entries.count() >= c.options.max_entries) c.evict(now);
-        if (c.entries.count() >= c.options.max_entries) return;
+        if (entries.count() >= c.options.max_entries) c.evict(entries, now);
+        if (entries.count() >= c.options.max_entries) return;
         const owned = c.gpa.dupe(u8, key) catch return;
-        c.entries.put(c.gpa, owned, entry) catch c.gpa.free(owned);
+        entries.put(c.gpa, owned, entry) catch c.gpa.free(owned);
     }
 
     /// Drop every expired answer, or else the one expiring first.
-    fn evict(c: *Cache, now: Io.Timestamp) void {
+    fn evict(c: *Cache, entries: *std.StringHashMapUnmanaged(Entry), now: Io.Timestamp) void {
         var soonest: ?[]const u8 = null;
         var soonest_at: i96 = std.math.maxInt(i96);
-        var it = c.entries.iterator();
+        var it = entries.iterator();
         while (it.next()) |kv| {
             const at = kv.value_ptr.expires.nanoseconds;
             if (at <= now.nanoseconds) {
-                c.dropAt(kv.key_ptr.*);
+                c.dropAt(entries, kv.key_ptr.*);
                 // The iterator is invalid after a removal: start over.
-                it = c.entries.iterator();
+                it = entries.iterator();
                 continue;
             }
             if (at < soonest_at) {
@@ -275,12 +281,12 @@ pub const Cache = struct {
                 soonest = kv.key_ptr.*;
             }
         }
-        if (c.entries.count() < c.options.max_entries) return;
-        if (soonest) |k| c.dropAt(k);
+        if (entries.count() < c.options.max_entries) return;
+        if (soonest) |k| c.dropAt(entries, k);
     }
 
-    fn dropAt(c: *Cache, key: []const u8) void {
-        const kv = c.entries.fetchRemove(key) orelse return;
+    fn dropAt(c: *Cache, entries: *std.StringHashMapUnmanaged(Entry), key: []const u8) void {
+        const kv = entries.fetchRemove(key) orelse return;
         c.gpa.free(kv.key);
     }
 };
@@ -348,12 +354,26 @@ test "curl's --resolve entries are read, with bracketed IPv6 and any port" {
     }
 }
 
+/// How many names the cache keeps answers for.
+fn keptNames(c: *Cache, io: Io) u32 {
+    var held = c.entries.acquireUncancelable(io);
+    defer held.deinit(io);
+    return held.value().count();
+}
+
+/// Whether the cache keeps an answer for `name`.
+fn kept(c: *Cache, io: Io, name: []const u8) bool {
+    var held = c.entries.acquireUncancelable(io);
+    defer held.deinit(io);
+    return held.value().contains(name);
+}
+
 test "a cached answer is kept for its time, for either family and any port" {
     var clock: shakedown.Clock = .init(testing.io, .{});
     const io = clock.io();
     var counting: Counting = .{};
     var cache: Cache = .init(testing.allocator, counting.resolver(), .{ .ttl = .fromSeconds(60), .max_entries = 2 });
-    defer cache.deinit();
+    defer cache.deinit(io);
     const r = cache.resolver();
     var out: [4]IpAddress = undefined;
     try testing.expectEqual(@as(usize, 2), (try r.lookup(io, "a.example", 80, null, &out)).len);
@@ -367,20 +387,21 @@ test "a cached answer is kept for its time, for either family and any port" {
     clock.advance(.fromSeconds(1));
     _ = try r.lookup(io, "c.example", 80, null, &out);
     try testing.expectEqual(@as(u32, 3), counting.calls);
-    try testing.expectEqual(@as(u32, 2), cache.entries.count());
-    try testing.expect(cache.entries.get("a.example") == null);
+    try testing.expectEqual(@as(u32, 2), keptNames(&cache, io));
+    try testing.expect(!kept(&cache, io, "a.example"));
     // Past its time an answer is asked for again.
     clock.advance(.fromSeconds(61));
     _ = try r.lookup(io, "b.example", 80, null, &out);
     try testing.expectEqual(@as(u32, 4), counting.calls);
     cache.clear(io);
-    try testing.expectEqual(@as(u32, 0), cache.entries.count());
+    try testing.expectEqual(@as(u32, 0), keptNames(&cache, io));
 }
 
 test "a cache that cannot allocate still answers" {
+    const io = testing.io;
     var counting: Counting = .{};
     var cache: Cache = .init(testing.failing_allocator, counting.resolver(), .{});
-    defer cache.deinit();
+    defer cache.deinit(io);
     var out: [4]IpAddress = undefined;
     try testing.expectEqual(@as(usize, 2), (try cache.resolver().lookup(testing.io, "a.example", 80, null, &out)).len);
     try testing.expectEqual(@as(usize, 2), (try cache.resolver().lookup(testing.io, "a.example", 80, null, &out)).len);

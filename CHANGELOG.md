@@ -69,3 +69,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `wire`: HTTP dates, `Set-Cookie` values and cookie dates, Server-Sent
   Events read and written, form and multipart bodies, references resolved
   against a URL, Bearer.
+
+### Changed
+
+- Depends on aegis, the family's std-only safety library. Locks sit beside the
+  data they guard (`BlockingGuarded`) in the pool, the buffer pool, the
+  cookie jar, the answers kept per origin and for the proxy, the name cache,
+  the timer and the proxies. Waiters are granted and queued as before.
+- Credentials are held in aegis secret owners and wiped before they are
+  freed: an answer kept for an origin, the user and password of a proxy the
+  environment names (parsed in wiped scratch, no longer left in the arena
+  the proxies free), and the Digest and Basic intermediates of an answer.
+- A timeout deadline too far off for an `i64` of nanoseconds is the latest
+  instant instead of an integer overflow in `Timer.arm`.
+- Breaking: `CookieJar.deinit`, `Resolver.Cache.deinit` take the `Io`, as
+  `Client.deinit` does.
+- Breaking: `Pool.Options.max_per_route` is `?u16`, null for no limit; zero,
+  which was no limit, is refused.
+- Breaking: `Pool.Options.drain_limit`, `Client.Options.max_zstd_window` and
+  `Timeouts.lowSpeedNeed` are aegis byte counts (`units.Bytes`): construct
+  with `.fromRaw(n)`, read with `.raw()`.

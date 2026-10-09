@@ -185,7 +185,7 @@ pub fn acquire(run: *Run, io: Io, r: Context.Route) Error!Lease {
     const d = run.diagnostics();
     while (true) {
         var waited = false;
-        if (c.pool.options.max_per_route != 0) if (d) |x| {
+        if (c.pool.options.max_per_route != null) if (d) |x| {
             x.stage = .wait;
         };
         const got = c.pool.acquire(io, r, run.deadline, &waited) catch |err| return switch (err) {

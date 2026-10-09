@@ -13,6 +13,10 @@ const Trust = @This();
 
 /// Private: what the certificates' bytes live in.
 gpa: Allocator,
+// The lock and the bundle are separate fields, not an `aegis.RwGuarded`:
+// the TLS client is std's, held byte for byte to std, and takes the lock and
+// the bundle it verifies against as two pointers (a boundary with code that
+// is not ours to change).
 /// Private: held for reading by every verifying handshake, for writing by
 /// every `add`.
 lock: Io.RwLock = .init,

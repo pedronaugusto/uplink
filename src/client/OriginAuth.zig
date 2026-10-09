@@ -11,6 +11,7 @@
 //! until that request settles.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const auth = @import("../wire/auth.zig");
@@ -20,11 +21,11 @@ const Credentials = @import("Credentials.zig");
 const OriginAuth = @This();
 
 gpa: Allocator,
-/// Private: held for `entries` and every entry's counts and Digest state.
-mutex: Io.Mutex = .init,
-entries: std.ArrayList(*Entry) = .empty,
-/// `entries.items.len`, readable without the lock: a client that never
-/// answered a challenge pays nothing per request.
+/// The listed answers, reached only through the lock beside them. That lock
+/// also holds every entry's counts and Digest state.
+entries: aegis.BlockingGuarded(std.ArrayList(*Entry)),
+/// The number of listed answers, readable without the lock: a client that
+/// never answered a challenge pays nothing per request.
 live: std.atomic.Value(u32) = .init(0),
 
 /// One origin's answer.
@@ -38,7 +39,8 @@ pub const Entry = struct {
     secret: Credentials.Secret,
     scheme: auth.Scheme,
     digest: ?auth.Digest = null,
-    bytes: []u8,
+    /// The secret and the strings beside it, wiped before they are freed.
+    bytes: aegis.SecretBytes,
     /// Requests that sent it and have not settled, plus one while listed.
     refs: u32 = 1,
     listed: bool = true,
@@ -51,27 +53,30 @@ pub const Entry = struct {
 };
 
 pub fn init(gpa: Allocator) OriginAuth {
-    return .{ .gpa = gpa };
+    return .{ .gpa = gpa, .entries = .init(.empty) };
 }
 
-pub fn deinit(oa: *OriginAuth) void {
-    for (oa.entries.items) |e| {
-        std.debug.assert(e.refs == 1);
+/// Forget every answer. No request may still hold one.
+pub fn deinit(oa: *OriginAuth, io: Io) void {
+    var held = oa.entries.acquireUncancelable(io);
+    const entries = held.value();
+    for (entries.items) |e| {
+        aegis.assert.pre(e.refs == 1, "no request holds an answer being freed");
         oa.free(e);
     }
-    oa.entries.deinit(oa.gpa);
+    entries.deinit(oa.gpa);
+    held.deinit(io);
     oa.* = undefined;
 }
 
 fn free(oa: *OriginAuth, e: *Entry) void {
     if (e.digest) |*d| d.deinit();
-    std.crypto.secureZero(u8, e.bytes);
-    oa.gpa.free(e.bytes);
+    e.bytes.deinit();
     oa.gpa.destroy(e);
 }
 
-fn find(oa: *OriginAuth, url: url_mod.Url) ?*Entry {
-    for (oa.entries.items) |e| {
+fn find(entries: *const std.ArrayList(*Entry), url: url_mod.Url) ?*Entry {
+    for (entries.items) |e| {
         if (e.secure == url.secure and e.port == url.port and std.ascii.eqlIgnoreCase(e.host, url.host)) return e;
     }
     return null;
@@ -82,9 +87,9 @@ fn find(oa: *OriginAuth, url: url_mod.Url) ?*Entry {
 /// for the request, which must `settle` it. Returns the answer held.
 pub fn writeField(oa: *OriginAuth, io: Io, w: *Io.Writer, url: url_mod.Url, method: []const u8, target: []const u8) Io.Writer.Error!?*Entry {
     if (oa.live.load(.acquire) == 0) return null;
-    oa.mutex.lockUncancelable(io);
-    defer oa.mutex.unlock(io);
-    const e = oa.find(url) orelse return null;
+    var held = oa.entries.acquireUncancelable(io);
+    defer held.deinit(io);
+    const e = find(held.value(), url) orelse return null;
     try w.writeAll("Authorization: ");
     switch (e.secret) {
         .token => |t| try auth.writeBearer(w, t),
@@ -162,9 +167,12 @@ fn copy(oa: *OriginAuth, query: Credentials.Query, secret: Credentials.Secret) A
         .token => |t| len += t.len,
         .password => |p| len += p.user.len + p.password.len,
     }
-    const bytes = try oa.gpa.alloc(u8, len);
-    errdefer oa.gpa.free(bytes);
     const e = try oa.gpa.create(Entry);
+    errdefer oa.gpa.destroy(e);
+    e.bytes = try .init(oa.gpa, len);
+    errdefer e.bytes.deinit();
+    e.bytes.resizeWithinCapacity(len) catch unreachable; // unreachable: `len` is the capacity just made
+    const bytes = e.bytes.exposeMut();
     var at: usize = 0;
     const host = put(bytes, &at, query.host);
     const realm_copy = put(bytes, &at, realm);
@@ -173,16 +181,17 @@ fn copy(oa: *OriginAuth, query: Credentials.Query, secret: Credentials.Secret) A
         .token => |t| .{ .token = put(bytes, &at, t) },
         .password => |p| .{ .password = .{ .user = put(bytes, &at, p.user), .password = put(bytes, &at, p.password) } },
     };
-    e.* = .{
-        .secure = query.secure,
-        .port = query.port,
-        .host = host,
-        .realm = if (query.realm != null) realm_copy else null,
-        .url = url,
-        .secret = owned,
-        .scheme = query.scheme,
-        .bytes = bytes,
-    };
+    e.secure = query.secure;
+    e.port = query.port;
+    e.host = host;
+    e.realm = if (query.realm != null) realm_copy else null;
+    e.url = url;
+    e.secret = owned;
+    e.scheme = query.scheme;
+    e.digest = null;
+    e.refs = 1;
+    e.listed = true;
+    e.reported = false;
     return e;
 }
 
@@ -194,18 +203,21 @@ fn put(bytes: []u8, at: *usize, text: []const u8) []const u8 {
 
 /// List `e` for its origin, unlisting the answer it replaces.
 fn list(oa: *OriginAuth, io: Io, e: *Entry) Allocator.Error!void {
-    oa.mutex.lockUncancelable(io);
-    defer oa.mutex.unlock(io);
-    try oa.entries.ensureUnusedCapacity(oa.gpa, 1);
-    for (oa.entries.items, 0..) |old, i| {
+    var held = oa.entries.acquireUncancelable(io);
+    defer held.deinit(io);
+    const entries = held.value();
+    try entries.ensureUnusedCapacity(oa.gpa, 1);
+    for (entries.items, 0..) |old, i| {
         if (old.secure == e.secure and old.port == e.port and std.ascii.eqlIgnoreCase(old.host, e.host)) {
-            oa.entries.items[i] = e;
+            entries.items[i] = e;
             oa.unlist(old);
             return;
         }
     }
-    oa.entries.appendAssumeCapacity(e);
-    oa.live.store(@intCast(oa.entries.items.len), .release);
+    // More answers than a u32 counts are more than memory holds.
+    const grown = aegis.int.cast(u32, entries.items.len + 1) catch return error.OutOfMemory;
+    entries.appendAssumeCapacity(e);
+    oa.live.store(grown, .release);
 }
 
 /// Drop the list's reference to `e`, already out of the list.
@@ -219,18 +231,19 @@ fn unlist(oa: *OriginAuth, e: *Entry) void {
 /// which is forgotten, and anything else takes it. The caller's store is
 /// told, once per answer.
 pub fn settle(oa: *OriginAuth, io: Io, e: *Entry, credentials: ?Credentials, accepted: bool) void {
-    oa.mutex.lockUncancelable(io);
+    var held = oa.entries.acquireUncancelable(io);
+    const entries = held.value();
     const tell = !e.reported and credentials != null;
     e.reported = true;
     if (!accepted and e.listed) {
-        for (oa.entries.items, 0..) |x, i| if (x == e) {
-            _ = oa.entries.swapRemove(i);
+        for (entries.items, 0..) |x, i| if (x == e) {
+            _ = entries.swapRemove(i);
             break;
         };
-        oa.live.store(@intCast(oa.entries.items.len), .release);
+        oa.live.store(aegis.int.cast(u32, entries.items.len) catch unreachable, .release); // unreachable: the list was counted into a u32 when it grew
         oa.unlist(e);
     }
-    oa.mutex.unlock(io);
+    held.deinit(io);
     // Told outside the lock: a store may itself send requests.
     if (tell) credentials.?.done(io, e.query(), e.secret, accepted);
     oa.release(io, e);
@@ -238,8 +251,8 @@ pub fn settle(oa: *OriginAuth, io: Io, e: *Entry, credentials: ?Credentials, acc
 
 /// A request that sent `e` ends without a response to judge it by.
 pub fn release(oa: *OriginAuth, io: Io, e: *Entry) void {
-    oa.mutex.lockUncancelable(io);
-    defer oa.mutex.unlock(io);
+    var held = oa.entries.acquireUncancelable(io);
+    defer held.deinit(io);
     e.refs -= 1;
     if (e.refs == 0) oa.free(e);
 }
@@ -257,8 +270,8 @@ pub fn refreshNonce(oa: *OriginAuth, io: Io, e: *Entry, challenges: []const auth
     io.random(&raw);
     const hex = std.fmt.bytesToHex(raw, .lower);
     var next: auth.Digest = try .init(oa.gpa, fresh, &hex);
-    oa.mutex.lockUncancelable(io);
-    defer oa.mutex.unlock(io);
+    var held = oa.entries.acquireUncancelable(io);
+    defer held.deinit(io);
     if (e.digest == null) {
         next.deinit();
         return false;
@@ -269,6 +282,7 @@ pub fn refreshNonce(oa: *OriginAuth, io: Io, e: *Entry, challenges: []const auth
 }
 
 const testing = std.testing;
+const Unwiped = @import("../testing/Unwiped.zig");
 
 const Store = struct {
     filled: u32 = 0,
@@ -301,7 +315,7 @@ test "an answer is kept per origin, sent only there, and told once" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     var oa: OriginAuth = .init(testing.allocator);
-    defer oa.deinit();
+    defer oa.deinit(io);
     var store: Store = .{};
     const url = try url_mod.parse("https://git.test/repo");
     try testing.expect(try oa.answer(io, store.credentials(), url, "https://git.test/repo", try challengesOf(arena.allocator(), "Basic realm=\"git\"")));
@@ -329,7 +343,7 @@ test "a password answers Digest when offered, and a stale nonce is answered agai
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     var oa: OriginAuth = .init(testing.allocator);
-    defer oa.deinit();
+    defer oa.deinit(io);
     var store: Store = .{};
     const url = try url_mod.parse("http://h.test/");
     const challenges = try challengesOf(arena.allocator(), "Basic realm=\"r\", Digest realm=\"r\", nonce=\"n1\", qop=\"auth\"");
@@ -353,7 +367,7 @@ test "a token answers Bearer, and nothing answers what no secret can" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     var oa: OriginAuth = .init(testing.allocator);
-    defer oa.deinit();
+    defer oa.deinit(io);
     var store: Store = .{ .secret = .{ .token = "t0k3n" } };
     const url = try url_mod.parse("https://api.test/");
     try testing.expect(try oa.answer(io, store.credentials(), url, "https://api.test/", try challengesOf(arena.allocator(), "Bearer realm=\"api\"")));
@@ -368,6 +382,28 @@ test "a token answers Bearer, and nothing answers what no secret can" {
     try testing.expectEqual(@as(u32, 1), store.refused);
 }
 
+test "a forgotten answer is wiped before it is freed" {
+    const io = testing.io;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var unwiped: Unwiped = .init(testing.allocator, "Circle of Life");
+    var oa: OriginAuth = .init(unwiped.allocator());
+    var store: Store = .{};
+    const url = try url_mod.parse("https://git.test/repo");
+    try testing.expect(try oa.answer(io, store.credentials(), url, "https://git.test/repo", try challengesOf(arena.allocator(), "Basic realm=\"git\"")));
+    var buf: [256]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+    const sent = (try oa.writeField(io, &w, url, "GET", "/repo")).?;
+    // A 401 to the answer refuses and forgets it; the last request frees it.
+    oa.settle(io, sent, store.credentials(), false);
+    try testing.expect(!unwiped.found);
+    // One replaced by another answer is wiped as well.
+    try testing.expect(try oa.answer(io, store.credentials(), url, "https://git.test/repo", try challengesOf(arena.allocator(), "Basic realm=\"git\"")));
+    try testing.expect(try oa.answer(io, store.credentials(), url, "https://git.test/repo", try challengesOf(arena.allocator(), "Basic realm=\"git\"")));
+    oa.deinit(io);
+    try testing.expect(!unwiped.found);
+}
+
 test "an answer leaves nothing allocated when allocation stops" {
     const shakedown = @import("shakedown");
     const Check = struct {
@@ -375,7 +411,7 @@ test "an answer leaves nothing allocated when allocation stops" {
             var arena: std.heap.ArenaAllocator = .init(testing.allocator);
             defer arena.deinit();
             var oa: OriginAuth = .init(gpa);
-            defer oa.deinit();
+            defer oa.deinit(testing.io);
             var store: Store = .{};
             const url = try url_mod.parse("http://h.test/");
             _ = try oa.answer(testing.io, store.credentials(), url, "http://h.test/", try challengesOf(arena.allocator(), "Digest realm=\"r\", nonce=\"n\", opaque=\"o\""));

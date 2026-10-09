@@ -17,6 +17,7 @@
 //! idle gives them back, keeping only what its TLS sessions need.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -563,28 +564,28 @@ fn perform(conn: *Connection, op: Io.Operation) error{Failed}!Io.Operation.Resul
 
 /// `n` bytes moved, for the low-speed window.
 fn moved(conn: *Connection, n: usize) void {
-    if (conn.ctx.timeouts.low_speed != null) conn.speed.bytes +|= n;
+    if (conn.ctx.timeouts.low_speed != null) conn.speed.bytes = conn.speed.bytes.add(.fromRaw(n)) catch .fromRaw(std.math.maxInt(u64));
 }
 
 /// The low-speed window: bytes moved since it started. A window counts
 /// only time spent waiting on the network: one that ended while nothing
 /// waited, the program busy elsewhere, starts over at the next operation.
 const Speed = struct {
-    /// On the awake clock; 0 before the first operation.
-    start: i96 = 0,
-    bytes: u64 = 0,
+    /// On the awake clock; null before the first operation.
+    start: ?Io.Timestamp = null,
+    bytes: aegis.units.Bytes(u64) = .fromRaw(0),
 
     /// When an operation starting `now` gives up for want of speed.
     fn deadline(s: *Speed, now: Io.Timestamp, l: Context.Timeouts.LowSpeed) Io.Timestamp {
-        const window = l.window.nanoseconds;
-        if (s.start == 0 or now.nanoseconds >= s.start + window) {
-            s.start = now.nanoseconds;
-            s.bytes = 0;
+        const over = if (s.start) |start| now.nanoseconds >= start.addDuration(l.window).nanoseconds else true;
+        if (over) {
+            s.start = now;
+            s.bytes = .fromRaw(0);
         }
-        const end = s.start + window;
+        const end = s.start.?.addDuration(l.window);
         // This window has moved enough: the operation may run into the
         // next, which must move enough by its own end.
-        return .fromNanoseconds(if (s.bytes >= Context.Timeouts.lowSpeedNeed(l)) end + window else end);
+        return if (s.bytes.sub(Context.Timeouts.lowSpeedNeed(l))) |_| end.addDuration(l.window) else |_| end;
     }
 };
 
