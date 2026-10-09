@@ -104,6 +104,10 @@ const Keep = enum { empty, kib, cookies, auth, redirect };
 /// Which body a download row reads.
 const Body = enum { big, chunked, gzip };
 
+/// Where `www.bench.test` points; the server's port replaces the 0. A
+/// constant of its own, since the resolver entry keeps the slice past `start`.
+const bench_address = [_]Io.net.IpAddress{.{ .ip4 = .loopback(0) }};
+
 const chunk_sizes = [_]usize{ 256, 4096, 65536 };
 const task_counts = [_]usize{ 16, 128 };
 
@@ -169,7 +173,7 @@ const Context = struct {
         try Server.start(io, &c.server, c.gzip);
         c.cursor = 0;
         // Cookies need a name with domains above it; the rest go by address.
-        c.resolver_entries = .{.{ .host = "www.bench.test", .addresses = &.{.{ .ip4 = .loopback(0) }} }};
+        c.resolver_entries = .{.{ .host = "www.bench.test", .addresses = &bench_address }};
         c.static = .{ .entries = &c.resolver_entries };
         c.plain = .init(gpa, .{});
         c.jar = .init(gpa, .{});
