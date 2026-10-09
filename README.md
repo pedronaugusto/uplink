@@ -76,7 +76,9 @@ from it.
 The package is layered, and each layer owns its state alone: `wire` (the
 codecs, sans I/O) under `tls` and `net`, under `transport` (one connection),
 under `pool` (which connection serves which request), under `client` (the
-policy). The layer rule is checked in CI.
+policy). The layer rule is checked in CI. [docs/design.md](docs/design.md)
+gives the layers, who owns which state, what always holds, and the reasons
+behind the decisions.
 
 **Requests.** `send` carries a request through the client's policy to its
 final response. A redirect is followed up to ten times; 301 and 302 turn a
