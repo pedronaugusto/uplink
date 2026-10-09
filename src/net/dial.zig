@@ -325,9 +325,10 @@ test "addresses are tried with the families alternating from the first's" {
 }
 
 /// Answers `stuck.example` with a black-holed address first and a working
-/// one second, and records when each attempt starts.
+/// one second, and records when each attempt starts on the test's clock.
 const Eyeballs = struct {
     var listener_port: u16 = 0;
+    var clock: *shakedown.Clock = undefined;
     var starts: [4]i96 = undefined;
     var count: std.atomic.Value(u32) = .init(0);
     var abandoned: std.atomic.Value(bool) = .init(false);
@@ -346,7 +347,7 @@ const Eyeballs = struct {
 
     fn connect(_: ?*anyopaque, address: *const IpAddress, options: IpAddress.ConnectOptions) IpAddress.ConnectError!Io.net.Socket {
         const n = count.fetchAdd(1, .acq_rel);
-        starts[n] = Io.Clock.awake.now(testing.io).nanoseconds;
+        starts[n] = clock.read(.awake).nanoseconds;
         if (address.* == .ip6) {
             if (refuse_first) return error.ConnectionRefused;
             var never: Io.Event = .unset;
@@ -362,6 +363,10 @@ const Eyeballs = struct {
     }
 
     const L = shakedown.Layer(u8, .{ .netLookup = lookup, .netConnectIp = connect });
+
+    fn run(io: Io, delay: Io.Duration, out: *DialError!Dialed) void {
+        out.* = dial(io, "stuck.example", 8080, .{ .attempt_delay = delay });
+    }
 };
 
 test "a black-holed first address costs one attempt delay, and a refused one none" {
@@ -369,29 +374,38 @@ test "a black-holed first address costs one attempt delay, and a refused one non
     var listener = try (try IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
     defer listener.deinit(io);
     Eyeballs.listener_port = listener.socket.address.getPort();
-    var layer: Eyeballs.L = .init(io, 0);
+    var clock: shakedown.Clock = .init(io, .{});
+    Eyeballs.clock = &clock;
+    var layer: Eyeballs.L = .init(clock.io(), 0);
+    const wait: Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(10), .clock = .awake } };
     for ([_]bool{ false, true }) |refuse| {
         Eyeballs.count.store(0, .release);
         Eyeballs.abandoned.store(false, .release);
         Eyeballs.refuse_first = refuse;
         const delay: Io.Duration = if (refuse) .fromSeconds(30) else .fromMilliseconds(100);
-        const d = dial(layer.io(), "stuck.example", 8080, .{ .attempt_delay = delay }) catch |err| switch (err) {
-            error.ConcurrencyUnavailable => return error.SkipZigTest,
-            else => |e| return e,
-        };
+        var result: DialError!Dialed = undefined;
+        var task = io.concurrent(Eyeballs.run, .{ layer.io(), delay, &result }) catch return error.SkipZigTest;
+        defer task.cancel(io);
+        if (!refuse) {
+            // The black hole holds the first attempt, and the delay is
+            // armed beside it. A step short of the delay starts nothing.
+            try clock.awaitArmed(1, wait);
+            clock.advance(.fromMilliseconds(99));
+            try testing.expectEqual(@as(u32, 1), Eyeballs.count.load(.acquire));
+            clock.advance(.fromMilliseconds(1));
+        }
+        task.await(io);
+        const d = try result;
         d.stream.close(io);
         try testing.expectEqual(@as(u8, 2), d.addresses);
         try testing.expectEqual(@as(u32, 2), Eyeballs.count.load(.acquire));
         const gap = Eyeballs.starts[1] - Eyeballs.starts[0];
         if (refuse) {
-            // The refusal started the next attempt at once.
-            try testing.expect(gap < std.time.ns_per_s);
+            // The refusal started the next attempt at once, on a clock
+            // that never moved.
+            try testing.expectEqual(@as(i96, 0), gap);
         } else {
-            // The delay runs from the first attempt's launch, and the stamps
-            // are taken where each attempt starts running, so a loaded host
-            // moves them by its scheduling: half the delay still tells a
-            // delayed second attempt from an immediate one.
-            try testing.expect(gap >= 50 * std.time.ns_per_ms);
+            try testing.expectEqual(@as(i96, delay.nanoseconds), gap);
             try testing.expect(Eyeballs.abandoned.load(.acquire));
         }
     }
