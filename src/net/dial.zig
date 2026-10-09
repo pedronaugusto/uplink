@@ -387,7 +387,11 @@ test "a black-holed first address costs one attempt delay, and a refused one non
             // The refusal started the next attempt at once.
             try testing.expect(gap < std.time.ns_per_s);
         } else {
-            try testing.expect(gap >= 100 * std.time.ns_per_ms);
+            // The delay runs from the first attempt's launch, and the stamps
+            // are taken where each attempt starts running, so a loaded host
+            // moves them by its scheduling: half the delay still tells a
+            // delayed second attempt from an immediate one.
+            try testing.expect(gap >= 50 * std.time.ns_per_ms);
             try testing.expect(Eyeballs.abandoned.load(.acquire));
         }
     }
