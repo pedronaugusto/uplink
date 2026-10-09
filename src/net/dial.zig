@@ -333,6 +333,9 @@ const Eyeballs = struct {
     var count: std.atomic.Value(u32) = .init(0);
     var abandoned: std.atomic.Value(bool) = .init(false);
     var refuse_first = false;
+    /// Set once the first attempt has run: its delay can be armed before it
+    /// does.
+    var first_ran: Io.Event = .unset;
 
     fn lookup(_: ?*anyopaque, host: Io.net.HostName, results: *Io.Queue(Io.net.HostName.LookupResult), options: Io.net.HostName.LookupOptions) Io.net.HostName.LookupError!void {
         _ = host;
@@ -348,6 +351,7 @@ const Eyeballs = struct {
     fn connect(_: ?*anyopaque, address: *const IpAddress, options: IpAddress.ConnectOptions) IpAddress.ConnectError!Io.net.Socket {
         const n = count.fetchAdd(1, .acq_rel);
         starts[n] = clock.read(.awake).nanoseconds;
+        if (n == 0) first_ran.set(testing.io);
         if (address.* == .ip6) {
             if (refuse_first) return error.ConnectionRefused;
             var never: Io.Event = .unset;
@@ -382,13 +386,16 @@ test "a black-holed first address costs one attempt delay, and a refused one non
         Eyeballs.count.store(0, .release);
         Eyeballs.abandoned.store(false, .release);
         Eyeballs.refuse_first = refuse;
+        Eyeballs.first_ran = .unset;
         const delay: Io.Duration = if (refuse) .fromSeconds(30) else .fromMilliseconds(100);
         var result: DialError!Dialed = undefined;
         var task = io.concurrent(Eyeballs.run, .{ layer.io(), delay, &result }) catch return error.SkipZigTest;
         defer task.cancel(io);
         if (!refuse) {
             // The black hole holds the first attempt, and the delay is
-            // armed beside it. A step short of the delay starts nothing.
+            // armed beside it, in either order. A step short of the delay
+            // starts nothing.
+            try Eyeballs.first_ran.waitTimeout(io, wait);
             try clock.awaitArmed(1, wait);
             clock.advance(.fromMilliseconds(99));
             try testing.expectEqual(@as(u32, 1), Eyeballs.count.load(.acquire));
