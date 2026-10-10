@@ -20,16 +20,7 @@
       ]
     }
   },
-  "ziglint_exceptions": "ci/ziglint-exceptions.json",
-  "vendored": {
-    "src/tls/Client.zig": "Zig standard-library TLS client fork, held byte for byte to std and its recorded diff by src/testing/tls_fork.zig and zig build check-tls-fork."
-  },
   "extra_checks": [
-    [
-      "zig",
-      "build",
-      "check-tls-fork"
-    ],
     [
       "zig",
       "build",
@@ -39,9 +30,39 @@
       "zig",
       "build",
       "check-wire-consumer"
+    ],
+    [
+      "zig",
+      "build",
+      "check-cold-consumer"
     ]
   ],
-  "unreachable_exceptions": "ci/unreachable-exceptions.json",
-  "debug_print_exceptions": "ci/debug-print-exceptions.json",
-  "file_name_exceptions": "ci/file-name-exceptions.json"
+  "glint": {
+    "rules": [
+      {
+        "id": "A001",
+        "level": "report"
+      },
+      {
+        "id": "A002",
+        "level": "report"
+      },
+      {
+        "id": "A003",
+        "level": "report"
+      },
+      {
+        "id": "A004",
+        "level": "gate"
+      },
+      {
+        "id": "A005",
+        "level": "report"
+      },
+      {
+        "id": "Z026",
+        "level": "gate"
+      }
+    ]
+  }
 }

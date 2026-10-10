@@ -15,7 +15,7 @@ const IpAddress = Io.net.IpAddress;
 const wire = @import("uplink.wire");
 const auth = wire.auth;
 const url_mod = wire.url;
-const tls_mod = @import("../tls.zig");
+const cloak = @import("cloak");
 
 const Proxy = @This();
 
@@ -77,7 +77,7 @@ pub const Credential = struct {
 /// TLS to an `https` proxy.
 pub const Tls = struct {
     /// The certificate and key a proxy that asks for one is answered with.
-    client_auth: ?*const tls_mod.ClientAuth = null,
+    client_auth: ?cloak.ClientAuth = null,
     /// How the proxy's certificate is checked.
     trust: Trust = .as_target,
 
@@ -87,7 +87,7 @@ pub const Tls = struct {
         as_target,
         /// Always, whatever the client's `verify` says, against these
         /// authorities or, null, the system's, as git checks it.
-        own: ?*tls_mod.Trust,
+        own: ?cloak.Trust.Snapshot,
     };
 };
 

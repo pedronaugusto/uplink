@@ -6,7 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Breaking: TLS is [cloak](https://github.com/pedronaugusto/cloak)'s. The copy of std's TLS client with client authentication, its recorded diff and check, `tls.Trust`, `tls.ClientAuth`, `tls.PrivateKey`, `tls.key` and `tls.Session` are gone; `tls.ClientOptions` takes a `cloak.Trust.Snapshot` for `trust` and a `cloak.ClientAuth` for `client_auth` (build them with cloak's `Trust.addPem`, `PrivateKey.parse` and `ClientAuth.initPem`), `Proxy.Tls` the same, and `Diagnostics.tls_alert` is a `cloak.tls.Alert`, the server's or the one the client sent for a failure of its own. `Diagnostics.tls_error` names what cloak reports (`PeerAlert`, `VerificationRejected`) instead of `TlsAlert...` and `Certificate...` errors.
+- Breaking: TLS 1.3 only, until cloak adds TLS 1.2, which the std client's fork spoke: a server that speaks only TLS 1.2 is turned away with a `protocol_version` alert. A client key that is RSA fails a handshake with `ClientCertificateSchemeUnsupported` until cloak signs with RSA-PSS; ECDSA on P-256 and P-384 and Ed25519 keys are answered. A server's request for a certificate a client has no usable scheme for is no longer an error of its own: the client sends none and the server decides.
+- cloak is a lazy dependency like reactor, fetched only for the client; `uplink.wire` still imports `std` and aegis alone. On macOS and Windows cloak links the platform's trust store.
+- The family's newest aegis, preflight, shakedown and reactor; the exception files and `ci/glint.json` give way to glint's rules in `ci/preflight.json` (Z026 gates) and `glint-ignore` comments at the sites.
+
 ### Added
+
+- `check-cold-consumer`: a project that depends on uplink as a client is built from an empty package cache, so the module is declared before the lazy dependencies are fetched.
 
 - `Client`: HTTP/1.1 requests over kept connections, shared by tasks, with
   `send` for a body given whole or from a reader and `begin` for one the caller
@@ -28,9 +37,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Timeouts for connecting, each handshake, and each read or write, kept in the
   kernel on a reactor runtime, by one task per client on any other `Io`, by the
   `Io` itself where it has no task to spare, and counted where neither can.
-- `tls`: the standard library's TLS client with client certificates, held to
-  std by its recorded diff; `Trust`, shareable authorities; `PrivateKey` and
-  `ClientAuth`; a key log through a writer.
+- `tls`: the options a client takes for cloak's TLS (authorities, a client
+  certificate and key, a key log through a writer), and what an alert says about
+  a client certificate.
 - `net`: connections raced over a name's addresses within one deadline.
 - `uplink.wire`: the codecs as a module of their own, on `std` and aegis alone,
   for a server, a proxy or a test tool that reads and writes HTTP messages and

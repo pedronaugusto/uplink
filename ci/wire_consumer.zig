@@ -16,7 +16,13 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = try init.minimal.args.toSlice(a);
     if (args.len < 6) return error.MissingArguments;
+    // "cold" is the client from an empty cache, fetching what it names; any
+    // other value, or none, is `uplink.wire` alone with fetching off.
+    const cold = args.len > 6 and std.mem.eql(u8, args[6], "cold");
     const cwd = std.Io.Dir.cwd();
+    // A cold build starts from nothing, whatever an earlier run fetched.
+    // glint-ignore: Z026 -- a directory that is not there needs no deleting, and one that cannot be removed fails the build below
+    if (cold) cwd.deleteTree(io, args[2]) catch {};
     var dir = try cwd.createDirPathOpen(io, args[2], .{});
     defer dir.close(io);
     try dir.createDirPath(io, "src");
@@ -27,11 +33,12 @@ pub fn main(init: std.process.Init) !void {
     const program = try cwd.readFileAlloc(io, args[5], a, .limited(1024 * 1024));
     try dir.writeFile(io, .{ .sub_path = "src/main.zig", .data = program });
     try dir.writeFile(io, .{ .sub_path = "build.zig.zon", .data = try a.print(manifest, .{std.zig.fmtString(relative)}) });
-    try dir.writeFile(io, .{ .sub_path = "build.zig", .data = script });
+    try dir.writeFile(io, .{ .sub_path = "build.zig", .data = if (cold) cold_script else script });
     var env = try init.environ_map.clone(a);
     try env.put("ZIG_GLOBAL_CACHE_DIR", try std.Io.Dir.path.join(a, &.{ directory, ".zig-global-cache" }));
     const packages = try cwd.realPathFileAlloc(io, args[3], a);
-    var child = try std.process.spawn(io, .{ .argv = &.{ args[1], "build", "--system", packages }, .cwd = .{ .path = directory }, .environ_map = &env });
+    const argv: []const []const u8 = if (cold) &.{ args[1], "build" } else &.{ args[1], "build", "--system", packages };
+    var child = try std.process.spawn(io, .{ .argv = argv, .cwd = .{ .path = directory }, .environ_map = &env });
     const term = try child.wait(io);
     if (term != .exited or term.exited != 0) std.process.exit(1);
 }
@@ -59,6 +66,25 @@ const script =
     \\        .target = target,
     \\        .optimize = optimize,
     \\        .imports = &.{.{ .name = "uplink.wire", .module = uplink.module("uplink.wire") }},
+    \\    }) });
+    \\    b.installArtifact(exe);
+    \\}
+    \\
+;
+
+/// The client with nothing fetched yet: the first configuration pass has no
+/// reactor and must still find the `uplink` module it asks for.
+const cold_script =
+    \\const std = @import("std");
+    \\pub fn build(b: *std.Build) void {
+    \\    const target = b.standardTargetOptions(.{});
+    \\    const optimize = b.standardOptimizeOption(.{});
+    \\    const uplink = b.dependency("uplink", .{ .target = target, .optimize = optimize });
+    \\    const exe = b.addExecutable(.{ .name = "consumer", .root_module = b.createModule(.{
+    \\        .root_source_file = b.path("src/main.zig"),
+    \\        .target = target,
+    \\        .optimize = optimize,
+    \\        .imports = &.{.{ .name = "uplink", .module = uplink.module("uplink") }},
     \\    }) });
     \\    b.installArtifact(exe);
     \\}

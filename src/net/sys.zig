@@ -52,7 +52,7 @@ pub fn tune(io: Io, handle: Io.net.Socket.Handle, tuning: Tuning) void {
 
 fn setPosix(handle: Io.net.Socket.Handle, level: i32, name: u32, value: u32) void {
     const bytes = std.mem.toBytes(@as(c_int, @intCast(value)));
-    // ziglint-ignore: Z026 a refused option leaves a working socket; these are latency and liveness settings, not contracts
+    // glint-ignore: Z026 -- a refused option leaves a working socket; these are latency and liveness settings, not contracts
     std.posix.setsockopt(handle, level, name, &bytes) catch {};
 }
 
@@ -66,7 +66,7 @@ fn setAfd(io: Io, handle: Io.net.Socket.Handle, level: i32, name: u32, value: u3
         .code = windows.IOCTL.AFD.SOCKOPT,
         .in = std.mem.asBytes(&info),
     } };
-    // ziglint-ignore: Z026 as on POSIX, a refused option leaves a working socket
+    // glint-ignore: Z026 -- as on POSIX, a refused option leaves a working socket
     _ = io.operate(operation) catch {};
 }
 

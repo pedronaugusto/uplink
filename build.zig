@@ -5,37 +5,41 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     //=====================================================================
-    // The modules. Pure Zig, `std`, aegis and reactor: nothing to link. Two
-    // are published. `uplink.wire` is the codecs, sans I/O, and imports `std`
+    // The modules. Pure Zig, `std`, aegis, reactor and cloak. Two are
+    // published. `uplink.wire` is the codecs, sans I/O, and imports `std`
     // and aegis alone. `uplink` is everything: the client on top of the
     // codecs, with reactor, the family's evented `std.Io`, which owns the
-    // sockets' deadlines, name lookup and connecting; uplink runs on any
-    // `Io`, and on reactor's it needs no task of its own to keep a deadline.
+    // sockets' deadlines, name lookup and connecting (uplink runs on any
+    // `Io`, and on reactor's it needs no task of its own to keep a deadline),
+    // and cloak, the family's TLS, whose system trust links the platform's
+    // own libraries on macOS and Windows.
     //
-    // reactor is fetched lazily, and only for the client. The one build
-    // option, `client`, is true unless a project says otherwise: a project
-    // that builds an HTTP client writes nothing extra, and one that only
-    // reads and writes HTTP messages sets `.client = false`, fetches no
-    // reactor, and finds `uplink.wire` alone.
+    // reactor and cloak are fetched lazily, and only for the client. The one
+    // build option, `client`, is true unless a project says otherwise: a
+    // project that builds an HTTP client writes nothing extra, and one that
+    // only reads and writes HTTP messages sets `.client = false`, fetches no
+    // reactor or cloak, and finds `uplink.wire` alone.
     //=====================================================================
 
     const own_tree = b.dep_prefix.len == 0;
     const with_client = own_tree or (b.option(bool, "client", "Build the HTTP client and the `uplink` module, which fetch reactor; false leaves `uplink.wire` alone") orelse true);
     const aegis_package = b.dependency("aegis", .{ .target = target, .optimize = optimize });
     const aegis = aegis_package.module("aegis");
-    const reactor_package: ?*std.Build.Dependency = if (with_client) b.lazyDependency("reactor", .{ .target = target, .optimize = optimize }) else null;
+    const reactor_package: ?*std.Build.Dependency = if (with_client) b.dependencyLazy("reactor", .{ .target = target, .optimize = optimize }) catch null else null;
     const reactor: ?*std.Build.Module = if (reactor_package) |package| package.module("reactor") else null;
+    const cloak_package: ?*std.Build.Dependency = if (with_client) b.dependencyLazy("cloak", .{ .target = target, .optimize = optimize }) catch null else null;
+    const cloak: ?*std.Build.Module = if (cloak_package) |package| package.module("cloak") else null;
 
     // The tests below ask for shakedown and preflight in the same pass, so
     // one fetch gets all three.
     var shakedown: ?*std.Build.Module = null;
     if (own_tree) {
-        if (b.lazyDependency("shakedown", .{ .target = target, .optimize = optimize })) |dep| shakedown = dep.module("shakedown");
+        if (b.dependencyLazy("shakedown", .{ .target = target, .optimize = optimize }) catch null) |dep| shakedown = dep.module("shakedown");
     }
 
-    const modules = uplinkModules(b, target, optimize, aegis, reactor, true);
-    // reactor is not fetched yet: this pass only found out what to fetch.
-    if (with_client and reactor == null) return;
+    const modules = uplinkModules(b, target, optimize, aegis, with_client, reactor, cloak, true);
+    // reactor and cloak are not fetched yet: this pass only found out what to fetch.
+    if (with_client and (reactor == null or cloak == null)) return;
     // Everything below is uplink's own: a project depending on uplink
     // neither needs nor fetches shakedown or preflight.
     if (!own_tree) return;
@@ -43,6 +47,7 @@ pub fn build(b: *std.Build) void {
     const imports: []const std.Build.Module.Import = &.{
         .{ .name = "aegis", .module = aegis },
         .{ .name = "reactor", .module = reactor.? },
+        .{ .name = "cloak", .module = cloak.? },
         .{ .name = "uplink.wire", .module = modules.wire },
     };
 
@@ -51,24 +56,11 @@ pub fn build(b: *std.Build) void {
     // imports aegis alone.
     //=====================================================================
 
-    // The standard library's TLS client, which `src/tls/Client.zig` is a
-    // copy of with client authentication added: the fork check holds the
-    // copy to it, and fails when the compiler building this ships another.
-    // A copy of the file is embedded rather than its path, so the test
-    // binary's cache key follows the bytes, not the toolchain's location.
-    const std_tls_client = b.graph.path(.zig_lib, "std/crypto/tls/Client.zig");
-    const std_client = b.addWriteFiles();
-    _ = std_client.addCopyFile(std_tls_client, "Client.zig.txt");
-    const std_client_module = b.createModule(.{
-        .root_source_file = std_client.add("std_tls_client.zig", "pub const source = @embedFile(\"Client.zig.txt\");\n"),
-    });
-
     const test_filter = b.option([]const u8, "test-filter", "Select tests by name");
     const test_inputs: TestInputs = .{
         .target = target,
         .optimize = optimize,
         .imports = imports,
-        .std_tls_client = std_client_module,
         .shakedown = shakedown,
         .filter = test_filter,
     };
@@ -107,26 +99,6 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&wire_tests.step);
     check_step.dependOn(&evented_tests.step);
 
-    // The TLS fork against std and its recorded diff, alone.
-    const fork_tests = b.addTest(.{
-        .name = "uplink-tls-fork",
-        .filters = &.{"the TLS client is std's, with the recorded diff and nothing else"},
-        .root_module = tests.root_module,
-    });
-    b.step("check-tls-fork", "Verify the TLS fork against std and its recorded diff").dependOn(&b.addRunArtifact(fork_tests).step);
-
-    // Re-record the diff after bringing a new std's changes across.
-    const fork_writer = b.addExecutable(.{
-        .name = "tls-fork",
-        .root_module = b.createModule(.{ .root_source_file = b.path("ci/tls_fork.zig"), .target = b.graph.host, .optimize = .safe }),
-    });
-    const fork_options = b.addOptions();
-    fork_options.addOptionPath("std_tls_client", std_tls_client);
-    fork_writer.root_module.addOptions("build_options", fork_options);
-    const fork_run = b.addRunArtifact(fork_writer);
-    fork_run.setCwd(b.path("."));
-    b.step("tls-fork", "Re-record the TLS client's diff against std").dependOn(&fork_run.step);
-
     //=====================================================================
     // Example: built AND run against the module a consumer gets.
     // examples/usage.zig is also README.md's Usage block (zig build docs --
@@ -142,6 +114,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "uplink", .module = module },
                 .{ .name = "reactor", .module = reactor.? },
+                .{ .name = "cloak", .module = cloak.? },
             },
         }),
     });
@@ -172,11 +145,12 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
             },
         });
-        // A project that depends on uplink by path, with only aegis and
-        // reactor to fetch: the build a client's user gets.
-        preflight.addConsumerCheck(b, .{ .package = "uplink", .program = b.path("ci/consumer.zig"), .modules = &.{ "uplink", "uplink.wire" }, .packages = &.{ aegis_package, reactor_package.? } });
+        // A project that depends on uplink by path, with only aegis,
+        // reactor and cloak to fetch: the build a client's user gets.
+        preflight.addConsumerCheck(b, .{ .package = "uplink", .program = b.path("ci/consumer.zig"), .modules = &.{ "uplink", "uplink.wire" }, .packages = &.{ aegis_package, reactor_package.?, cloak_package.? } });
     }
     addWireConsumerCheck(b, aegis_package);
+    addColdConsumerCheck(b);
 }
 
 /// uplink in the mode a benchmark builds in: an imported module keeps its
@@ -185,12 +159,14 @@ pub fn build(b: *std.Build) void {
 fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) []const std.Build.Module.Import {
     const aegis = b.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis");
     const reactor = b.dependency("reactor", .{ .target = target, .optimize = optimize }).module("reactor");
-    const uplink = uplinkModules(b, target, optimize, aegis, reactor, false).root.?;
+    const cloak = b.dependency("cloak", .{ .target = target, .optimize = optimize }).module("cloak");
+    const uplink = uplinkModules(b, target, optimize, aegis, true, reactor, cloak, false).root.?;
     // Select uplink's published measuring pin rather than preflight's default.
     const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
     return b.allocator.dupe(std.Build.Module.Import, &.{
         .{ .name = "uplink", .module = uplink },
         .{ .name = "reactor", .module = reactor },
+        .{ .name = "cloak", .module = cloak },
         .{ .name = "shakedown", .module = shakedown.module("shakedown") },
     }) catch @panic("OOM");
 }
@@ -207,7 +183,7 @@ const Modules = struct {
 /// rather than its files, so a type is one declaration whichever a user names.
 /// `publish` names them for consumers; a benchmark builds its own copies, in
 /// its own mode.
-fn uplinkModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, aegis: *std.Build.Module, reactor: ?*std.Build.Module, publish: bool) Modules {
+fn uplinkModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, aegis: *std.Build.Module, client: bool, reactor: ?*std.Build.Module, cloak: ?*std.Build.Module, publish: bool) Modules {
     const wire_options: std.Build.Module.CreateOptions = .{
         .root_source_file = b.path("src/wire.zig"),
         .target = target,
@@ -215,18 +191,23 @@ fn uplinkModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         .imports = &.{.{ .name = "aegis", .module = aegis }},
     };
     const wire = if (publish) b.addModule("uplink.wire", wire_options) else b.createModule(wire_options);
-    const client = reactor orelse return .{ .wire = wire, .root = null };
+    if (!client) return .{ .wire = wire, .root = null };
+    // Declared before reactor and cloak are fetched: a consumer's first pass
+    // must find the module it asks for, and only learns here what to fetch.
+    // They are imported once they are there.
     const root_options: std.Build.Module.CreateOptions = .{
         .root_source_file = b.path("src/uplink.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "aegis", .module = aegis },
-            .{ .name = "reactor", .module = client },
             .{ .name = "uplink.wire", .module = wire },
         },
     };
-    return .{ .wire = wire, .root = if (publish) b.addModule("uplink", root_options) else b.createModule(root_options) };
+    const root = if (publish) b.addModule("uplink", root_options) else b.createModule(root_options);
+    if (reactor) |module| root.addImport("reactor", module);
+    if (cloak) |module| root.addImport("cloak", module);
+    return .{ .wire = wire, .root = root };
 }
 
 /// What both builds of the test suite are made from.
@@ -234,7 +215,6 @@ const TestInputs = struct {
     target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
     imports: []const std.Build.Module.Import,
-    std_tls_client: *std.Build.Module,
     shakedown: ?*std.Build.Module,
     filter: ?[]const u8,
 };
@@ -252,7 +232,6 @@ fn addTests(b: *std.Build, name: []const u8, evented: bool, inputs: TestInputs) 
             .imports = inputs.imports,
         }),
     });
-    tests.root_module.addImport("std_tls_client", inputs.std_tls_client);
     if (inputs.shakedown) |module| tests.root_module.addImport("shakedown", module);
     const io = b.addOptions();
     io.addOption(bool, "evented", evented);
@@ -281,4 +260,25 @@ fn addWireConsumerCheck(b: *std.Build, aegis: *std.Build.Dependency) void {
     run.addFileArg(b.path("ci/wire_program.zig"));
     run.has_side_effects = true;
     b.step("check-wire-consumer", "Build a project that asks for uplink.wire alone, with only aegis to fetch").dependOn(&run.step);
+}
+
+/// `check-cold-consumer`: a project that depends on uplink as a client, built
+/// from an empty package cache. The first pass of its build has no reactor or cloak,
+/// so uplink's script must declare `uplink` before it asks for reactor, then
+/// configure once the package is fetched.
+fn addColdConsumerCheck(b: *std.Build) void {
+    const generator = b.addExecutable(.{ .name = "cold-consumer", .root_module = b.createModule(.{
+        .root_source_file = b.path("ci/wire_consumer.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+    }) });
+    const run = b.addRunArtifact(generator);
+    run.addArg(b.graph.zig_exe);
+    run.addDirectoryArg2(b.graph.path(.local_cache, "uplink-cold-consumer"), .{});
+    run.addDirectoryArg2(b.path("."), .{});
+    run.addDirectoryArg2(b.path("."), .{});
+    run.addFileArg(b.path("ci/cold_program.zig"));
+    run.addArg("cold");
+    run.has_side_effects = true;
+    b.step("check-cold-consumer", "Build a client project from an empty package cache").dependOn(&run.step);
 }

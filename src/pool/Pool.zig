@@ -204,7 +204,7 @@ fn expiredAt(p: *Pool, entry: Idle, now: awake.Instant) bool {
     const since = entry.since orelse return false;
     // A span too long to hold is far past any timeout, if it is forward.
     const idle = since.durationTo(now) catch |err| return err == error.Overflow;
-    return idle.raw() >= limit.nanoseconds;
+    return std.math.order(idle.raw(), limit.nanoseconds) != .lt;
 }
 
 /// The state of a limited route, made when it is first asked for.

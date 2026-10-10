@@ -27,6 +27,11 @@
 //! - `client/concurrent/<tasks>`: that many tasks through one client.
 //! - `client/download/<body>`: one body read through; `gzip` is
 //!   English-like text decoded as it arrives.
+//! - `tls/handshake`: a request on a connection of its own, so each one
+//!   makes a TLS 1.3 handshake, a P-256 chain verified in full, against a
+//!   cloak server on loopback.
+//! - `tls/keepalive/1k`: a 1 KiB response over one kept TLS connection.
+//! - `tls/download/big`: a 64 MiB body read through TLS.
 //!
 //! Corpora, servers and clients are made before measuring; a row's
 //! callback only does its units of work. Every client row's first call is
@@ -35,6 +40,7 @@
 const std = @import("std");
 const Io = std.Io;
 const uplink = @import("uplink");
+const cloak = @import("cloak");
 const reactor = @import("reactor");
 const bench = @import("shakedown").bench;
 const provenance = @import("preflight_bench_options");
@@ -138,6 +144,10 @@ fn measure(gpa: std.mem.Allocator, io: Io, out: *Io.Writer, selected: bench.Opti
         .{ .name = "client/download/big", .unit = "body", .run = Context.download(.big) },
         .{ .name = "client/download/chunked", .unit = "body", .run = Context.download(.chunked) },
         .{ .name = "client/download/gzip", .unit = "body", .run = Context.download(.gzip) },
+        // A connection per unit, so the batch is held to what the machine's ports allow.
+        .{ .name = "tls/handshake", .unit = "request", .initial = 64, .grow = false, .run = Context.handshake },
+        .{ .name = "tls/keepalive/1k", .unit = "request", .initial = 1000, .run = Context.secureKept },
+        .{ .name = "tls/download/big", .unit = "body", .run = Context.secureDownload },
     }, metadata, selected);
 }
 
@@ -150,6 +160,9 @@ const Body = enum { big, chunked, gzip };
 /// Where `www.bench.test` points; the server's port replaces the 0. A
 /// constant of its own, since the resolver entry keeps the slice past `start`.
 const bench_address = [_]Io.net.IpAddress{.{ .ip4 = .loopback(0) }};
+
+/// The name the TLS server's certificate carries, pointed at loopback.
+const secure_host = "example.com";
 
 const chunk_sizes = [_]usize{ 256, 4096, 65536 };
 const task_counts = [_]usize{ 16, 128 };
@@ -171,13 +184,21 @@ const Context = struct {
     text: []u8,
     gzip: []u8,
     server: Server,
+    /// The TLS server, its credentials, and the authority clients trust.
+    secure: Server,
+    identity: cloak.Identity,
+    credentials: [1]cloak.tls.Credential,
+    trust: cloak.Trust.Snapshot,
+    /// A client with no idle connection to keep, so every request handshakes.
+    fresh: uplink.Client,
+    kept: uplink.Client,
     plain: uplink.Client,
     jar: uplink.CookieJar,
     jarred: uplink.Client,
     answered: uplink.Client,
     crowd: [task_counts.len]uplink.Client,
     downloads: uplink.Client,
-    resolver_entries: [1]uplink.net.Resolver.Static.Entry,
+    resolver_entries: [2]uplink.net.Resolver.Static.Entry,
     static: uplink.net.Resolver.Static,
     cursor: usize = 0,
 
@@ -213,11 +234,29 @@ const Context = struct {
         errdefer gpa.free(c.text);
         c.gzip = try compressed(gpa, c.text);
         errdefer gpa.free(c.gzip);
-        try Server.start(io, &c.server, c.gzip);
+        try Server.start(gpa, io, &c.server, c.gzip, null);
+        errdefer c.server.stop();
+        const key = try cloak.PrivateKey.parse(gpa, @embedFile("data/tls-leaf.key.pem"), .{});
+        defer key.deinit();
+        c.identity = try cloak.Identity.init(gpa, &.{ @embedFile("data/tls-leaf.der"), @embedFile("data/tls-root.der") }, key, .{});
+        errdefer c.identity.deinit();
+        c.credentials = .{.{ .identity = c.identity }};
+        var builder: cloak.Trust = .init(gpa);
+        defer builder.deinit();
+        try builder.addDer(@embedFile("data/tls-root.der"), .{});
+        c.trust = try builder.freeze();
+        errdefer c.trust.deinit();
+        try Server.start(gpa, io, &c.secure, c.gzip, &c.credentials);
         c.cursor = 0;
-        // Cookies need a name with domains above it; the rest go by address.
-        c.resolver_entries = .{.{ .host = "www.bench.test", .addresses = &bench_address }};
+        // Cookies need a name with domains above it, and the TLS server's
+        // certificate a name it carries; the rest go by address.
+        c.resolver_entries = .{
+            .{ .host = "www.bench.test", .addresses = &bench_address },
+            .{ .host = secure_host, .addresses = &bench_address },
+        };
         c.static = .{ .entries = &c.resolver_entries };
+        c.fresh = .init(gpa, .{ .tls = .{ .trust = c.trust }, .resolver = c.static.resolver(), .pool = .{ .max_idle_per_route = 0, .max_idle = 0 } });
+        c.kept = .init(gpa, .{ .tls = .{ .trust = c.trust }, .resolver = c.static.resolver() });
         c.plain = .init(gpa, .{});
         c.jar = .init(gpa, .{});
         c.jarred = .init(gpa, .{ .cookies = &c.jar, .resolver = c.static.resolver() });
@@ -229,6 +268,8 @@ const Context = struct {
 
     fn stop(c: *Context) void {
         const io = c.io;
+        c.kept.deinit(io);
+        c.fresh.deinit(io);
         c.downloads.deinit(io);
         for (&c.crowd) |*client| client.deinit(io);
         c.answered.deinit(io);
@@ -236,6 +277,9 @@ const Context = struct {
         c.jar.deinit(io);
         c.plain.deinit(io);
         c.server.stop();
+        c.secure.stop();
+        c.identity.deinit();
+        c.trust.deinit();
         const gpa = c.gpa;
         gpa.free(c.gzip);
         gpa.free(c.text);
@@ -349,6 +393,31 @@ const Context = struct {
                 }
             };
         }.run;
+    }
+
+    /// A request on a connection of its own: a TCP connect, a TLS 1.3 handshake
+    /// with the chain verified, one empty response, a close.
+    fn handshake(c: *Context, units: u64) WorkloadError!void {
+        var url_buf: [64]u8 = undefined;
+        const url = std.mem.print(&url_buf, "https://{s}:{d}/0", .{ secure_host, c.secure.port }) catch unreachable; // unreachable: the URL is under 40 bytes
+        for (0..units) |_| try exchange(&c.fresh, c.io, url);
+    }
+
+    fn secureKept(c: *Context, units: u64) WorkloadError!void {
+        var url_buf: [64]u8 = undefined;
+        const url = std.mem.print(&url_buf, "https://{s}:{d}/1k", .{ secure_host, c.secure.port }) catch unreachable; // unreachable: the URL is under 40 bytes
+        for (0..units) |_| try exchange(&c.kept, c.io, url);
+    }
+
+    fn secureDownload(c: *Context, units: u64) WorkloadError!void {
+        var url_buf: [64]u8 = undefined;
+        const url = std.mem.print(&url_buf, "https://{s}:{d}/big", .{ secure_host, c.secure.port }) catch unreachable; // unreachable: the URL is under 40 bytes
+        for (0..units) |_| {
+            var response = try c.kept.send(c.io, .{ .url = url });
+            defer response.deinit(c.io);
+            var sink: Io.Writer.Discarding = .init(c.sink);
+            std.mem.doNotOptimizeAway(try response.reader(c.io).streamRemaining(&sink.writer));
+        }
     }
 
     fn download(comptime which: Body) *const fn (*Context, u64) WorkloadError!void {

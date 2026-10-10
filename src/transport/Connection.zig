@@ -23,6 +23,7 @@ const reactor = @import("reactor");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const cloak = @import("cloak");
 const tls = @import("../tls.zig");
 const wire = @import("uplink.wire");
 const h1 = wire.h1;
@@ -51,7 +52,7 @@ host_storage: [Io.net.HostName.max_len]u8 = undefined,
 input: SocketReader,
 output: SocketWriter,
 /// Private: TLS to the proxy (0) and to the target (1), as there are.
-sessions: [2]tls.Session = .{ .{}, .{} },
+sessions: [2]cloak.tls.Session = undefined,
 session_on: [2]bool = .{ false, false },
 session_buffers: [2][2][]u8 = undefined,
 /// Requests name the whole URL: through a proxy, to an `http` target.
@@ -274,11 +275,12 @@ fn teardown(conn: *Connection, io: Io, polite: bool) void {
         i -= 1;
         if (!conn.session_on[i]) continue;
         if (polite) {
-            // ziglint-ignore: Z026 the close_notify is a courtesy, as below
-            conn.sessions[i].end() catch {};
-            // ziglint-ignore: Z026 the close_notify is a courtesy; the socket is closed below whether or not the peer heard it
+            // glint-ignore: Z026 -- the close_notify is a courtesy, as below
+            conn.sessions[i].finish() catch {};
+            // glint-ignore: Z026 -- the close_notify is a courtesy; the socket is closed below whether or not the peer heard it
             conn.flushFrom(i) catch {};
         }
+        conn.sessions[i].deinit();
         for (conn.session_buffers[i]) |b| conn.ctx.buffers.release(io, b);
         conn.session_on[i] = false;
     }
@@ -438,19 +440,21 @@ pub fn readError(conn: *Connection) IoError {
     if (conn.watch.fired.load(.acquire)) return conn.timedOut(conn.armed);
     for (&conn.sessions, conn.session_on) |*s, on| {
         if (!on) continue;
-        const err = s.readError() orelse continue;
+        const err = s.failure orelse continue;
+        const seen = s.diagnostics();
         // TLS 1.3 finishes the handshake before the server has read the
         // client's certificate: its refusal is the first thing read.
-        if (err == error.TlsAlert and s.certificate_requested) {
-            if (s.readAlert()) |alert| if (tls.Session.refusesCertificate(alert.description)) {
-                if (conn.diagnostics) |d| {
-                    d.tls_error = tls.Session.alertError(alert.description);
-                    d.tls_alert = alert.description;
-                }
-                return error.ClientCertificateRejected;
-            };
+        if (seen.alert_received) |alert| if (seen.certificate_requested and tls.refusesCertificate(alert)) {
+            if (conn.diagnostics) |d| {
+                d.tls_error = err;
+                d.tls_alert = alert;
+            }
+            return error.ClientCertificateRejected;
+        };
+        if (conn.diagnostics) |d| {
+            d.tls_error = err;
+            d.tls_alert = seen.alert_received orelse seen.alert_sent;
         }
-        if (conn.diagnostics) |d| d.tls_error = err;
         return error.TlsFailed;
     }
     if (conn.missingCertificateReset()) return error.ClientCertificateRejected;
@@ -469,10 +473,10 @@ pub fn writeError(conn: *Connection) IoError {
     // handshake the client thinks is done has sent its alert and closed:
     // the write that failed is the request, and the alert is there to read.
     for (&conn.sessions, conn.session_on) |*s, on| {
-        if (!on or !s.certificate_requested) continue;
-        // ziglint-ignore: Z026 the read only takes the alert in; its failure lands in the session's read error, checked next
+        if (!on or !s.diagnostics().certificate_requested) continue;
+        // glint-ignore: Z026 -- the read only takes the alert in; its failure lands in the session's failure, checked next
         _ = s.reader().peekByte() catch {};
-        if (s.readError() != null) return conn.readError();
+        if (s.failure != null) return conn.readError();
     }
     if (conn.missingCertificateReset()) return error.ClientCertificateRejected;
     return error.ConnectionFailed;
@@ -492,8 +496,8 @@ fn noteTimedOut(conn: *Connection, kind: Diagnostics.Timeout) void {
 /// socket reset before the alert reaches the reader.
 fn missingCertificateReset(conn: *Connection) bool {
     if (builtin.target.os.tag != .windows or conn.ctx.tls.client_auth != null) return false;
-    for (conn.sessions, conn.session_on) |s, on| {
-        if (on and s.certificate_requested) return true;
+    for (&conn.sessions, conn.session_on) |*s, on| {
+        if (on and s.diagnostics().certificate_requested) return true;
     }
     return false;
 }
@@ -677,12 +681,17 @@ fn startTls(conn: *Connection, slot: usize, host: []const u8) OpenError!void {
     if (ctx.timeouts.handshake) |limit| conn.handshake_until = Io.Clock.awake.now(io).addDuration(limit);
     defer conn.handshake_until = null;
     const session = &conn.sessions[slot];
-    session.start(io, conn.readerBelow(slot), conn.writerBelow(slot), read_buffer, write_buffer, .{
-        .host = host,
-        .trust = trust,
-        .client_auth = if (slot == 0) conn.route.proxy.?.proxy.tls.client_auth else ctx.tls.client_auth,
-        .key_log = ctx.tls.key_log,
-    }) catch |err| return conn.handshakeFailed(session, err);
+    var report: cloak.tls.Session.Diagnostics = .{};
+    session.open(ctx.gpa, io, conn.readerBelow(slot), conn.writerBelow(slot), .{
+        .identity = tls.reference(host),
+        .trust = if (trust) |snapshot| .{ .snapshot = snapshot } else .none,
+        .auth = if (slot == 0) conn.route.proxy.?.proxy.tls.client_auth else ctx.tls.client_auth,
+        .key_log = if (ctx.tls.key_log) |sink| tls.keyLog(sink) else null,
+        // HTTP says where a body ends, so an end without close_notify is
+        // not a truncation it cannot see.
+        .eof = .allow,
+        .diagnostics = &report,
+    }, read_buffer, write_buffer) catch |err| return conn.handshakeFailed(err, report);
     conn.session_buffers[slot] = .{ read_buffer, write_buffer };
     conn.session_on[slot] = true;
     if (ctx.observer) |o| o.emit(.{ .tls = .{ .host = host, .proxy = slot == 0, .took = started.?.durationTo(Io.Clock.awake.now(io)) } });
@@ -691,7 +700,7 @@ fn startTls(conn: *Connection, slot: usize, host: []const u8) OpenError!void {
 /// The authorities a session in `slot` checks its server against, or null
 /// for none. An `https` proxy of its own trust is always checked, whatever
 /// `verify` says.
-fn trustFor(conn: *Connection, slot: usize) OpenError!?*tls.Trust {
+fn trustFor(conn: *Connection, slot: usize) OpenError!?cloak.Trust.Snapshot {
     const ctx = conn.ctx;
     if (slot == 0) switch (conn.route.proxy.?.proxy.tls.trust) {
         .as_target => {},
@@ -701,7 +710,7 @@ fn trustFor(conn: *Connection, slot: usize) OpenError!?*tls.Trust {
     return ctx.tls.trust orelse try conn.systemTrust();
 }
 
-fn systemTrust(conn: *Connection) OpenError!*tls.Trust {
+fn systemTrust(conn: *Connection) OpenError!cloak.Trust.Snapshot {
     return conn.ctx.system_trust.get(conn.ctx.gpa, conn.io) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.Canceled => error.Canceled,
@@ -709,21 +718,22 @@ fn systemTrust(conn: *Connection) OpenError!*tls.Trust {
     };
 }
 
-fn handshakeFailed(conn: *Connection, session: *tls.Session, err: tls.Session.StartError) OpenError {
+fn handshakeFailed(conn: *Connection, err: cloak.tls.Session.OpenError, report: cloak.tls.Session.Diagnostics) OpenError {
     if (conn.failure == .timed_out or conn.watch.fired.load(.acquire)) {
         if (conn.failure != .timed_out) conn.noteTimedOut(conn.armed);
         return error.TimedOut;
     }
     if (conn.failure == .canceled) return error.Canceled;
-    const alert = session.handshake_alert;
+    const alert = report.alert_received orelse report.alert_sent;
     if (conn.diagnostics) |d| {
-        d.tls_error = if (alert) |a| tls.Session.alertError(a.description) else err;
-        if (alert) |a| d.tls_alert = a.description;
+        d.tls_error = err;
+        d.tls_alert = alert;
     }
-    if (alert) |a| if (session.certificate_requested and tls.Session.refusesCertificate(a.description)) return error.ClientCertificateRejected;
+    if (report.alert_received) |received| if (report.certificate_requested and tls.refusesCertificate(received)) return error.ClientCertificateRejected;
     return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
-        error.ClientCertificateSchemeUnsupported => error.ClientCertificateSchemeUnsupported,
+        // A client key cloak does not sign with yet.
+        error.SignerRequired => error.ClientCertificateSchemeUnsupported,
         error.ReadFailed => conn.readError(),
         error.WriteFailed => conn.writeError(),
         else => if (conn.missingCertificateReset()) error.ClientCertificateRejected else error.TlsFailed,

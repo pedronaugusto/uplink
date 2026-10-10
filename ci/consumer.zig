@@ -1,5 +1,5 @@
 //! What a project that depends on uplink and nothing else writes. Built by
-//! `zig build check-consumer` with only aegis and reactor to fetch, so uplink's
+//! `zig build check-consumer` with only aegis, reactor and cloak to fetch, so uplink's
 //! build.zig must work without any of its own CI or test dependencies.
 const std = @import("std");
 const uplink = @import("uplink");
@@ -20,7 +20,7 @@ pub fn main() void {
     _ = &uplink.Upgraded.close;
     _ = &uplink.net.Resolver.Static.parseEntry;
     _ = &uplink.wire.sse.Reader.next;
-    _ = &uplink.tls.Trust.addSystem;
+    _ = &uplink.tls.refusesCertificate;
     _ = &wire.h1.parseResponse;
     _ = std;
 }

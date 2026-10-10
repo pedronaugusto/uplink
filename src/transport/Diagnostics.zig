@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const Io = std.Io;
+const cloak = @import("cloak");
 
 const Diagnostics = @This();
 
@@ -13,10 +14,13 @@ stage: Stage = .none,
 /// The address the failing connection went to, once it had one.
 peer: ?Io.net.IpAddress = null,
 /// Why a TLS handshake failed, or the server's refusal of a client
-/// certificate: `CertificateExpired`, `TlsAlertBadCertificate`, and the like.
+/// certificate, as cloak names it: `PeerAlert`, `VerificationRejected`, and
+/// the like.
 tls_error: ?anyerror = null,
-/// The TLS alert that ended a handshake, when one did.
-tls_alert: ?std.crypto.tls.Alert.Description = null,
+/// The TLS alert that ended a handshake, when one did: the server's, or the
+/// one the client sent for a failure of its own (`unknown_ca` for a chain
+/// that did not verify, `certificate_expired` for one out of its time).
+tls_alert: ?cloak.tls.Alert = null,
 /// A proxy's refusal: its HTTP status, or its SOCKS reply code.
 proxy_status: ?u16 = null,
 /// The authentication schemes a proxy offered that could not be answered.

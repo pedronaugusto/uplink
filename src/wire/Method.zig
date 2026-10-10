@@ -11,23 +11,23 @@ const Method = @This();
 /// The method's name, as sent on the request line.
 name: []const u8,
 
-// ziglint-ignore: Z006 the method as RFC 9110 spells it, which is how a caller writes it
+// glint-ignore: Z006 -- the method as RFC 9110 spells it, which is how a caller writes it
 pub const GET: Method = .{ .name = "GET" };
-// ziglint-ignore: Z006 the method as RFC 9110 spells it, which is how a caller writes it
+// glint-ignore: Z006 -- the method as RFC 9110 spells it, which is how a caller writes it
 pub const HEAD: Method = .{ .name = "HEAD" };
-// ziglint-ignore: Z006 the method as RFC 9110 spells it, which is how a caller writes it
+// glint-ignore: Z006 -- the method as RFC 9110 spells it, which is how a caller writes it
 pub const POST: Method = .{ .name = "POST" };
-// ziglint-ignore: Z006 the method as RFC 9110 spells it, which is how a caller writes it
+// glint-ignore: Z006 -- the method as RFC 9110 spells it, which is how a caller writes it
 pub const PUT: Method = .{ .name = "PUT" };
-// ziglint-ignore: Z006 the method as RFC 9110 spells it, which is how a caller writes it
+// glint-ignore: Z006 -- the method as RFC 9110 spells it, which is how a caller writes it
 pub const DELETE: Method = .{ .name = "DELETE" };
-// ziglint-ignore: Z006 the method as RFC 9110 spells it, which is how a caller writes it
+// glint-ignore: Z006 -- the method as RFC 9110 spells it, which is how a caller writes it
 pub const CONNECT: Method = .{ .name = "CONNECT" };
-// ziglint-ignore: Z006 the method as RFC 9110 spells it, which is how a caller writes it
+// glint-ignore: Z006 -- the method as RFC 9110 spells it, which is how a caller writes it
 pub const OPTIONS: Method = .{ .name = "OPTIONS" };
-// ziglint-ignore: Z006 the method as RFC 9110 spells it, which is how a caller writes it
+// glint-ignore: Z006 -- the method as RFC 9110 spells it, which is how a caller writes it
 pub const TRACE: Method = .{ .name = "TRACE" };
-// ziglint-ignore: Z006 the method as RFC 9110 spells it, which is how a caller writes it
+// glint-ignore: Z006 -- the method as RFC 9110 spells it, which is how a caller writes it
 pub const PATCH: Method = .{ .name = "PATCH" };
 
 /// Errors from `parse`.

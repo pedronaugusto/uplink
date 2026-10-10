@@ -24,26 +24,6 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "wire", .patterns = &.{
         "src/wire.zig",
     } },
-    .{ .name = "tls primitives", .patterns = &.{
-        "src/tls/der.zig",
-        "src/tls/rsa.zig",
-    } },
-    .{ .name = "tls keys", .patterns = &.{
-        "src/tls/key.zig",
-    } },
-    .{ .name = "tls credentials", .patterns = &.{
-        "src/tls/ClientAuth.zig",
-        "src/tls/Trust.zig",
-    } },
-    .{ .name = "tls handshake", .patterns = &.{
-        "src/tls/auth_wire.zig",
-    } },
-    .{ .name = "tls client", .patterns = &.{
-        "src/tls/Client.zig",
-    } },
-    .{ .name = "tls session", .patterns = &.{
-        "src/tls/Session.zig",
-    } },
     .{ .name = "tls", .patterns = &.{
         "src/tls.zig",
     } },
@@ -125,10 +105,10 @@ pub const references: []const gantry.rules.ReferenceRule = &.{
     .{ .name = "named dependencies", .unresolved_only = true, .except_targets = &.{
         "aegis",
         "builtin",
+        "cloak",
         "reactor",
         "shakedown",
         "std",
-        "std_tls_client",
         "test_io",
         "uplink",
     } },

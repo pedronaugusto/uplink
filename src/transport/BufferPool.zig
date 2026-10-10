@@ -49,7 +49,7 @@ pub const Class = enum(u2) {
     }
 };
 
-const classes = [_]usize{ 4 << 10, std.mem.alignForward(usize, tls.Session.min_buffer_len, 64), 72 << 10 };
+const classes = [_]usize{ 4 << 10, std.mem.alignForward(usize, tls.record_buffer_len, 64), 72 << 10 };
 
 /// Buffers are aligned so a free one can hold the list's link.
 pub const alignment: std.mem.Alignment = .@"64";
@@ -141,7 +141,7 @@ test "a given-back buffer is handed out again, and past the cap it is freed" {
     try testing.expectEqual(a.ptr, c.ptr);
     pool.release(io, c);
     const r = try pool.acquire(io, .record);
-    try testing.expect(r.len >= tls.Session.min_buffer_len);
+    try testing.expect(r.len >= tls.record_buffer_len);
     pool.release(io, r);
     try testing.expectEqual(BufferPool.Class.large, BufferPool.Class.fitting(20 << 10).?);
     try testing.expectEqual(null, BufferPool.Class.fitting((72 << 10) + 1));

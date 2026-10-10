@@ -237,7 +237,7 @@ const Attempts = struct {
         a.started += 1;
         a.running += 1;
         if (a.started < a.addresses.len) {
-            // ziglint-ignore: Z026 with no task for the delay, the next attempt starts when this one fails
+            // glint-ignore: Z026 -- with no task for the delay, the next attempt starts when this one fails
             a.race.concurrent(.waited, waitFor, .{ a.io, a.delay, a.started }) catch {};
         }
     }

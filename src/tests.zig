@@ -7,7 +7,6 @@ test {
     _ = @import("transport.zig");
     _ = @import("pool.zig");
     _ = @import("client.zig");
-    _ = @import("testing/tls_fork.zig");
     _ = @import("testing/Unwiped.zig");
     _ = @import("client/client_test.zig");
     _ = @import("client/policy_test.zig");

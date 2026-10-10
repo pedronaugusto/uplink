@@ -19,9 +19,10 @@ I/O.
 Requires Zig 0.17.0. Fetch with `zig fetch --save
 git+https://github.com/pedronaugusto/uplink` and add the `uplink` module to
 your module's imports. It depends on `std`,
-[aegis](https://github.com/pedronaugusto/aegis) and
-[reactor](https://github.com/pedronaugusto/reactor), which is fetched only when the
-client is built.
+[aegis](https://github.com/pedronaugusto/aegis),
+[reactor](https://github.com/pedronaugusto/reactor) and
+[cloak](https://github.com/pedronaugusto/cloak), the last two fetched only when
+the client is built.
 
 The codecs are a module of their own. A program that reads and writes HTTP
 messages and has no use for the client, a server, a proxy or a test tool, asks
@@ -93,7 +94,7 @@ from it.
 ## Design
 
 The package is layered, and each layer owns its state alone: `wire` (the
-codecs, sans I/O) under `tls` and `net`, under `transport` (one connection),
+codecs, sans I/O) under `tls` (the HTTP side of cloak's TLS) and `net`, under `transport` (one connection),
 under `pool` (which connection serves which request), under `client` (the
 policy). The layer rule is checked in CI. [docs/design.md](docs/design.md)
 gives the layers, who owns which state, what always holds, and the reasons
@@ -186,15 +187,17 @@ put away idle gives its socket buffers back. A small exchange on a kept
 connection is one `writev`, one read and one look at the socket, and allocates
 nothing, cookies and a kept answer to a challenge included.
 
-**TLS** is the standard library's client with client authentication added: a
-copy of std's `Client.zig` held byte for byte to std and a recorded diff by a
-test, so a new Zig release's fixes are brought across rather than missed. It
-answers a server's request for a certificate with RSA (PKCS #1 v1.5 and PSS),
-ECDSA on P-256 and P-384, or Ed25519 keys, read from PKCS #8, PKCS #1, SEC 1,
-encrypted PKCS #8 and OpenSSL's older encrypted PEM. A `Trust` holds the
-authorities and may be shared by clients; without one the client reads the
-system's once, at its first verifying handshake. Each handshake checks
-certificates at the current real time.
+**TLS** is [cloak](https://github.com/pedronaugusto/cloak)'s, TLS 1.3 only for now:
+a server that speaks TLS 1.2 and not 1.3 is turned away with a `protocol_version`
+alert, and TLS 1.2 comes with cloak's own next phase. A client answers a server's
+request for a certificate with ECDSA on P-256 and P-384 or Ed25519 keys, read by
+cloak from PKCS #8, SEC 1, encrypted PKCS #8 and OpenSSL's older encrypted PEM;
+an RSA client key is refused with `ClientCertificateSchemeUnsupported` until
+cloak signs with RSA. `tls.ClientOptions` takes a cloak `Trust.Snapshot` for the
+authorities, which clients may share; without one the client reads the system's
+once, at its first verifying handshake. Each handshake checks certificates at
+the current real time, and a handshake that fails says why in
+`Diagnostics.tls_error` and `tls_alert`.
 
 **Proxies.** `Proxy.parse` reads `host:port` or a URL with scheme `http`,
 `https`, `socks4`, `socks4a`, `socks5` or `socks5h`. `Proxy.fromEnvironment`
@@ -206,7 +209,9 @@ environment itself.
 ## Scope
 
 - HTTP/1.1 only, client only. No HTTP/2, server, WebSocket or TLS engine of
-  uplink's own; HTTP/3 belongs to a QUIC package of its own.
+  uplink's own (TLS is cloak's); HTTP/3 belongs to a QUIC package of its own.
+- TLS 1.3 only and no RSA client keys, until cloak adds TLS 1.2 and RSA-PSS
+  signing.
 - No Brotli decoding: such a body is handed over as it came, with its
   `Content-Encoding`.
 - No NTLM, Negotiate, PAC files, OCSP or `.netrc`, and no HTTP cache.
@@ -232,7 +237,11 @@ reactor's runtime both are kept on every system.
 ## Built with
 
 - [Zig](https://ziglang.org) 0.17.0 and its standard library; nothing else is
-  linked into the module.
+  linked into the module, except that cloak links the platform's own trust
+  store on macOS and Windows.
+- [cloak](https://github.com/pedronaugusto/cloak) is the TLS engine, with the
+  certificates, keys and authorities. It is a lazy dependency, fetched only for
+  the client.
 - [reactor](https://github.com/pedronaugusto/reactor) is the evented `std.Io`,
   and owns the sockets' deadlines, name lookup and connecting. It is a lazy
   dependency, fetched only for the client.
@@ -261,9 +270,10 @@ Happy Eyeballs is held to its timing against a black-holed address. Two tests
 count what an exchange costs on a warm client: no allocation, with cookies and
 a kept answer too, and one write, one read and one look at the socket. TLS is
 proved against `openssl s_server` with certificates made for each run in a
-scratch `HOME`: TLS 1.3 and 1.2, authorities given and refused, client
-certificates of every key kind and format, a certificate checked at a stepped
-clock, and TLS inside a `CONNECT` tunnel and SOCKS.
+scratch `HOME`: TLS 1.3 (and a TLS 1.2 server turned away), authorities given and
+refused, client certificates of the key kinds cloak signs with and an RSA one
+refused, a certificate checked at a stepped clock, and TLS inside a `CONNECT`
+tunnel and SOCKS.
 
 `zig build bench` measures head parsing, chunked decoding, Server-Sent Events
 and `Set-Cookie` reading, keep-alive requests with their latency percentiles

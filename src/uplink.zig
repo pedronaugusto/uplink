@@ -39,7 +39,7 @@ pub const Timeouts = transport.Context.Timeouts;
 pub const Dial = transport.Context.Dial;
 /// Why an exchange failed, in detail.
 pub const Diagnostics = transport.Diagnostics;
-/// TLS: the authorities trusted, client certificates and keys.
+/// TLS: the options a client takes for cloak's TLS: authorities, client certificates, a key log.
 pub const tls = @import("tls.zig");
 /// Name lookup and connections.
 pub const net = @import("net.zig");

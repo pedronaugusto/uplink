@@ -275,6 +275,6 @@ fn pump(io: Io, r: *Io.Reader, to: Io.net.Stream) void {
         r.tossBuffered();
         w.interface.flush() catch break;
     }
-    // ziglint-ignore: Z026 either side ending ends the tunnel; there is nothing to report
+    // glint-ignore: Z026 -- either side ending ends the tunnel; there is nothing to report
     to.shutdown(io, .send) catch {};
 }

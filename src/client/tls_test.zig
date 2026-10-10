@@ -9,7 +9,7 @@ const testing = std.testing;
 const test_io = @import("../testing/io.zig");
 const shakedown = @import("shakedown");
 const Client = @import("Client.zig");
-const tls = @import("../tls.zig");
+const cloak = @import("cloak");
 const Diagnostics = @import("../transport/Diagnostics.zig");
 const Proxy = @import("../transport/Proxy.zig");
 const openssl = @import("../testing/openssl.zig");
@@ -25,49 +25,64 @@ fn fetch(gpa: Allocator, io: Io, client: *Client, port: u16, diagnostics: ?*Diag
     return response.collect(gpa, io, .limited(1 << 20));
 }
 
-fn trustServer(io: Io, pki: *openssl.Pki, trust: *tls.Trust) !void {
-    const pem = try pki.read(io, "server.pem");
+/// The authority in the test PKI's file `name`, as a snapshot a client takes.
+fn trusting(io: Io, pki: *openssl.Pki, name: []const u8) !cloak.Trust.Snapshot {
+    const pem = try pki.read(io, name);
     defer pki.gpa.free(pem);
-    try trust.addPem(io, pem);
+    var builder: cloak.Trust = .init(pki.gpa);
+    defer builder.deinit();
+    try builder.addPem(pem, .{});
+    return builder.freeze();
 }
 
-test "a server is checked against the authorities given, in TLS 1.3 and 1.2" {
+test "a server is checked against the authorities given" {
     const gpa = testing.allocator;
     const io = test_io.io();
     const pki = try openssl.Pki.make(gpa, io);
     defer pki.destroy();
-    var trust: tls.Trust = .init(gpa);
+    const trust = try trusting(io, pki, "server.pem");
     defer trust.deinit();
-    try trustServer(io, pki, &trust);
-    for ([_][]const u8{ "-tls1_3", "-tls1_2" }) |version| {
-        var server = try openssl.SServer.start(gpa, io, pki, .{ .version = version });
-        defer server.stop(io);
-        var client: Client = .init(gpa, .{ .tls = .{ .trust = &trust } });
-        defer client.deinit(io);
-        const page = try fetch(gpa, io, &client, server.port, null);
-        defer gpa.free(page);
-        const protocol = if (std.mem.eql(u8, version, "-tls1_3")) "TLSv1.3" else "TLSv1.2";
-        try testing.expect(std.mem.find(u8, page, protocol) != null);
+    var server = try openssl.SServer.start(gpa, io, pki, .{ .version = "-tls1_3" });
+    defer server.stop(io);
+    var client: Client = .init(gpa, .{ .tls = .{ .trust = trust } });
+    defer client.deinit(io);
+    const page = try fetch(gpa, io, &client, server.port, null);
+    defer gpa.free(page);
+    try testing.expect(std.mem.find(u8, page, "TLSv1.3") != null);
 
-        // An authority that did not sign the server's certificate.
-        var stranger: tls.Trust = .init(gpa);
-        defer stranger.deinit();
-        const pem = try pki.read(io, "stranger.pem");
-        defer gpa.free(pem);
-        try stranger.addPem(io, pem);
-        var refusing: Client = .init(gpa, .{ .tls = .{ .trust = &stranger } });
-        defer refusing.deinit(io);
-        var diagnostics: Diagnostics = .{};
-        try testing.expectError(error.TlsFailed, fetch(gpa, io, &refusing, server.port, &diagnostics));
-        try testing.expectEqual(Diagnostics.Stage.tls, diagnostics.stage);
-        try testing.expect(diagnostics.tls_error != null);
+    // An authority that did not sign the server's certificate.
+    const stranger = try trusting(io, pki, "stranger.pem");
+    defer stranger.deinit();
+    var refusing: Client = .init(gpa, .{ .tls = .{ .trust = stranger } });
+    defer refusing.deinit(io);
+    var diagnostics: Diagnostics = .{};
+    try testing.expectError(error.TlsFailed, fetch(gpa, io, &refusing, server.port, &diagnostics));
+    try testing.expectEqual(Diagnostics.Stage.tls, diagnostics.stage);
+    try testing.expectEqual(error.VerificationRejected, diagnostics.tls_error.?);
+    try testing.expectEqual(cloak.tls.Alert.unknown_ca, diagnostics.tls_alert.?);
 
-        // Checking nothing, anything is taken.
-        var trusting: Client = .init(gpa, .{ .tls = .{ .verify = .none } });
-        defer trusting.deinit(io);
-        const any = try fetch(gpa, io, &trusting, server.port, null);
-        gpa.free(any);
-    }
+    // Checking nothing, anything is taken.
+    var trusting_all: Client = .init(gpa, .{ .tls = .{ .verify = .none } });
+    defer trusting_all.deinit(io);
+    const any = try fetch(gpa, io, &trusting_all, server.port, null);
+    gpa.free(any);
+}
+
+test "a server that speaks only TLS 1.2 is refused, and the alert says why" {
+    // cloak speaks TLS 1.3; TLS 1.2 comes with its C4. Until then a server
+    // that does not also speak 1.3 is turned away by name.
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const pki = try openssl.Pki.make(gpa, io);
+    defer pki.destroy();
+    var server = try openssl.SServer.start(gpa, io, pki, .{ .version = "-tls1_2" });
+    defer server.stop(io);
+    var client: Client = .init(gpa, .{ .tls = .{ .verify = .none } });
+    defer client.deinit(io);
+    var diagnostics: Diagnostics = .{};
+    try testing.expectError(error.TlsFailed, fetch(gpa, io, &client, server.port, &diagnostics));
+    try testing.expectEqual(Diagnostics.Stage.tls, diagnostics.stage);
+    try testing.expectEqual(cloak.tls.Alert.protocol_version, diagnostics.tls_alert.?);
 }
 
 /// How `openssl s_server -www` says the client signed: the scheme's name
@@ -102,56 +117,58 @@ const SignedWith = struct {
 };
 
 /// A client certificate and key from the test authority's files.
-fn loadAuth(gpa: Allocator, arena: Allocator, io: Io, pki: *openssl.Pki, cert_name: []const u8, key_name: []const u8, pass: ?[]const u8) !tls.ClientAuth {
+fn loadAuth(gpa: Allocator, io: Io, pki: *openssl.Pki, cert_name: []const u8, key_name: []const u8, pass: ?[]const u8) !cloak.ClientAuth {
     const cert_pem = try pki.read(io, cert_name);
     defer gpa.free(cert_pem);
     const key_pem = try pki.read(io, key_name);
     defer gpa.free(key_pem);
-    const chain = try tls.key.certificates(arena, cert_pem);
-    const key = try tls.PrivateKey.parse(arena, key_pem, pass);
-    return tls.ClientAuth.init(gpa, chain, key);
+    const key = try cloak.PrivateKey.parse(gpa, key_pem, .{ .passphrase = pass, .entropy = cloak.PrivateKey.Entropy.fromIo(&io) });
+    defer key.deinit();
+    return cloak.ClientAuth.initPem(gpa, cert_pem, key, .{});
 }
 
-test "a server's demand for a client certificate is answered in TLS 1.3 and 1.2, with RSA, ECDSA and Ed25519 keys, plain and encrypted" {
+test "a server's demand for a client certificate is answered with ECDSA and Ed25519 keys, plain and encrypted" {
     const gpa = testing.allocator;
     const io = test_io.io();
     const pki = try openssl.Pki.make(gpa, io);
     defer pki.destroy();
-    var trust: tls.Trust = .init(gpa);
+    const trust = try trusting(io, pki, "server.pem");
     defer trust.deinit();
-    try trustServer(io, pki, &trust);
-    for ([_][]const u8{ "-tls1_3", "-tls1_2" }) |version| {
-        var server = try openssl.SServer.start(gpa, io, pki, .{ .version = version, .verify_client = true });
-        defer server.stop(io);
-        for (openssl.kinds) |kind| for ([_]bool{ false, true }) |encrypted| {
-            var arena_state: std.heap.ArenaAllocator = .init(gpa);
-            defer arena_state.deinit();
-            const arena = arena_state.allocator();
-            const key_name = try arena.print("{s}.{s}", .{ kind, if (encrypted) "enc.key" else "key" });
-            var auth = try loadAuth(gpa, arena, io, pki, try arena.print("{s}.pem", .{kind}), key_name, if (encrypted) openssl.passphrase else null);
-            defer auth.deinit();
-            var client: Client = .init(gpa, .{ .tls = .{ .trust = &trust, .client_auth = &auth } });
-            defer client.deinit(io);
-            const page = try fetch(gpa, io, &client, server.port, null);
-            defer gpa.free(page);
-            try testing.expect(SignedWith.of(kind).on(page));
-            try testing.expect(std.mem.find(u8, page, "Verify return code: 0 (ok)") != null);
-        };
-        // No certificate, and one from an authority the server does not
-        // trust, are refused, and named for what they are.
-        var bare: Client = .init(gpa, .{ .tls = .{ .trust = &trust } });
-        defer bare.deinit(io);
-        try testing.expectError(error.ClientCertificateRejected, fetch(gpa, io, &bare, server.port, null));
+    var server = try openssl.SServer.start(gpa, io, pki, .{ .version = "-tls1_3", .verify_client = true });
+    defer server.stop(io);
+    for (openssl.kinds) |kind| for ([_]bool{ false, true }) |encrypted| {
         var arena_state: std.heap.ArenaAllocator = .init(gpa);
         defer arena_state.deinit();
-        var stranger = try loadAuth(gpa, arena_state.allocator(), io, pki, "p256.stranger.pem", "p256.key", null);
-        defer stranger.deinit();
-        var refused: Client = .init(gpa, .{ .tls = .{ .trust = &trust, .client_auth = &stranger } });
-        defer refused.deinit(io);
-        var diagnostics: Diagnostics = .{};
-        try testing.expectError(error.ClientCertificateRejected, fetch(gpa, io, &refused, server.port, &diagnostics));
-        try testing.expect(diagnostics.tls_error != null);
-    }
+        const arena = arena_state.allocator();
+        const key_name = try arena.print("{s}.{s}", .{ kind, if (encrypted) "enc.key" else "key" });
+        const auth = try loadAuth(gpa, io, pki, try arena.print("{s}.pem", .{kind}), key_name, if (encrypted) openssl.passphrase else null);
+        defer auth.deinit();
+        var client: Client = .init(gpa, .{ .tls = .{ .trust = trust, .client_auth = auth } });
+        defer client.deinit(io);
+        if (std.mem.eql(u8, kind, "rsa")) {
+            // cloak parses an RSA key but signs only with ECDSA and Ed25519
+            // until RSA-PSS signing comes with TLS 1.2.
+            var diagnostics: Diagnostics = .{};
+            try testing.expectError(error.ClientCertificateSchemeUnsupported, fetch(gpa, io, &client, server.port, &diagnostics));
+            continue;
+        }
+        const page = try fetch(gpa, io, &client, server.port, null);
+        defer gpa.free(page);
+        try testing.expect(SignedWith.of(kind).on(page));
+        try testing.expect(std.mem.find(u8, page, "Verify return code: 0 (ok)") != null);
+    };
+    // No certificate, and one from an authority the server does not
+    // trust, are refused, and named for what they are.
+    var bare: Client = .init(gpa, .{ .tls = .{ .trust = trust } });
+    defer bare.deinit(io);
+    try testing.expectError(error.ClientCertificateRejected, fetch(gpa, io, &bare, server.port, null));
+    const stranger = try loadAuth(gpa, io, pki, "p256.stranger.pem", "p256.key", null);
+    defer stranger.deinit();
+    var refused: Client = .init(gpa, .{ .tls = .{ .trust = trust, .client_auth = stranger } });
+    defer refused.deinit(io);
+    var diagnostics: Diagnostics = .{};
+    try testing.expectError(error.ClientCertificateRejected, fetch(gpa, io, &refused, server.port, &diagnostics));
+    try testing.expect(diagnostics.tls_error != null);
 }
 
 test "each handshake checks the server's certificate at the time it is made" {
@@ -162,27 +179,43 @@ test "each handshake checks the server's certificate at the time it is made" {
     defer server.stop(test_io.io());
     var clock: shakedown.Clock = .init(test_io.io(), .{ .real = Io.Clock.real.now(test_io.io()) });
     const io = clock.io();
-    var trust: tls.Trust = .init(gpa);
+    const trust = try trusting(io, pki, "server.pem");
     defer trust.deinit();
-    try trustServer(io, pki, &trust);
     const pem = try pki.read(io, "server.pem");
     defer gpa.free(pem);
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
-    const der = (try tls.key.certificates(arena_state.allocator(), pem))[0];
+    const der = try firstCertificate(arena_state.allocator(), pem);
     const validity = (try std.crypto.Certificate.parse(.{ .buffer = der, .index = 0 })).validity;
-    var client: Client = .init(gpa, .{ .tls = .{ .trust = &trust } });
+    var client: Client = .init(gpa, .{ .tls = .{ .trust = trust } });
     defer client.deinit(io);
     var diagnostics: Diagnostics = .{};
+    // TLS says `certificate_expired` for a certificate that has expired and
+    // for one that is not yet valid.
     clock.stepReal(.fromNanoseconds(@as(i96, validity.not_after + 1) * std.time.ns_per_s));
     try testing.expectError(error.TlsFailed, fetch(gpa, io, &client, server.port, &diagnostics));
-    try testing.expectEqual(error.CertificateExpired, diagnostics.tls_error.?);
+    try testing.expectEqual(error.VerificationRejected, diagnostics.tls_error.?);
+    try testing.expectEqual(cloak.tls.Alert.certificate_expired, diagnostics.tls_alert.?);
+    diagnostics = .{};
     clock.stepReal(.fromNanoseconds(@as(i96, validity.not_before - 1) * std.time.ns_per_s));
     try testing.expectError(error.TlsFailed, fetch(gpa, io, &client, server.port, &diagnostics));
-    try testing.expectEqual(error.CertificateNotYetValid, diagnostics.tls_error.?);
+    try testing.expectEqual(cloak.tls.Alert.certificate_expired, diagnostics.tls_alert.?);
     clock.stepReal(.fromNanoseconds(@as(i96, validity.not_before + 1) * std.time.ns_per_s));
     const page = try fetch(gpa, io, &client, server.port, null);
     gpa.free(page);
+}
+
+/// The first certificate of a PEM file, as DER.
+fn firstCertificate(arena: Allocator, pem: []const u8) ![]u8 {
+    const begin = "-----BEGIN CERTIFICATE-----";
+    const end = "-----END CERTIFICATE-----";
+    const start = (std.mem.find(u8, pem, begin) orelse return error.TestUnexpectedResult) + begin.len;
+    const stop = std.mem.findPos(u8, pem, start, end) orelse return error.TestUnexpectedResult;
+    var base64: std.ArrayList(u8) = .empty;
+    for (pem[start..stop]) |c| if (!std.ascii.isWhitespace(c)) try base64.append(arena, c);
+    const der = try arena.alloc(u8, try std.base64.standard.Decoder.calcSizeForSlice(base64.items));
+    try std.base64.standard.Decoder.decode(der, base64.items);
+    return der;
 }
 
 test "TLS to the server runs inside a CONNECT tunnel and inside SOCKS" {
@@ -192,9 +225,8 @@ test "TLS to the server runs inside a CONNECT tunnel and inside SOCKS" {
     defer pki.destroy();
     var server = try openssl.SServer.start(gpa, io, pki, .{});
     defer server.stop(io);
-    var trust: tls.Trust = .init(gpa);
+    const trust = try trusting(io, pki, "server.pem");
     defer trust.deinit();
-    try trustServer(io, pki, &trust);
     for ([_]TestProxy.Kind{ .http, .socks }) |kind| {
         const proxy = try TestProxy.start(gpa, io, .{ .kind = kind, .credential = "user:secret" });
         defer proxy.stop();
@@ -203,7 +235,7 @@ test "TLS to the server runs inside a CONNECT tunnel and inside SOCKS" {
         defer arena_state.deinit();
         const proxy_url = try std.mem.print(&proxy_url_buf, "{s}://user:secret@127.0.0.1:{d}", .{ if (kind == .http) "http" else "socks5h", proxy.port });
         var client: Client = .init(gpa, .{
-            .tls = .{ .trust = &trust },
+            .tls = .{ .trust = trust },
             .proxy = .{ .fixed = try Proxy.parse(arena_state.allocator(), proxy_url, .lowercase) },
         });
         defer client.deinit(io);

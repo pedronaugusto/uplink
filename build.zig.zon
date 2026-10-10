@@ -16,22 +16,27 @@
     },
     .dependencies = .{
         .aegis = .{
-            .url = "git+https://github.com/pedronaugusto/aegis#586602b1326fd5fda53a1a252dd3f7e1ae5ee359",
-            .hash = "aegis-0.0.0-rsxoumTEBQDYZ_f1VkY9n5KqhcRp5HcTcYyNpkvBlID5",
+            .url = "git+https://github.com/pedronaugusto/aegis#104b1c07ebc698ec86cb65ca0befa0a63c266e8a",
+            .hash = "aegis-0.0.0-rsxouifgBgBOnC8-wtmFrZSIUjR9aEYPYmZD1G-hASAz",
         },
         .preflight = .{
-            .url = "git+https://github.com/pedronaugusto/preflight#c04e49d329eaa1cb985cdb6ee07f906dd7d84743",
-            .hash = "preflight-0.1.0-LX1ZwjczCQDSSG7aH5c5oWXPdmltZQH2SCPUEKCdr6oG",
+            .url = "git+https://github.com/pedronaugusto/preflight#e3d81b9e477c1c690f1ce03506511935d16035c3",
+            .hash = "preflight-0.1.0-LX1Zwl2HCQB4-h0brJMmXe_1ZA3UoIT6vI9kJ3IE1grE",
             .lazy = true,
         },
         .shakedown = .{
-            .url = "git+https://github.com/pedronaugusto/shakedown#a3db7b9c9b60b76dafe1d6f2fa9aab9a8cde3c95",
-            .hash = "shakedown-0.1.0-BR8U4zMOEgCECMxdaaSV5AdzkdaiM8oJVsq6fb9t6tMo",
+            .url = "git+https://github.com/pedronaugusto/shakedown#caf380381a49ace7c13beba70dd512c4faf24ce7",
+            .hash = "shakedown-0.1.0-BR8U4yVfEgCS2Vw6zWMqw0wRjxct8g3tePy1UKNZ8Q89",
             .lazy = true,
         },
         .reactor = .{
-            .url = "git+https://github.com/pedronaugusto/reactor#2c58e626af138a56fd268473796a7cb4ec09133a",
-            .hash = "reactor-0.1.0-MjQ-WKk7EQCVHyy_m04xWUsvXr-XgfRBxr7bPKyNyJgn",
+            .url = "git+https://github.com/pedronaugusto/reactor#7e93a916f173def7a41e578e39525b83d30808ef",
+            .hash = "reactor-0.1.0-MjQ-WKaaEQBIUGdJBqtcy8yIRjcMqG5XmCx4bA2FW7OK",
+            .lazy = true,
+        },
+        .cloak = .{
+            .url = "git+https://github.com/pedronaugusto/cloak#d20b2ff425d0ef333a71b0a3a9989cb0641007bd",
+            .hash = "cloak-0.1.0-9onwcYyZ8QJBmOJ4OKRAhgK3SDFv8bBKnplJ20-Qfpcg",
             .lazy = true,
         },
     },

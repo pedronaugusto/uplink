@@ -14,16 +14,16 @@ to use it.
  transport  one connection: TCP, then TLS to a proxy, a CONNECT or SOCKS tunnel,
             TLS to the server; deadlines; the buffers connections borrow
  net        names and sockets: lookup, resolvers, Happy Eyeballs, socket options
- tls        the TLS client with client certificates, trust, keys
+ tls        how connections use cloak's TLS: client options, what an alert says
+            about a client certificate, the shape of the buffers
  wire       sans-I/O codecs: HTTP/1.1 heads and bodies, fields, dates, cookies,
             auth challenges, SOCKS, SSE, form, multipart, URLs
 ```
 
 Each layer imports only the ones below it. `wire` imports `std` and aegis;
-`tls` imports `std` alone, and a test reads its sources to hold it to that;
-`net` and `transport` import reactor, the evented `std.Io`, for the sockets'
-deadlines, name lookup and connecting. `net` and `tls` are siblings: neither
-knows the other. The rule is not a
+`tls` imports `std` and cloak, the family's TLS; `net` and `transport` import
+reactor, the evented `std.Io`, for the sockets' deadlines, name lookup and
+connecting. `net` and `tls` are siblings: neither knows the other. The rule is not a
 convention: `ci/layers.zig` gives every production source one place in an
 ordered list of finer layers, and gantry's lint fails a source that imports
 upward or has no place. A second rule bans the spelling of `io.async` and
@@ -44,14 +44,14 @@ and the compiler holds `wire` to its two imports.
 Why a module and not only the layer: Zig analyses what is used, so a program
 that imports `uplink` and calls the codecs compiles none of the client. What
 it does not avoid is fetching: a build that reaches `uplink` fetches reactor
-with it. A separate module buys something only where a part's dependencies
+and cloak with it. A separate module buys something only where a part's dependencies
 should not be fetched by those who do not use it, and the codecs are such a part:
 a server or a proxy parsing HTTP/1.1 has no use for the client's runtime or its
 TLS. `tls`, `net`, `transport`, `pool` and `client` are not modules: they share
-reactor, and no user wants one without the rest.
+reactor and cloak, and no user wants one without the rest.
 
 The build has one option, `client`, true unless a project says otherwise.
-reactor is a lazy dependency, requested only when it is true, so the common
+reactor and cloak are lazy dependencies, requested only when it is true, so the common
 user, who builds the client, writes nothing and gets the whole package, and
 a wire-only user writes `.client = false` and fetches aegis and nothing more. With
 it false the `uplink` module is not defined: it cannot be built without the
@@ -74,7 +74,7 @@ because a module's tests run only from the build that has it as root.
 | Read and write deadlines | reactor's `net.Deadlines`, held by `transport.Context`: a connection hands it each operation's nearest deadline |
 | The proxies, and their answers to challenges | `transport.Context` (the proxies), `transport.ProxyAuth` (one answer per proxy, shared by its connections) |
 | Answers to servers' 401s | `client.OriginAuth`: per origin, counted by the requests using them, told to `Credentials` once |
-| Trusted authorities | `tls.Trust`, shareable between clients, locked inside |
+| Trusted authorities | cloak's `Trust.Snapshot`, immutable and shared between clients; the system's one is `transport.Context.SystemTrust`'s |
 | Cookies | `CookieJar`, the caller's, shareable between clients |
 | Name answers | `net.Resolver.Cache` (a client's own) around the caller's or the system's resolver |
 | Body framing state | the exchange's `client.Body` |
@@ -288,20 +288,29 @@ the lock, and say so where they are declared.
 
 ### TLS
 
-- **TLS is std's client with client authentication added.** `tls/Client.zig`
-  is a copy of std's, held byte for byte to std plus a recorded diff by a
-  test (`zig build check-tls-fork`; `tls-fork` records it again), so each Zig
-  release's fixes are brought across and cannot be missed. It answers a
-  server's request for a certificate with RSA (PKCS #1 v1.5 and PSS), ECDSA on
-  P-256 and P-384, or Ed25519, from PKCS #8, PKCS #1, SEC 1, encrypted PKCS #8
-  and OpenSSL's older encrypted PEM.
-- **Every TLS layer a connection stacks is a `tls.Session`.** What is above it
-  does not know whose client is underneath, so the client can change without
-  the connection changing.
-- **`Trust` is shared.** Several clients may point at one, so a process reads
-  the system's authorities once, not once per client; without one a client
-  reads them at its first verifying handshake. Each handshake checks
-  certificates at the current real time.
+- **TLS is cloak's, and uplink owns only its HTTP side.** The engine, the
+  certificates, the keys and the authorities live in cloak, which fixes its own
+  bugs and measures its own handshake; what is left here is `tls.ClientOptions`
+  (what a client takes), the reading of an alert as a client certificate's
+  refusal, and the size of a record buffer. A connection opens a
+  `cloak.tls.Session` for each TLS layer it stacks, over the reader and writer
+  below, so a tunnel inside TLS inside TCP is the same code as TLS alone, and
+  a handshake that fails reports its alerts through the session's diagnostics.
+  An end of stream without close_notify ends a body cleanly, since HTTP says
+  where a body ends.
+- **TLS 1.2 and RSA client keys wait for cloak.** The engine uplink used before
+  was std's TLS client with client authentication added, which also spoke TLS
+  1.2 and signed with RSA. cloak's is TLS 1.3, signing with ECDSA on P-256
+  and P-384 and Ed25519; TLS 1.2 and RSA-PSS signing come with its next phase.
+  Until then a server that speaks only TLS 1.2 is refused with a
+  `protocol_version` alert, and a client key that is RSA fails the handshake
+  with `ClientCertificateSchemeUnsupported`. Neither is hidden behind a
+  second engine.
+- **Authorities are cloak's snapshots.** An immutable `Trust.Snapshot` is
+  shared by any number of clients; a client without one builds the system's
+  once, at its first verifying handshake, and keeps it until it is deinitialized.
+  A reload is a new snapshot. Each handshake checks certificates at the current
+  real time.
 - **Key logs are explicit.** A writer in the options, never the environment.
   Tests, and users, are not subject to a stray variable.
 - **The environment is never read by uplink.** `Proxy.fromEnvironment` takes the

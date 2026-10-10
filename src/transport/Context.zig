@@ -8,6 +8,7 @@ const aegis = @import("aegis");
 const reactor = @import("reactor");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const cloak = @import("cloak");
 const tls_mod = @import("../tls.zig");
 const Resolver = @import("../net/Resolver.zig");
 const wire = @import("uplink.wire");
@@ -104,7 +105,7 @@ pub fn zstdBufferLen(ctx: *const Context) usize {
 }
 
 fn zstdReadLen(window: aegis.units.Bytes(u32)) aegis.units.Bytes(usize) {
-    const room = window.convert(usize) catch return .fromRaw(std.math.maxInt(usize));
+    const room = window.convert(usize);
     return room.add(.fromRaw(std.compress.zstd.block_size_max)) catch .fromRaw(std.math.maxInt(usize));
 }
 
@@ -345,30 +346,39 @@ pub const Counters = struct {
 /// The system's authorities, read once, at the first verifying handshake
 /// that needs them.
 pub const SystemTrust = struct {
-    trust: aegis.BlockingGuarded(?tls_mod.Trust),
+    trust: aegis.BlockingGuarded(?cloak.Trust.Snapshot),
 
     pub const init: SystemTrust = .{ .trust = .init(null) };
 
     pub fn deinit(s: *SystemTrust, io: Io) void {
         var held = s.trust.acquireUncancelable(io);
-        if (held.value().*) |*t| t.deinit();
+        if (held.value().*) |snapshot| snapshot.deinit();
         held.deinit(io);
         s.* = undefined;
     }
 
-    /// The system's authorities, read now if they were not yet. The trust
-    /// is made once and not moved or freed before `deinit`, so it outlives
-    /// the lock it is read under.
-    pub fn get(s: *SystemTrust, gpa: Allocator, io: Io) tls_mod.Trust.AddError!*tls_mod.Trust {
+    pub const Error = Allocator.Error || error{ Canceled, Unreadable };
+
+    /// The system's authorities, read now if they were not yet. The snapshot
+    /// is made once and kept until `deinit`; every handshake borrows it.
+    pub fn get(s: *SystemTrust, gpa: Allocator, io: Io) Error!cloak.Trust.Snapshot {
         var held = s.trust.acquireUncancelable(io);
         defer held.deinit(io);
         const slot = held.value();
-        if (slot.*) |*t| return t;
-        var t: tls_mod.Trust = .init(gpa);
-        errdefer t.deinit();
-        try t.addSystem(io);
-        slot.* = t;
-        return &slot.*.?;
+        if (slot.*) |snapshot| return snapshot;
+        var builder: cloak.Trust = .init(gpa);
+        defer builder.deinit();
+        builder.addSystem(io, .{}) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.Canceled => error.Canceled,
+            else => error.Unreadable,
+        };
+        const snapshot = builder.freeze() catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.Unreadable,
+        };
+        slot.* = snapshot;
+        return snapshot;
     }
 };
 

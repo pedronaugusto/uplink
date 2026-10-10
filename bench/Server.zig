@@ -9,9 +9,12 @@
 //! - `/gzip`: the text corpus, gzip-compressed once at start.
 //! - `/redirect`: a 302 to `/0`.
 //! - `/private`: a 401 asking for Basic, unless the request answers it.
+//!
+//! With credentials it speaks TLS 1.3 (cloak's server) and answers the same.
 
 const std = @import("std");
 const Io = std.Io;
+const cloak = @import("cloak");
 
 const Server = @This();
 
@@ -22,15 +25,19 @@ task: Io.Future(void) = undefined,
 group: Io.Group = .init,
 /// The `/gzip` body.
 gzip: []const u8 = "",
+/// What a connection is served over TLS with; null: plain TCP.
+credentials: ?[]const cloak.tls.Credential = null,
+gpa: std.mem.Allocator = undefined,
 
 pub const big_len = 64 << 20;
 pub const chunked_len = 16 << 20;
 
-/// A server answering `/gzip` with `gzip`, which must outlive it.
-pub fn start(io: Io, s: *Server, gzip: []const u8) !void {
+/// A server answering `/gzip` with `gzip`, which must outlive it, over TLS with
+/// `credentials` when it has them.
+pub fn start(gpa: std.mem.Allocator, io: Io, s: *Server, gzip: []const u8, credentials: ?[]const cloak.tls.Credential) !void {
     var listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
     errdefer listener.deinit(io);
-    s.* = .{ .io = io, .listener = listener, .port = listener.socket.address.getPort(), .gzip = gzip };
+    s.* = .{ .io = io, .listener = listener, .port = listener.socket.address.getPort(), .gzip = gzip, .credentials = credentials, .gpa = gpa };
     s.task = try io.concurrent(serve, .{s});
 }
 
@@ -64,17 +71,28 @@ fn handle(s: *Server, stream: Io.net.Stream) void {
     var write_buffer: [64 << 10]u8 = undefined;
     var r = stream.reader(s.io, &read_buffer);
     var w = stream.writer(s.io, &write_buffer);
+    const credentials = s.credentials orelse return s.requests(&r.interface, &w.interface);
+    var session: cloak.tls.Session = undefined;
+    var plain_in: [16 << 10]u8 = undefined;
+    var plain_out: [64 << 10]u8 = undefined;
+    session.accept(s.gpa, s.io, &r.interface, &w.interface, .{ .credentials = credentials, .eof = .allow }, &plain_in, &plain_out) catch return;
+    defer session.deinit();
+    s.requests(session.reader(), session.writer());
+}
+
+/// Requests read from `r` and answered on `w` until either ends.
+fn requests(s: *Server, r: *Io.Reader, w: *Io.Writer) void {
     while (true) {
-        while (std.mem.find(u8, r.interface.buffered(), "\r\n\r\n") == null) r.interface.fillMore() catch return;
-        const end = std.mem.find(u8, r.interface.buffered(), "\r\n\r\n").? + 4;
-        const head = r.interface.buffered()[0..end];
+        while (std.mem.find(u8, r.buffered(), "\r\n\r\n") == null) r.fillMore() catch return;
+        const end = std.mem.find(u8, r.buffered(), "\r\n\r\n").? + 4;
+        const head = r.buffered()[0..end];
         const at = (std.mem.findScalar(u8, head, ' ') orelse return) + 1;
         const path = head[at..][0 .. std.mem.findScalar(u8, head[at..], ' ') orelse return];
         var reply = which(path);
         if (reply == .private and std.mem.find(u8, head, "\r\nAuthorization: ") != null) reply = .authorized;
-        r.interface.toss(end);
-        s.answer(&w.interface, reply) catch return;
-        w.interface.flush() catch return;
+        r.toss(end);
+        s.answer(w, reply) catch return;
+        w.flush() catch return;
     }
 }
 
