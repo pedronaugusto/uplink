@@ -75,7 +75,7 @@ fn handle(s: *Server, stream: Io.net.Stream) void {
     var session: cloak.tls.Session = undefined;
     var plain_in: [16 << 10]u8 = undefined;
     var plain_out: [64 << 10]u8 = undefined;
-    session.accept(s.gpa, s.io, &r.interface, &w.interface, .{ .credentials = credentials, .eof = .allow }, &plain_in, &plain_out) catch return;
+    session.accept(s.gpa, s.io, &r.interface, &w.interface, &plain_in, &plain_out, .{ .credentials = credentials, .eof = .allow }) catch return;
     defer session.deinit();
     s.requests(session.reader(), session.writer());
 }

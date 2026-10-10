@@ -682,7 +682,7 @@ fn startTls(conn: *Connection, slot: usize, host: []const u8) OpenError!void {
     defer conn.handshake_until = null;
     const session = &conn.sessions[slot];
     var report: cloak.tls.Session.Diagnostics = .{};
-    session.open(ctx.gpa, io, conn.readerBelow(slot), conn.writerBelow(slot), .{
+    session.open(ctx.gpa, io, conn.readerBelow(slot), conn.writerBelow(slot), read_buffer, write_buffer, .{
         .identity = tls.reference(host),
         .trust = if (trust) |snapshot| .{ .snapshot = snapshot } else .none,
         .auth = if (slot == 0) conn.route.proxy.?.proxy.tls.client_auth else ctx.tls.client_auth,
@@ -691,7 +691,7 @@ fn startTls(conn: *Connection, slot: usize, host: []const u8) OpenError!void {
         // not a truncation it cannot see.
         .eof = .allow,
         .diagnostics = &report,
-    }, read_buffer, write_buffer) catch |err| return conn.handshakeFailed(err, report);
+    }) catch |err| return conn.handshakeFailed(err, report);
     conn.session_buffers[slot] = .{ read_buffer, write_buffer };
     conn.session_on[slot] = true;
     if (ctx.observer) |o| o.emit(.{ .tls = .{ .host = host, .proxy = slot == 0, .took = started.?.durationTo(Io.Clock.awake.now(io)) } });
