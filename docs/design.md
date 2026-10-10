@@ -203,8 +203,8 @@ the lock, and say so where they are declared.
   short of it starts nothing, and a refusal starts the next attempt with the
   clock not having moved.
 - **Resolvers stack.** A `Resolver` is a context and a function; `Static`
-  answers chosen names (curl's `--resolve`) and passes the rest on, `Cache`
-  keeps answers for a minute and wraps another. A client keeps a cache by
+  answers chosen names, as a pinned address does, and passes the rest on;
+  `Cache` keeps answers for a minute and wraps another. A client keeps a cache by
   default.
 - **Sockets are tuned in one place** (`net.sys`): `TCP_NODELAY` on by default,
   keepalive when asked, `SO_NOSIGPIPE` where the system has it, because a
@@ -230,8 +230,8 @@ the lock, and say so where they are declared.
 - **A 401 is answered once per origin and the answer kept.** `Credentials`
   fills it; Basic, Digest or Bearer goes with every later request to that
   origin and no other. The store is told once whether the answer was taken (the
-  first response that is not a 401) or refused, which is what git's credential
-  helpers need to approve or reject it.
+  first response that is not a 401) or refused, which is what a credential
+  helper needs to approve or reject it.
 - **One interception point, not a middleware chain.** `Prepare` sees every
   attempt after redirects and before the write, so a signature is made again
   for each. `Observer` is told every step with its timing. Neither can change
@@ -264,8 +264,8 @@ the lock, and say so where they are declared.
 - **Key logs are explicit.** A writer in the options, never the environment.
   Tests, and users, are not subject to a stray variable.
 - **The environment is never read by uplink.** `Proxy.fromEnvironment` takes the
-  environment it is given. curl's rules and Go's differ in variables, default
-  port and what `no_proxy` can name, so the rules are a parameter.
+  environment it is given. Programs differ in variables, default port and what
+  `no_proxy` can name, so the rules are a parameter.
 
 ## Tests
 
@@ -289,7 +289,7 @@ point. The shape is in the README; what the design depends on is:
 ## Left out, and why
 
 - **HTTP/2, a server, WebSocket and a TLS engine of uplink's own** are not in
-  the package yet. The seams above (the pool's `Kind`, `Version`, the `Session`
+  the package. The seams above (the pool's `Kind`, `Version`, the `Session`
   layer) are where they join.
 - **HTTP/3** belongs to a QUIC package of its own: QUIC is a transport, as large
   as this package, with users that have no HTTP.

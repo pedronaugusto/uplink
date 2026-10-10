@@ -105,8 +105,8 @@ the raw connection after a 101 or a `CONNECT`.
 **Connections.** A connection is a socket and the layers a route needs on it:
 TLS to an `https` proxy, a `CONNECT` tunnel or a SOCKS negotiation, TLS to the
 server. A request to an `http` server through an HTTP proxy goes in absolute
-form instead, as curl sends it. The proxy is one, or the one the environment
-names per request, read once per scheme. Idle connections are kept per route,
+form instead. The proxy is one, or the one the environment names per
+request, read once per scheme. Idle connections are kept per route,
 two by default and sixty-four in all, the most recently used taken first; one
 idle ninety seconds is closed rather than used. `max_per_route` limits the connections open
 to a route; past it a request waits, first come first served, for one to come
@@ -137,11 +137,10 @@ are not bounded, and `Client.stats().timeouts_unenforced` counts what was not
 kept.
 
 **Names.** A name is looked up through a `Resolver`: the system's by default,
-or `Resolver.Static` for chosen names (curl's `--resolve`, git's
-`http.curloptResolve`), and a cache keeps answers for a minute. The system's
-lookup runs as a task of its own while the caller drains its answers, because
-std's lookup waits on itself when its queue fills and nothing else drains it;
-with no task to spare, a libc target calls `getaddrinfo` on the caller's task
+or `Resolver.Static` for chosen names, as a pinned address does, and a
+cache keeps answers for a minute. The system's lookup runs as a task of its own
+while the caller drains its answers, because std's lookup waits on itself
+when its queue fills and nothing else drains it; with no task to spare, a libc target calls `getaddrinfo` on the caller's task
 and other targets return `error.ConcurrencyUnavailable` for a name. A name's
 addresses are raced by Happy Eyeballs (RFC 8305): one at a time, the families
 alternating, each a quarter second after the last or at once when it failed.
@@ -176,9 +175,10 @@ certificates at the current real time.
 
 **Proxies.** `Proxy.parse` reads `host:port` or a URL with scheme `http`,
 `https`, `socks4`, `socks4a`, `socks5` or `socks5h`. `Proxy.fromEnvironment`
-picks a proxy for a URL from an environment the caller passes, by curl's rules
-or Go's, which differ in their variables, their default port and what
-`no_proxy` can name; uplink never reads the process environment itself.
+picks a proxy for a URL from an environment the caller passes, by the rules of
+the programs that read one, which differ in their variables, their default
+port and what `no_proxy` can name; uplink never reads the process
+environment itself.
 
 ## Scope
 
