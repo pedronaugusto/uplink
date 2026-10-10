@@ -35,8 +35,8 @@
             .lazy = true,
         },
         .cloak = .{
-            .url = "git+https://github.com/pedronaugusto/cloak#d20b2ff425d0ef333a71b0a3a9989cb0641007bd",
-            .hash = "cloak-0.1.0-9onwcYyZ8QJBmOJ4OKRAhgK3SDFv8bBKnplJ20-Qfpcg",
+            .url = "git+https://github.com/pedronaugusto/cloak#aae93ea1e92f7657a3c056156a7a564c7c6c7b86",
+            .hash = "cloak-0.1.0-9onwcRHZ8QKnz5Zn67jAMoNPr1wF3TjtDcRC6Knljpyt",
             .lazy = true,
         },
     },

@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- A client checks a server against the system's authorities on macOS and Windows: cloak verifies a snapshot of the system's policy with the system's own verifier, where it handed it, rootless, to the portable verifier, so no public server verified there. A host written with its trailing dot (`example.com.`) is opened; a CA file with comments before its certificates, as curl's bundle and the Fedora and RHEL bundles have, is read.
+
 ### Changed
 
 - Breaking: TLS is [cloak](https://github.com/pedronaugusto/cloak)'s. The copy of std's TLS client with client authentication, its recorded diff and check, `tls.Trust`, `tls.ClientAuth`, `tls.PrivateKey`, `tls.key` and `tls.Session` are gone; `tls.ClientOptions` takes a `cloak.Trust.Snapshot` for `trust` and a `cloak.ClientAuth` for `client_auth` (build them with cloak's `Trust.addPem`, `PrivateKey.parse` and `ClientAuth.initPem`), `Proxy.Tls` the same, and `Diagnostics.tls_alert` is a `cloak.tls.Alert`, the server's or the one the client sent for a failure of its own. `Diagnostics.tls_error` names what cloak reports (`PeerAlert`, `VerificationRejected`) instead of `TlsAlert...` and `Certificate...` errors.
