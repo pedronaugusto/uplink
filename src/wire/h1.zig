@@ -697,14 +697,7 @@ pub const LengthWriter = struct {
 };
 
 const testing = std.testing;
-
-/// `text` `n` times over, at compile time.
-fn repeat(comptime text: []const u8, comptime n: usize) *const [text.len * n]u8 {
-    var out: [text.len * n]u8 = undefined;
-    for (0..n) |i| @memcpy(out[i * text.len ..][0..text.len], text);
-    const final = out;
-    return &final;
-}
+const repeat = @import("shakedown").corpus.repeat;
 
 test "a response head is parsed in place, its fields indexed and its framing decided" {
     var bytes = "HTTP/1.1 200 OK\r\nContent-Length: 12\r\nContent-Encoding: gzip\r\nLocation: /x\r\n\r\nbody".*;
@@ -726,9 +719,9 @@ test "a head not yet whole is asked for more, and one past the limit is refused"
     var fields: [8]Field = undefined;
     var partial = "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n".*;
     try testing.expectEqual(null, try parseResponse(&partial, &fields, .{}));
-    var long = ("HTTP/1.1 200 OK\r\nX: " ++ comptime repeat("a", 100)).*;
+    var long = ("HTTP/1.1 200 OK\r\nX: " ++ repeat("a", 100)).*;
     try testing.expectError(error.HeadTooLarge, parseResponse(&long, &fields, .{ .max_head = 64 }));
-    var many = ("HTTP/1.1 200 OK\r\n" ++ comptime repeat("A: b\r\n", 9) ++ "\r\n").*;
+    var many = ("HTTP/1.1 200 OK\r\n" ++ repeat("A: b\r\n", 9) ++ "\r\n").*;
     try testing.expectError(error.TooManyFields, parseResponse(&many, &fields, .{}));
     try testing.expectError(error.TooManyFields, parseResponse(&many, &fields, .{ .max_fields = 3 }));
 }
