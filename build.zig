@@ -34,7 +34,7 @@ pub fn build(b: *std.Build) void {
     // one fetch gets all three.
     var shakedown: ?*std.Build.Module = null;
     if (own_tree) {
-        if (b.dependencyLazy("shakedown", .{ .target = target, .optimize = optimize }) catch null) |dep| shakedown = dep.module("shakedown");
+        if (shakedownFor(b, target, optimize, aegis) catch null) |dep| shakedown = dep.module("shakedown");
     }
 
     const modules = uplinkModules(b, target, optimize, aegis, with_client, reactor, cloak, true);
@@ -162,13 +162,21 @@ fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.l
     const cloak = b.dependency("cloak", .{ .target = target, .optimize = optimize }).module("cloak");
     const uplink = uplinkModules(b, target, optimize, aegis, true, reactor, cloak, false).root.?;
     // Select uplink's published measuring pin rather than preflight's default.
-    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
+    const shakedown = shakedownFor(b, target, optimize, aegis) catch @panic("missing test dependency for benchmarks");
     return b.allocator.dupe(std.Build.Module.Import, &.{
         .{ .name = "uplink", .module = uplink },
         .{ .name = "reactor", .module = reactor },
         .{ .name = "cloak", .module = cloak },
         .{ .name = "shakedown", .module = shakedown.module("shakedown") },
     }) catch @panic("OOM");
+}
+
+/// shakedown bound to uplink's aegis, so a build links one aegis.
+fn shakedownFor(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, aegis: *std.Build.Module) error{LazyDependencyNeeded}!*std.Build.Dependency {
+    const shakedown = try b.dependencyLazy("shakedown", .{ .target = target, .optimize = optimize, .aegis = .consumer });
+    const shakedown_build = b.lazyImport(@This(), "shakedown") orelse return error.LazyDependencyNeeded;
+    shakedown_build.useAegis(shakedown, aegis);
+    return shakedown;
 }
 
 /// What the build publishes: the codecs, and with a client, everything.

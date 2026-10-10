@@ -150,10 +150,13 @@ test "a form is read pair by pair and each piece decoded in place" {
 }
 
 test "fuzz: what is encoded decodes to itself" {
-    try testing.fuzz({}, struct {
-        fn one(_: void, smith: *testing.Smith) anyerror!void {
+    const shakedown = @import("shakedown");
+    const inputs = @import("../testing/inputs.zig");
+    const seeds = [_][]const u8{};
+    try shakedown.check(testing.allocator, {}, struct {
+        fn one(_: void, case: *shakedown.Case) anyerror!void {
             var raw: [64]u8 = undefined;
-            const text = raw[0..smith.slice(&raw)];
+            const text = inputs.draw(case, &raw, &seeds, 32);
             var buf: [256]u8 = undefined;
             var w: Io.Writer = .fixed(&buf);
             try encodeText(&w, text);

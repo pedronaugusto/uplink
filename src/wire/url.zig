@@ -365,13 +365,16 @@ test "a redirect keeps the request's fragment and encodes what a URL cannot hold
 }
 
 test "fuzz: any reference resolves to a URL or is refused, never past its buffer" {
-    try testing.fuzz({}, struct {
-        fn one(_: void, smith: *testing.Smith) anyerror!void {
+    const shakedown = @import("shakedown");
+    const inputs = @import("../testing/inputs.zig");
+    const seeds = [_][]const u8{ "../x", "//other/y?z", "g;x=1/../y" };
+    try shakedown.check(testing.allocator, {}, struct {
+        fn one(_: void, case: *shakedown.Case) anyerror!void {
             var raw: [96]u8 = undefined;
-            const reference = raw[0..smith.slice(&raw)];
+            const reference = inputs.draw(case, &raw, &seeds, 32);
             var buf: [512]u8 = undefined;
             const got = resolve("https://h.example/a/b?c#d", reference, &buf) catch return;
             try testing.expect(got.len <= buf.len);
         }
-    }.one, .{ .corpus = &.{ "../x", "//other/y?z", "g;x=1/../y" } });
+    }.one, .{});
 }
