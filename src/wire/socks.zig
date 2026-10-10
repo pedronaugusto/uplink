@@ -240,15 +240,18 @@ test "SOCKS authentication follows the selected method and bounds credential len
 }
 
 test "fuzz: a SOCKS reply is consumed exactly or refused by name" {
-    try testing.fuzz({}, struct {
-        fn run(_: void, smith: *testing.Smith) !void {
+    const shakedown = @import("shakedown");
+    const inputs = @import("../testing/inputs.zig");
+    const seeds = [_][]const u8{ &.{ 0, 90, 0, 0, 0, 0, 0, 0 }, &.{ 5, 0, 0, 1, 0, 0, 0, 0, 0, 0 }, &.{ 5, 0, 0, 3, 1, 'a', 0, 0 }, &.{ 5, 4, 0, 1 } };
+    try shakedown.check(testing.allocator, {}, struct {
+        fn run(_: void, case: *shakedown.Case) anyerror!void {
             var scratch: [1024]u8 = undefined;
-            const bytes = scratch[0..smith.slice(&scratch)];
+            const bytes = inputs.draw(case, &scratch, &seeds, 32);
             for ([_]Version{ .socks4, .socks5 }) |version| {
                 var r: Io.Reader = .fixed(bytes);
                 reply(&r, version, null) catch continue;
                 try testing.expect(r.seek <= bytes.len);
             }
         }
-    }.run, .{ .corpus = &.{ &.{ 0, 90, 0, 0, 0, 0, 0, 0 }, &.{ 5, 0, 0, 1, 0, 0, 0, 0, 0, 0 }, &.{ 5, 0, 0, 3, 1, 'a', 0, 0 }, &.{ 5, 4, 0, 1 } } });
+    }.run, .{});
 }

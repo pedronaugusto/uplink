@@ -79,16 +79,15 @@ test "the parser agrees with the reference on the heads the tests know" {
 }
 
 test "fuzz: the parser agrees with the reference on any bytes" {
-    try testing.fuzz({}, struct {
-        fn one(_: void, smith: *testing.Smith) anyerror!void {
+    const shakedown = @import("shakedown");
+    const inputs = @import("../testing/inputs.zig");
+    const seeds = [_][]const u8{ "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\n", "HTTP/1.1 200\nA: b\n c\n\n", "HTTP/1.0 301 Moved\r\nLocation: /x\r\nSet-Cookie: a=b\r\n\r\n" };
+    try shakedown.check(testing.allocator, {}, struct {
+        fn one(_: void, case: *shakedown.Case) anyerror!void {
             var buf: [512]u8 = undefined;
-            try agree(buf[0..smith.slice(&buf)]);
+            try agree(inputs.draw(case, &buf, &seeds, 32));
         }
-    }.one, .{ .corpus = &.{
-        "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\n",
-        "HTTP/1.1 200\nA: b\n c\n\n",
-        "HTTP/1.0 301 Moved\r\nLocation: /x\r\nSet-Cookie: a=b\r\n\r\n",
-    } });
+    }.one, .{});
 }
 
 test "the parser agrees with the reference on heads made from HTTP's own pieces" {
@@ -99,27 +98,28 @@ test "the parser agrees with the reference on heads made from HTTP's own pieces"
         "\r",              ":",            "A",              "Content-Length", "5", "\x00", "\x7f", "\xff",
         "x-y",             "a b",          "chunked",        ",",
     };
-    var prng: std.Random.DefaultPrng = .init(testing.random_seed);
-    const random = prng.random();
-    var buf: [256]u8 = undefined;
-    for (0..20_000) |_| {
-        var len: usize = 0;
-        if (random.boolean()) {
-            const start = "HTTP/1.1 200 OK\r\n";
-            @memcpy(buf[0..start.len], start);
-            len = start.len;
+    const shakedown = @import("shakedown");
+    try shakedown.check(testing.allocator, {}, struct {
+        fn one(_: void, case: *shakedown.Case) anyerror!void {
+            const s = case.source;
+            var buf: [256]u8 = undefined;
+            var len: usize = 0;
+            if (shakedown.gen.boolean(s)) {
+                const start = "HTTP/1.1 200 OK\r\n";
+                @memcpy(buf[0..start.len], start);
+                len = start.len;
+            }
+            while (s.more(12)) {
+                const piece = shakedown.gen.oneOf(s, []const u8, &pieces);
+                if (len + piece.len > buf.len) break;
+                @memcpy(buf[len..][0..piece.len], piece);
+                len += piece.len;
+            }
+            if (shakedown.gen.boolean(s) and len + 4 <= buf.len) {
+                @memcpy(buf[len..][0..4], "\r\n\r\n");
+                len += 4;
+            }
+            try agree(buf[0..len]);
         }
-        const count = random.uintLessThan(usize, 24);
-        for (0..count) |_| {
-            const piece = pieces[random.uintLessThan(usize, pieces.len)];
-            if (len + piece.len > buf.len) break;
-            @memcpy(buf[len..][0..piece.len], piece);
-            len += piece.len;
-        }
-        if (random.boolean() and len + 4 <= buf.len) {
-            @memcpy(buf[len..][0..4], "\r\n\r\n");
-            len += 4;
-        }
-        try agree(buf[0..len]);
-    }
+    }.one, .{ .cases = 2000 });
 }

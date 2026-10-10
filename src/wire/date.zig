@@ -202,14 +202,17 @@ test "a written date reads back as the same second, across the calendar" {
 }
 
 test "fuzz: any text is a date or is not, and never a crash" {
-    try testing.fuzz({}, struct {
-        fn one(_: void, smith: *testing.Smith) anyerror!void {
+    const shakedown = @import("shakedown");
+    const inputs = @import("../testing/inputs.zig");
+    const seeds = [_][]const u8{ "Sun, 06 Nov 1994 08:49:37 GMT", "Sunday, 06-Nov-94 08:49:37 GMT", "Sun Nov  6 08:49:37 1994" };
+    try shakedown.check(testing.allocator, {}, struct {
+        fn one(_: void, case: *shakedown.Case) anyerror!void {
             var buf: [48]u8 = undefined;
-            const text = buf[0..smith.slice(&buf)];
+            const text = inputs.draw(case, &buf, &seeds, 32);
             if (parse(text)) |s| {
                 var out: [formatted_len]u8 = undefined;
                 try testing.expectEqual(@as(?i64, s), parse(format(s, &out)));
             }
         }
-    }.one, .{ .corpus = &.{ "Sun, 06 Nov 1994 08:49:37 GMT", "Sunday, 06-Nov-94 08:49:37 GMT", "Sun Nov  6 08:49:37 1994" } });
+    }.one, .{});
 }

@@ -1020,10 +1020,13 @@ test "chunked and length writers frame what passes through them" {
 }
 
 test "fuzz: any response head is parsed or refused by name, and a parsed one holds no control character" {
-    try testing.fuzz({}, struct {
-        fn one(_: void, smith: *testing.Smith) anyerror!void {
+    const shakedown = @import("shakedown");
+    const inputs = @import("../testing/inputs.zig");
+    const seeds = [_][]const u8{ "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\n", "HTTP/1.1 200 OK\nA: b\n c\n\n", "HTTP/1.0 404 Nope\r\nTransfer-Encoding: gzip, chunked\r\n\r\n" };
+    try shakedown.check(testing.allocator, {}, struct {
+        fn one(_: void, case: *shakedown.Case) anyerror!void {
             var buf: [512]u8 = undefined;
-            const bytes = buf[0..smith.slice(&buf)];
+            const bytes = inputs.draw(case, &buf, &seeds, 32);
             var fields: [16]Field = undefined;
             const parsed = (parseResponse(bytes, &fields, .{ .max_head = 400, .max_fields = 16 }) catch return) orelse return;
             try testing.expect(parsed.len <= bytes.len);
@@ -1034,18 +1037,17 @@ test "fuzz: any response head is parsed or refused by name, and a parsed one hol
             }
             _ = responseFraming(.GET, &parsed.head) catch return;
         }
-    }.one, .{ .corpus = &.{
-        "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\n",
-        "HTTP/1.1 200 OK\nA: b\n c\n\n",
-        "HTTP/1.0 404 Nope\r\nTransfer-Encoding: gzip, chunked\r\n\r\n",
-    } });
+    }.one, .{});
 }
 
 test "fuzz: a chunked body fed in any pieces decodes as it does whole" {
-    try testing.fuzz({}, struct {
-        fn one(_: void, smith: *testing.Smith) anyerror!void {
+    const shakedown = @import("shakedown");
+    const inputs = @import("../testing/inputs.zig");
+    const seeds = [_][]const u8{ "3\r\nabc\r\n0\r\n\r\n", "1;x=y\r\na\r\n0\r\nT: v\r\n\r\n" };
+    try shakedown.check(testing.allocator, {}, struct {
+        fn one(_: void, case: *shakedown.Case) anyerror!void {
             var buf: [256]u8 = undefined;
-            const in = buf[0..smith.slice(&buf)];
+            const in = inputs.draw(case, &buf, &seeds, 32);
             var whole: std.ArrayList(u8) = .empty;
             defer whole.deinit(testing.allocator);
             var a: ChunkedDecoder = .{};
@@ -1060,5 +1062,5 @@ test "fuzz: a chunked body fed in any pieces decodes as it does whole" {
                 try testing.expectEqual(a.done(), b.done());
             } else |err| try testing.expectError(err, piece_result);
         }
-    }.one, .{ .corpus = &.{ "3\r\nabc\r\n0\r\n\r\n", "1;x=y\r\na\r\n0\r\nT: v\r\n\r\n" } });
+    }.one, .{});
 }

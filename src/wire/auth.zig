@@ -491,10 +491,13 @@ test "Digest state releases what it copied when allocation stops" {
 }
 
 test "fuzz: any challenge value is read or refused by name" {
-    try testing.fuzz({}, struct {
-        fn one(_: void, smith: *testing.Smith) anyerror!void {
+    const shakedown = @import("shakedown");
+    const inputs = @import("../testing/inputs.zig");
+    const seeds = [_][]const u8{ "Digest realm=\"r\", nonce=\"n\"", "Basic realm=\"p\"", "Negotiate abc==" };
+    try shakedown.check(testing.allocator, {}, struct {
+        fn one(_: void, case: *shakedown.Case) anyerror!void {
             var buf: [256]u8 = undefined;
-            const text = buf[0..smith.slice(&buf)];
+            const text = inputs.draw(case, &buf, &seeds, 32);
             var arena: std.heap.ArenaAllocator = .init(testing.allocator);
             defer arena.deinit();
             const list = parse(arena.allocator(), text) catch |err| switch (err) {
@@ -505,5 +508,5 @@ test "fuzz: any challenge value is read or refused by name" {
             var offered: Writer = .fixed(&offered_buf);
             _ = pick(list, .any, &offered);
         }
-    }.one, .{ .corpus = &.{ "Digest realm=\"r\", nonce=\"n\"", "Basic realm=\"p\"", "Negotiate abc==" } });
+    }.one, .{});
 }

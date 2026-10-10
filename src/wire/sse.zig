@@ -428,10 +428,13 @@ test "a written event reads back as itself" {
 }
 
 test "fuzz: any stream is read in pieces as it is read whole" {
-    try testing.fuzz({}, struct {
-        fn one(_: void, smith: *testing.Smith) anyerror!void {
+    const shakedown = @import("shakedown");
+    const inputs = @import("../testing/inputs.zig");
+    const seeds = [_][]const u8{ "data: a\n\n", "event: x\rdata\r\n\r\n" };
+    try shakedown.check(testing.allocator, {}, struct {
+        fn one(_: void, case: *shakedown.Case) anyerror!void {
             var buf: [256]u8 = undefined;
-            const stream = buf[0..smith.slice(&buf)];
+            const stream = inputs.draw(case, &buf, &seeds, 32);
             var whole: std.ArrayList(u8) = .empty;
             defer whole.deinit(testing.allocator);
             const a = collect(stream, stream.len + 1, &whole);
@@ -443,5 +446,5 @@ test "fuzz: any stream is read in pieces as it is read whole" {
                 try testing.expectEqualStrings(whole.items, pieces.items);
             } else |err| try testing.expectError(err, b);
         }
-    }.one, .{ .corpus = &.{ "data: a\n\n", "event: x\rdata\r\n\r\n" } });
+    }.one, .{});
 }

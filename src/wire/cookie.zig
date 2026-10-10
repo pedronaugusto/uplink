@@ -319,14 +319,17 @@ test "paths match on whole segments, and a default path is the request's directo
 }
 
 test "fuzz: any Set-Cookie value is read or ignored, and a read one keeps its limits" {
-    try testing.fuzz({}, struct {
-        fn one(_: void, smith: *testing.Smith) anyerror!void {
+    const shakedown = @import("shakedown");
+    const inputs = @import("../testing/inputs.zig");
+    const seeds = [_][]const u8{ "a=b; Path=/; Expires=Sun, 06 Nov 1994 08:49:37 GMT", "x; Max-Age=-1; Domain=.e.com" };
+    try shakedown.check(testing.allocator, {}, struct {
+        fn one(_: void, case: *shakedown.Case) anyerror!void {
             var buf: [256]u8 = undefined;
-            const text = buf[0..smith.slice(&buf)];
+            const text = inputs.draw(case, &buf, &seeds, 32);
             const c = parse(text) orelse return;
             try testing.expect(c.name.len + c.value.len <= max_name_value);
             if (c.path) |p| try testing.expect(p[0] == '/');
             _ = parseDate(text);
         }
-    }.one, .{ .corpus = &.{ "a=b; Path=/; Expires=Sun, 06 Nov 1994 08:49:37 GMT", "x; Max-Age=-1; Domain=.e.com" } });
+    }.one, .{});
 }
