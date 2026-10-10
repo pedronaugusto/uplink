@@ -30,8 +30,8 @@
             .lazy = true,
         },
         .reactor = .{
-            .url = "git+https://github.com/pedronaugusto/reactor#7e93a916f173def7a41e578e39525b83d30808ef",
-            .hash = "reactor-0.1.0-MjQ-WKaaEQBIUGdJBqtcy8yIRjcMqG5XmCx4bA2FW7OK",
+            .url = "git+https://github.com/pedronaugusto/reactor#1a351bb015e23a08ee8cc8a859e740c084a455bf",
+            .hash = "reactor-0.1.0-MjQ-WJK3EQCQmVlIkp18ZuYOIGVIEClQWVQeA2tb10e8",
             .lazy = true,
         },
         .cloak = .{
