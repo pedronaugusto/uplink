@@ -81,7 +81,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   connect timeout (`Kqueue`). The test suite runs twice, on `Io.Threaded` and
   on a reactor runtime, and the benchmarks run on a runtime unless asked for
   `--io threaded`.
-- Pins the newest aegis, shakedown and reactor.
+- Pins the newest aegis, preflight, shakedown and reactor.
 - Depends on aegis, the family's std-only safety library. Locks sit beside the
   data they guard (`BlockingGuarded`) in the pool, the buffer pool, the
   cookie jar, the answers kept per origin and for the proxy, the name cache,
