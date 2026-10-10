@@ -11,6 +11,7 @@
 //! bytes at a time, and a field value's characters are checked the same way.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const fields_mod = @import("fields.zig");
 const Method = @import("Method.zig");
@@ -352,8 +353,8 @@ pub fn parseLength(text: []const u8) ?u64 {
     var n: u64 = 0;
     for (text) |c| {
         if (c < '0' or c > '9') return null;
-        n = std.math.mul(u64, n, 10) catch return null;
-        n = std.math.add(u64, n, c - '0') catch return null;
+        n = (aegis.int.Checked(u64).init(n).mul(10) catch return null).raw();
+        n = (aegis.int.Checked(u64).init(n).add(c - '0') catch return null).raw();
     }
     return n;
 }

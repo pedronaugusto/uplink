@@ -10,6 +10,7 @@
 //! kept as written, quotes included.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const date = @import("date.zig");
 
 /// One `Set-Cookie` value, read. Every slice points into the text.
@@ -108,8 +109,8 @@ fn parseMaxAge(text: []const u8) ?i64 {
     var n: i64 = 0;
     for (digits) |d| {
         if (d < '0' or d > '9') return null;
-        n = std.math.mul(i64, n, 10) catch return std.math.maxInt(i32);
-        n = std.math.add(i64, n, d - '0') catch return std.math.maxInt(i32);
+        n = (aegis.int.Checked(i64).init(n).mul(10) catch return std.math.maxInt(i32)).raw();
+        n = (aegis.int.Checked(i64).init(n).add(d - '0') catch return std.math.maxInt(i32)).raw();
     }
     // No cookie lives past a few hundred years; this keeps sums in range.
     n = @min(n, std.math.maxInt(i32));
