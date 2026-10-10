@@ -68,9 +68,7 @@ test "a server is checked against the authorities given" {
     gpa.free(any);
 }
 
-test "a server that speaks only TLS 1.2 is refused, and the alert says why" {
-    // cloak speaks TLS 1.3; TLS 1.2 comes with its C4. Until then a server
-    // that does not also speak 1.3 is turned away by name.
+test "a server that speaks only TLS 1.2 is answered in TLS 1.2" {
     const gpa = testing.allocator;
     const io = test_io.io();
     const pki = try openssl.Pki.make(gpa, io);
@@ -79,10 +77,9 @@ test "a server that speaks only TLS 1.2 is refused, and the alert says why" {
     defer server.stop(io);
     var client: Client = .init(gpa, .{ .tls = .{ .verify = .none } });
     defer client.deinit(io);
-    var diagnostics: Diagnostics = .{};
-    try testing.expectError(error.TlsFailed, fetch(gpa, io, &client, server.port, &diagnostics));
-    try testing.expectEqual(Diagnostics.Stage.tls, diagnostics.stage);
-    try testing.expectEqual(cloak.tls.Alert.protocol_version, diagnostics.tls_alert.?);
+    const page = try fetch(gpa, io, &client, server.port, null);
+    defer gpa.free(page);
+    try testing.expect(std.mem.find(u8, page, "TLSv1.2") != null);
 }
 
 /// How `openssl s_server -www` says the client signed: the scheme's name
@@ -145,13 +142,6 @@ test "a server's demand for a client certificate is answered with ECDSA and Ed25
         defer auth.deinit();
         var client: Client = .init(gpa, .{ .tls = .{ .trust = trust, .client_auth = auth } });
         defer client.deinit(io);
-        if (std.mem.eql(u8, kind, "rsa")) {
-            // cloak parses an RSA key but signs only with ECDSA and Ed25519
-            // until RSA-PSS signing comes with TLS 1.2.
-            var diagnostics: Diagnostics = .{};
-            try testing.expectError(error.ClientCertificateSchemeUnsupported, fetch(gpa, io, &client, server.port, &diagnostics));
-            continue;
-        }
         const page = try fetch(gpa, io, &client, server.port, null);
         defer gpa.free(page);
         try testing.expect(SignedWith.of(kind).on(page));

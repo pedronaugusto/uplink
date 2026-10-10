@@ -187,13 +187,11 @@ put away idle gives its socket buffers back. A small exchange on a kept
 connection is one `writev`, one read and one look at the socket, and allocates
 nothing, cookies and a kept answer to a challenge included.
 
-**TLS** is [cloak](https://github.com/pedronaugusto/cloak)'s, TLS 1.3 only for now:
-a server that speaks TLS 1.2 and not 1.3 is turned away with a `protocol_version`
-alert, and TLS 1.2 comes with cloak's own next phase. A client answers a server's
-request for a certificate with ECDSA on P-256 and P-384 or Ed25519 keys, read by
-cloak from PKCS #8, SEC 1, encrypted PKCS #8 and OpenSSL's older encrypted PEM;
-an RSA client key is refused with `ClientCertificateSchemeUnsupported` until
-cloak signs with RSA. `tls.ClientOptions` takes a cloak `Trust.Snapshot` for the
+**TLS** is [cloak](https://github.com/pedronaugusto/cloak)'s: TLS 1.3, and TLS 1.2 with
+ECDHE, AEAD suites and the extended master secret for servers that speak nothing newer.
+A client answers a server's request for a certificate with ECDSA on P-256 and P-384,
+Ed25519 or RSA keys, read by cloak from PKCS #8, SEC 1, PKCS #1, encrypted PKCS #8
+and OpenSSL's older encrypted PEM. `tls.ClientOptions` takes a cloak `Trust.Snapshot` for the
 authorities, which clients may share; without one the client reads the system's
 once, at its first verifying handshake. Each handshake checks certificates at
 the current real time, and a handshake that fails says why in
@@ -210,8 +208,6 @@ environment itself.
 
 - HTTP/1.1 only, client only. No HTTP/2, server, WebSocket or TLS engine of
   uplink's own (TLS is cloak's); HTTP/3 belongs to a QUIC package of its own.
-- TLS 1.3 only and no RSA client keys, until cloak adds TLS 1.2 and RSA-PSS
-  signing.
 - No Brotli decoding: such a body is handed over as it came, with its
   `Content-Encoding`.
 - No NTLM, Negotiate, PAC files, OCSP or `.netrc`, and no HTTP cache.

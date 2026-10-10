@@ -16,9 +16,7 @@ pub const ClientOptions = struct {
     /// `none` checks neither a server's certificate nor its name.
     verify: Verify = .full,
     /// The certificate and key a server that asks for one is answered with,
-    /// which the caller keeps alive for as long as the client uses it. A key
-    /// cloak does not sign with yet (RSA) is refused when a handshake starts
-    /// with `ClientCertificateSchemeUnsupported`.
+    /// which the caller keeps alive for as long as the client uses it.
     client_auth: ?cloak.ClientAuth = null,
     /// Where every session's secrets are written in the NSS key log format,
     /// for a capture to be decrypted with. Never read from the environment.
