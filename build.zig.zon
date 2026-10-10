@@ -16,27 +16,27 @@
     },
     .dependencies = .{
         .aegis = .{
-            .url = "git+https://github.com/pedronaugusto/aegis#104b1c07ebc698ec86cb65ca0befa0a63c266e8a",
-            .hash = "aegis-0.0.0-rsxouifgBgBOnC8-wtmFrZSIUjR9aEYPYmZD1G-hASAz",
+            .url = "git+https://github.com/pedronaugusto/aegis#28e8df5b3fde1fca2d5b61f6ab110c4acac2f688",
+            .hash = "aegis-0.0.0-rsxougITBwB_VYWvOCMfzQ4ra79s9U5QTAiuKH6ZWOl5",
         },
         .preflight = .{
-            .url = "git+https://github.com/pedronaugusto/preflight#e3d81b9e477c1c690f1ce03506511935d16035c3",
-            .hash = "preflight-0.1.0-LX1Zwl2HCQB4-h0brJMmXe_1ZA3UoIT6vI9kJ3IE1grE",
+            .url = "git+https://github.com/pedronaugusto/preflight#cb348117bc08b298276d51a00dbbfe83e79570a7",
+            .hash = "preflight-0.1.0-LX1ZwtKECgCyqcfgCDqfVAt-b2a1rEXMuKMEXzv4a0up",
             .lazy = true,
         },
         .shakedown = .{
-            .url = "git+https://github.com/pedronaugusto/shakedown#caf380381a49ace7c13beba70dd512c4faf24ce7",
-            .hash = "shakedown-0.1.0-BR8U4yVfEgCS2Vw6zWMqw0wRjxct8g3tePy1UKNZ8Q89",
+            .url = "git+https://github.com/pedronaugusto/shakedown#9109af53a261bf10f047bdef7e6e04396d30a1cd",
+            .hash = "shakedown-0.1.0-BR8U4-C_FQAbsCcYY10dTaGMmi0oqCk3vTYx7iSYqYpU",
             .lazy = true,
         },
         .reactor = .{
-            .url = "git+https://github.com/pedronaugusto/reactor#1a351bb015e23a08ee8cc8a859e740c084a455bf",
-            .hash = "reactor-0.1.0-MjQ-WJK3EQCQmVlIkp18ZuYOIGVIEClQWVQeA2tb10e8",
+            .url = "git+https://github.com/pedronaugusto/reactor#6c7bdc53041f5be6fdd9abedb18ca82bf4e0a571",
+            .hash = "reactor-0.1.0-MjQ-WBcZEgAC9meGd696FQWIOuyVFa7HiGcGrkZepHkX",
             .lazy = true,
         },
         .cloak = .{
-            .url = "git+https://github.com/pedronaugusto/cloak#aae93ea1e92f7657a3c056156a7a564c7c6c7b86",
-            .hash = "cloak-0.1.0-9onwcRHZ8QKnz5Zn67jAMoNPr1wF3TjtDcRC6Knljpyt",
+            .url = "git+https://github.com/pedronaugusto/cloak#d624bba120f3200bfccfd30e141c0cd7e2100752",
+            .hash = "cloak-0.1.0-9onwcT3d8QLaVCrlrklO4F2AdBEG8dE1gqhMNG2opkSO",
             .lazy = true,
         },
     },

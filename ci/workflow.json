@@ -1,4 +1,6 @@
 {
+  "land": true,
+  "attest": true,
   "package": "uplink",
   "compile_step": "check",
   "targets": [
