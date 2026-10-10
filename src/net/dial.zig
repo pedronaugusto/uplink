@@ -328,6 +328,86 @@ test "a connection expires at its controlled connect deadline and cancels the at
     try testing.expect(Hang.canceled.load(.acquire));
 }
 
+/// Answers `silent.example` with two addresses, and either hangs every
+/// attempt until it is canceled or refuses the first.
+const Silent = struct {
+    var attempts: std.atomic.Value(u32) = .init(0);
+    var canceled: std.atomic.Value(u32) = .init(0);
+    var refuse_first = false;
+
+    fn lookup(_: ?*anyopaque, _: Io.net.HostName, results: *Io.Queue(Io.net.HostName.LookupResult), options: Io.net.HostName.LookupOptions) Io.net.HostName.LookupError!void {
+        const io = test_io.io();
+        defer results.close(io);
+        const answers: []const Io.net.HostName.LookupResult = &.{
+            .{ .address = .{ .ip6 = .loopback(options.port) } },
+            .{ .address = .{ .ip4 = .loopback(options.port) } },
+        };
+        results.putAll(io, answers) catch return error.Canceled;
+    }
+
+    fn connect(_: ?*anyopaque, _: *const IpAddress, _: IpAddress.ConnectOptions) IpAddress.ConnectError!Io.net.Socket {
+        const n = attempts.fetchAdd(1, .acq_rel);
+        if (refuse_first and n == 0) return error.ConnectionRefused;
+        var never: Io.Event = .unset;
+        never.wait(test_io.io()) catch |err| {
+            _ = canceled.fetchAdd(1, .acq_rel);
+            return err;
+        };
+        unreachable; // unreachable: nothing sets `never`
+    }
+
+    const L = shakedown.Layer(u8, .{ .netLookup = lookup, .netConnectIp = connect });
+
+    fn run(io: Io, out: *DialError!Dialed) void {
+        out.* = dial(io, "silent.example", 80, .{ .timeout = .fromMilliseconds(200), .attempt_delay = .fromMilliseconds(50) });
+    }
+};
+
+test "a name whose every address stays silent is TimedOut, and so is one whose first is refused" {
+    const io = test_io.io();
+    var clock: shakedown.Clock = .init(io, .{});
+    var layer: Silent.L = .init(clock.io(), 0);
+    const wait: Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(10), .clock = .awake } };
+    for ([_]bool{ false, true }) |refuse| {
+        Silent.attempts.store(0, .release);
+        Silent.canceled.store(0, .release);
+        Silent.refuse_first = refuse;
+        var result: DialError!Dialed = undefined;
+        var task = io.concurrent(Silent.run, .{ layer.io(), &result }) catch return error.SkipZigTest;
+        defer task.cancel(io);
+        // The first attempt's deadline and the delay before the second; a
+        // refusal starts the second at once, and then the second's deadline
+        // and the stale delay are what is armed.
+        try clock.awaitArmed(2, wait);
+        var left: Io.Duration = .fromMilliseconds(200);
+        if (!refuse) {
+            // The delay passes, and the second attempt starts beside the
+            // first, to end at the same deadline.
+            clock.advance(.fromMilliseconds(50));
+            left = .fromMilliseconds(150);
+            while (Silent.attempts.load(.acquire) < 2) try io.sleep(.fromMilliseconds(1), .awake);
+            try clock.awaitArmed(2, wait);
+        }
+        // Both deadlines are the one limit's end.
+        clock.advance(left);
+        task.await(io);
+        try testing.expectError(error.TimedOut, result);
+        try testing.expectEqual(@as(u32, 2), Silent.attempts.load(.acquire));
+        try testing.expectEqual(@as(u32, if (refuse) 1 else 2), Silent.canceled.load(.acquire));
+    }
+}
+
+test "a dial with a timeout is bounded, on a runtime by the kernel with no fallback path taken" {
+    const io = test_io.io();
+    var listener = try (try IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    const before = reactor.fallbacks();
+    const dialed = try dial(io, "127.0.0.1", listener.socket.address.getPort(), .{ .timeout = .fromSeconds(5) });
+    dialed.stream.close(io);
+    try testing.expect(dialed.timeout_enforced);
+    if (test_io.evented) try testing.expectEqual(before, reactor.fallbacks());
+}
+
 test "addresses are tried with the families alternating from the first's" {
     const v4 = [_]IpAddress{ .{ .ip4 = .loopback(1) }, .{ .ip4 = .loopback(2) }, .{ .ip4 = .loopback(3) } };
     const v6: IpAddress = .{ .ip6 = .loopback(9) };
