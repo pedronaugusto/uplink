@@ -7,8 +7,9 @@ const std = @import("std");
 const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const auth = @import("../wire/auth.zig");
-const fields = @import("../wire/fields.zig");
+const wire = @import("uplink.wire");
+const auth = wire.auth;
+const fields = wire.fields;
 const Proxy = @import("Proxy.zig");
 
 const ProxyAuth = @This();

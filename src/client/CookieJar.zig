@@ -20,9 +20,10 @@ const std = @import("std");
 const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const cookie = @import("../wire/cookie.zig");
-const fields = @import("../wire/fields.zig");
-const url_mod = @import("../wire/url.zig");
+const wire = @import("uplink.wire");
+const cookie = wire.cookie;
+const fields = wire.fields;
+const url_mod = wire.url;
 
 const CookieJar = @This();
 

@@ -14,7 +14,8 @@
 
 const std = @import("std");
 const Io = std.Io;
-const h1 = @import("../wire/h1.zig");
+const wire = @import("uplink.wire");
+const h1 = wire.h1;
 const Connection = @import("../transport/Connection.zig");
 const Response = @import("Response.zig");
 const Run = @import("Run.zig");

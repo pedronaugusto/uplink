@@ -6,7 +6,8 @@
 
 const std = @import("std");
 const Io = std.Io;
-const auth = @import("../wire/auth.zig");
+const wire = @import("uplink.wire");
+const auth = wire.auth;
 
 const Credentials = @This();
 

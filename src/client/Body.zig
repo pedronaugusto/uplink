@@ -7,8 +7,9 @@
 
 const std = @import("std");
 const Io = std.Io;
-const h1 = @import("../wire/h1.zig");
-const Field = @import("../wire/fields.zig").Field;
+const wire = @import("uplink.wire");
+const h1 = wire.h1;
+const Field = wire.fields.Field;
 const BufferPool = @import("../transport/BufferPool.zig");
 
 const Body = @This();

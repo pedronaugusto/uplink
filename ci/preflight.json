@@ -3,7 +3,8 @@
     "src"
   ],
   "test_roots": [
-    "src/tests.zig"
+    "src/tests.zig",
+    "src/wire_test.zig"
   ],
   "test_support": [
     "src/testing/**"
@@ -33,6 +34,11 @@
       "zig",
       "build",
       "check-consumer"
+    ],
+    [
+      "zig",
+      "build",
+      "check-wire-consumer"
     ]
   ],
   "unreachable_exceptions": "ci/unreachable-exceptions.json",

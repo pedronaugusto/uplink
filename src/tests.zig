@@ -2,7 +2,6 @@
 //! from outside.
 test {
     _ = @import("uplink.zig");
-    _ = @import("wire.zig");
     _ = @import("tls.zig");
     _ = @import("net.zig");
     _ = @import("transport.zig");
@@ -14,5 +13,4 @@ test {
     _ = @import("client/policy_test.zig");
     _ = @import("client/tls_test.zig");
     _ = @import("transport/verify_test.zig");
-    _ = @import("wire/differential_test.zig");
 }

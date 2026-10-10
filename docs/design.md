@@ -29,9 +29,40 @@ ordered list of finer layers, and gantry's lint fails a source that imports
 upward or has no place. A second rule bans the spelling of `io.async` and
 `Group.async` from `src/` (see "What always holds").
 
-`wire` is public. A program that wants HTTP's syntax without a client, or a
-stack of its own, takes the codecs; none of them takes an `Io`, opens a socket
-or allocates per message.
+`wire` is public, and it is a module of its own, `uplink.wire`. A program that
+wants HTTP's syntax without a client, or a stack of its own, takes the codecs;
+none of them takes an `Io`, opens a socket or allocates per message.
+
+## Modules
+
+Two modules are published. `uplink.wire` is `src/wire.zig` and what it
+reaches, on `std` and aegis. `uplink` is everything else on top of it, and
+re-exports it as `wire`. The client imports the codecs through the module, never
+by path, so a type is one declaration whichever name a program reaches it by,
+and the compiler holds `wire` to its two imports.
+
+Why a module and not only the layer: Zig analyses what is used, so a program
+that imports `uplink` and calls the codecs compiles none of the client. What
+it does not avoid is fetching: a build that reaches `uplink` fetches reactor
+with it. A separate module buys something only where a part's dependencies
+should not be fetched by those who do not use it, and the codecs are such a part:
+a server or a proxy parsing HTTP/1.1 has no use for the client's runtime or its
+TLS. `tls`, `net`, `transport`, `pool` and `client` are not modules: they share
+reactor, and no user wants one without the rest.
+
+The build has one option, `client`, true unless a project says otherwise.
+reactor is a lazy dependency, requested only when it is true, so the common
+user, who builds the client, writes nothing and gets the whole package, and
+a wire-only user writes `.client = false` and fetches aegis and nothing more. With
+it false the `uplink` module is not defined: it cannot be built without the
+runtime. The default is the client's because that is the package's purpose; a program
+that wants less says so.
+`zig build check-consumer` builds a project of each kind from the package's
+directory with fetching off and only the packages that kind needs in the package
+directory; `check-wire-consumer` is the wire-only one, with aegis alone, so a
+build script or module that reached for reactor, shakedown or preflight fails
+there. `wire`'s own tests run as the root of their own build (`src/wire_test.zig`),
+because a module's tests run only from the build that has it as root.
 
 ## One owner per state
 
@@ -290,7 +321,8 @@ point. The shape is in the README; what the design depends on is:
 - **Concurrency is varied.** Every timeout runs with a task to spare and
   without. The whole suite runs twice, on `Io.Threaded` and on a reactor
   runtime with worker threads of its own, so what is proved of the client is
-  proved of both.
+  proved of both. The codecs, which take no `Io`, run once, as the root of
+  their own build.
 - **Peers are real where they are the proof**: `openssl s_server` for TLS 1.3
   and 1.2 and every key kind and format, with certificates made per run in a
   scratch `HOME`; a proxy and a server of the test tree for the rest.

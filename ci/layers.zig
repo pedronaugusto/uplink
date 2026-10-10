@@ -117,7 +117,9 @@ pub const layers: []const gantry.rules.Layer = &.{
 
 pub const entries: []const []const u8 = &.{};
 
-pub const modules: []const gantry.NamedModule = &.{};
+pub const modules: []const gantry.NamedModule = &.{
+    .{ .name = "uplink.wire", .path = "src/wire.zig", .from = "src/**" },
+};
 
 pub const references: []const gantry.rules.ReferenceRule = &.{
     .{ .name = "named dependencies", .unresolved_only = true, .except_targets = &.{

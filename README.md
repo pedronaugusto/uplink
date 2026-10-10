@@ -20,7 +20,22 @@ Requires Zig 0.17.0. Fetch with `zig fetch --save
 git+https://github.com/pedronaugusto/uplink` and add the `uplink` module to
 your module's imports. It depends on `std`,
 [aegis](https://github.com/pedronaugusto/aegis) and
-[reactor](https://github.com/pedronaugusto/reactor).
+[reactor](https://github.com/pedronaugusto/reactor), which is fetched only when the
+client is built.
+
+The codecs are a module of their own. A program that reads and writes HTTP
+messages and has no use for the client, a server, a proxy or a test tool, asks
+for less in its `build.zig`:
+
+```zig
+const uplink = b.dependency("uplink", .{ .target = target, .optimize = optimize, .client = false });
+const wire = uplink.module("uplink.wire");
+```
+
+and imports `uplink.wire`. It depends on `std` and aegis alone: no reactor is
+fetched, nothing of the client is built, and there is no `uplink` module to ask for. Without `.client = false` both
+modules are there, and `uplink` exposes the codecs too, as `uplink.wire`; the
+two are the same declarations, not copies.
 
 ## Usage
 
@@ -219,7 +234,8 @@ reactor's runtime both are kept on every system.
 - [Zig](https://ziglang.org) 0.17.0 and its standard library; nothing else is
   linked into the module.
 - [reactor](https://github.com/pedronaugusto/reactor) is the evented `std.Io`,
-  and owns the sockets' deadlines, name lookup and connecting.
+  and owns the sockets' deadlines, name lookup and connecting. It is a lazy
+  dependency, fetched only for the client.
 - [preflight](https://github.com/pedronaugusto/preflight) runs the source checks,
   the tests and CI.
 - [shakedown](https://github.com/pedronaugusto/shakedown) is the layered `Io`,
@@ -228,8 +244,8 @@ reactor's runtime both are kept on every system.
 ## Testing
 
 `zig build test` runs the unit suite and the example. The suite runs twice,
-on `Io.Threaded` and on a reactor runtime. The codecs are tested
-rule by rule and fuzzed: the response parser is held to a reference written
+on `Io.Threaded` and on a reactor runtime; the codecs, which take no `Io`, run
+once. They are tested rule by rule and fuzzed: the response parser is held to a reference written
 from RFC 9112's grammar on fixed and random heads, references are resolved as
 RFC 3986's examples resolve, dates read back as they are written, and events
 and chunked bodies decode the same in any pieces. The client runs against a

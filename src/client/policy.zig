@@ -4,9 +4,9 @@
 
 const std = @import("std");
 const Io = std.Io;
-const date = @import("../wire/date.zig");
-const url_mod = @import("../wire/url.zig");
-const Method = @import("../wire/Method.zig");
+const wire = @import("uplink.wire");
+const date = wire.date;
+const url_mod = wire.url;
 
 /// Which redirects are followed.
 pub const Redirects = union(enum) {
@@ -46,11 +46,11 @@ pub fn mayFollow(follow: Redirects.Follow, from: url_mod.Url, to: url_mod.Url, h
 /// and whether the body goes with it. 301 and 302 turn a POST into a GET
 /// without a body, as every client does; 303 turns anything but HEAD into
 /// a GET; 307 and 308 keep the method and the body.
-pub const Hop = struct { method: Method, keep_body: bool };
+pub const Hop = struct { method: wire.Method, keep_body: bool };
 
 /// How a redirect of `status` changes a request of `method`, or null when
 /// the status is not a redirect that is followed.
-pub fn hop(status: u10, method: Method) ?Hop {
+pub fn hop(status: u10, method: wire.Method) ?Hop {
     return switch (status) {
         301, 302 => if (method.eql(.POST)) .{ .method = .GET, .keep_body = false } else .{ .method = method, .keep_body = true },
         303 => if (method.eql(.HEAD)) .{ .method = .HEAD, .keep_body = false } else .{ .method = .GET, .keep_body = false },

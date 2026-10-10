@@ -14,11 +14,12 @@
 
 const std = @import("std");
 const Io = std.Io;
-const h1 = @import("../wire/h1.zig");
-const fields = @import("../wire/fields.zig");
-const url_mod = @import("../wire/url.zig");
-const auth = @import("../wire/auth.zig");
-const Method = @import("../wire/Method.zig");
+const wire = @import("uplink.wire");
+const h1 = wire.h1;
+const fields = wire.fields;
+const url_mod = wire.url;
+const auth = wire.auth;
+const Method = wire.Method;
 const Connection = @import("../transport/Connection.zig");
 const Context = @import("../transport/Context.zig");
 const Diagnostics = @import("../transport/Diagnostics.zig");

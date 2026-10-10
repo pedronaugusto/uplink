@@ -44,7 +44,7 @@ pub const tls = @import("tls.zig");
 /// Name lookup and connections.
 pub const net = @import("net.zig");
 /// The codecs, sans I/O.
-pub const wire = @import("wire.zig");
+pub const wire = @import("uplink.wire");
 /// A request method: any token.
 pub const Method = wire.Method;
 /// A response status.

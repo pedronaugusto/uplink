@@ -12,8 +12,9 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const IpAddress = Io.net.IpAddress;
-const auth = @import("../wire/auth.zig");
-const url_mod = @import("../wire/url.zig");
+const wire = @import("uplink.wire");
+const auth = wire.auth;
+const url_mod = wire.url;
 const tls_mod = @import("../tls.zig");
 
 const Proxy = @This();

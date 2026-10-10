@@ -7,8 +7,9 @@
 
 const std = @import("std");
 const Io = std.Io;
-const h1 = @import("../wire/h1.zig");
-const Method = @import("../wire/Method.zig");
+const wire = @import("uplink.wire");
+const h1 = wire.h1;
+const Method = wire.Method;
 
 const Prepare = @This();
 

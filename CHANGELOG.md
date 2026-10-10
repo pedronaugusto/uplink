@@ -32,6 +32,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   std by its recorded diff; `Trust`, shareable authorities; `PrivateKey` and
   `ClientAuth`; a key log through a writer.
 - `net`: connections raced over a name's addresses within one deadline.
+- `uplink.wire`: the codecs as a module of their own, on `std` and aegis alone,
+  for a server, a proxy or a test tool that reads and writes HTTP messages and
+  has no use for a client. `.client = false` on the dependency leaves it the
+  only module and fetches no reactor; the default, `.client = true`, builds the
+  `uplink` module, which still exposes everything, `uplink.wire` as `wire`. A check builds such a
+  project with reactor absent.
 - `wire`: HTTP/1.1 heads parsed in place, strict on requests and lenient on
   responses; framing by RFC 9112 §6.3; a chunked decoder and writers; header
   fields and lists; content codings; authentication challenges; SOCKS; URLs.
@@ -71,6 +77,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- reactor is a lazy dependency, fetched only for the client: a project that
+  sets `.client = false` does not fetch it.
 - Depends on [reactor](https://github.com/pedronaugusto/reactor), the family's
   evented `std.Io`, which now owns what uplink kept for itself: the task that
   keeps socket deadlines (`net.Deadlines`), name lookup (`net.resolve`) and

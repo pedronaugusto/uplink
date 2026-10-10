@@ -16,15 +16,16 @@ const Credentials = @import("Credentials.zig");
 const Prepare = @import("Prepare.zig");
 const Request = @import("Request.zig");
 const policy = @import("policy.zig");
-const Method = @import("../wire/Method.zig");
+const wire = @import("uplink.wire");
+const Method = wire.Method;
 const Server = @import("../testing/Server.zig");
 const TestProxy = @import("../testing/Proxy.zig");
 const Diagnostics = @import("../transport/Diagnostics.zig");
 const Observer = @import("../transport/Observer.zig");
 const Proxy = @import("../transport/Proxy.zig");
 const Resolver = @import("../net/Resolver.zig");
-const sse = @import("../wire/sse.zig");
-const url_mod = @import("../wire/url.zig");
+const sse = wire.sse;
+const url_mod = wire.url;
 
 /// A buffer an answer is printed into, one per server task.
 threadlocal var answer_buf: [8 << 10]u8 = undefined;

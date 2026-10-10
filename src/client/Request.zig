@@ -4,7 +4,8 @@
 
 const std = @import("std");
 const Io = std.Io;
-const Method = @import("../wire/Method.zig");
+const wire = @import("uplink.wire");
+const Method = wire.Method;
 const Diagnostics = @import("../transport/Diagnostics.zig");
 const policy = @import("policy.zig");
 

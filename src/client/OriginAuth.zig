@@ -14,8 +14,9 @@ const std = @import("std");
 const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const auth = @import("../wire/auth.zig");
-const url_mod = @import("../wire/url.zig");
+const wire = @import("uplink.wire");
+const auth = wire.auth;
+const url_mod = wire.url;
 const Credentials = @import("Credentials.zig");
 
 const OriginAuth = @This();
