@@ -1,16 +1,16 @@
 //! How a host name becomes addresses: the system's lookup by default, or a
-//! caller's own. `Static` answers chosen names with chosen addresses, as
-//! curl's `--resolve` does, and passes the rest on; `Cache` keeps answers
-//! for a while. Each wraps another resolver, so they stack.
+//! caller's own. `Static` answers chosen names with chosen addresses and
+//! passes the rest on; `Cache` keeps answers for a while. Each wraps another
+//! resolver, so they stack.
 //!
 //! An address literal never reaches a resolver: `lookup` answers it itself.
 
 const std = @import("std");
 const aegis = @import("aegis");
+const reactor = @import("reactor");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const IpAddress = Io.net.IpAddress;
-const resolve = @import("resolve.zig");
 
 const Resolver = @This();
 
@@ -19,13 +19,13 @@ context: ?*anyopaque,
 /// `family` when one is given.
 lookupFn: *const fn (io: Io, context: ?*anyopaque, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress) LookupError![]IpAddress,
 
-pub const LookupError = resolve.LookupError;
+pub const LookupError = reactor.net.ResolveError;
 
 /// `host`'s addresses on `port`: the address itself when `host` is one,
 /// else the resolver's answer.
 pub fn lookup(r: Resolver, io: Io, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress) LookupError![]IpAddress {
     std.debug.assert(out.len != 0);
-    if (resolve.literal(host, port)) |address| {
+    if (reactor.net.literal(host, port)) |address| {
         if (family) |f| if (address != f) return error.NameNotResolved;
         out[0] = address;
         return out[0..1];
@@ -49,7 +49,7 @@ pub const LookupWithinError = error{
 pub fn lookupWithin(r: Resolver, io: Io, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress, timeout: ?Io.Duration, bounded: *bool) LookupWithinError![]IpAddress {
     bounded.* = true;
     const limit = timeout orelse return r.lookupMapped(io, host, port, family, out);
-    if (resolve.literal(host, port) != null) return r.lookupMapped(io, host, port, family, out);
+    if (reactor.net.literal(host, port) != null) return r.lookupMapped(io, host, port, family, out);
     const Race = union(enum) {
         found: LookupError![]IpAddress,
         expired: Io.Cancelable!void,
@@ -79,12 +79,12 @@ fn lookupMapped(r: Resolver, io: Io, host: []const u8, port: u16, family: ?IpAdd
     return r.lookup(io, host, port, family, out);
 }
 
-/// The system's lookup, with no task waiting on `io.async` work (see
-/// `resolve`).
+/// The system's lookup, by reactor's `net.resolve`: bounded, and waiting on
+/// no work started with `io.async`.
 pub const system: Resolver = .{ .context = null, .lookupFn = systemLookup };
 
 fn systemLookup(io: Io, _: ?*anyopaque, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress) LookupError![]IpAddress {
-    return resolve.lookup(io, host, port, family, out);
+    return reactor.net.resolve(io, host, port, .{ .family = family }, out);
 }
 
 /// Chosen names answered with chosen addresses; any other passed on.
@@ -129,9 +129,9 @@ pub const Static = struct {
     /// Why an entry cannot be read.
     pub const ParseError = error{ InvalidEntry, OutOfMemory };
 
-    /// An entry in curl's `--resolve` form, `host:port:address[,address]`,
-    /// IPv6 addresses bracketed or not, `*` for any port; the addresses
-    /// belong to `arena`. git's `http.curloptResolve` is this form.
+    /// An entry in the form `host:port:address[,address]`, IPv6 addresses
+    /// bracketed or not, `*` for any port, a leading `+` allowed; the
+    /// addresses belong to `arena`.
     pub fn parseEntry(arena: Allocator, text: []const u8) ParseError!Entry {
         const t = if (text.len != 0 and text[0] == '+') text[1..] else text;
         const host_end = std.mem.findScalar(u8, t, ':') orelse return error.InvalidEntry;
@@ -145,7 +145,7 @@ pub const Static = struct {
         while (it.next()) |raw| {
             const a = std.mem.trim(u8, raw, " ");
             if (a.len == 0) continue;
-            const address = resolve.literal(a, 0) orelse return error.InvalidEntry;
+            const address = reactor.net.literal(a, 0) orelse return error.InvalidEntry;
             try list.append(arena, address);
         }
         if (list.items.len == 0) return error.InvalidEntry;
@@ -165,7 +165,7 @@ pub const Cache = struct {
     entries: aegis.BlockingGuarded(std.StringHashMapUnmanaged(Entry)),
 
     pub const Options = struct {
-        /// How long an answer is kept: curl's default.
+        /// How long an answer is kept.
         ttl: Io.Duration = .fromSeconds(60),
         /// The most names kept; past it, expired answers go, then the one
         /// closest to expiring.
@@ -292,6 +292,7 @@ pub const Cache = struct {
 };
 
 const testing = std.testing;
+const test_io = @import("../testing/io.zig");
 const shakedown = @import("shakedown");
 
 /// A resolver that answers every name with 10.0.0.1 and ::2, counting.
@@ -320,7 +321,7 @@ const Counting = struct {
 };
 
 test "static entries answer their names on their ports, and pass the rest on" {
-    const io = testing.io;
+    const io = test_io.io();
     var counting: Counting = .{};
     const entries = [_]Static.Entry{
         .{ .host = "git.example", .port = 443, .addresses = &.{.{ .ip4 = .loopback(0) }} },
@@ -341,7 +342,7 @@ test "static entries answer their names on their ports, and pass the rest on" {
     try testing.expectEqual(@as(u16, 9), (try r.lookup(io, "[::1]", 9, null, &out))[0].getPort());
 }
 
-test "curl's --resolve entries are read, with bracketed IPv6 and any port" {
+test "entries in host:port:address form are read, with bracketed IPv6 and any port" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const e = try Static.parseEntry(arena.allocator(), "+example.com:443:127.0.0.1,[::1]");
@@ -369,7 +370,7 @@ fn kept(c: *Cache, io: Io, name: []const u8) bool {
 }
 
 test "a cached answer is kept for its time, for either family and any port" {
-    var clock: shakedown.Clock = .init(testing.io, .{});
+    var clock: shakedown.Clock = .init(test_io.io(), .{});
     const io = clock.io();
     var counting: Counting = .{};
     var cache: Cache = .init(testing.allocator, counting.resolver(), .{ .ttl = .fromSeconds(60), .max_entries = 2 });
@@ -398,12 +399,12 @@ test "a cached answer is kept for its time, for either family and any port" {
 }
 
 test "a cache that cannot allocate still answers" {
-    const io = testing.io;
+    const io = test_io.io();
     var counting: Counting = .{};
     var cache: Cache = .init(testing.failing_allocator, counting.resolver(), .{});
     defer cache.deinit(io);
     var out: [4]IpAddress = undefined;
-    try testing.expectEqual(@as(usize, 2), (try cache.resolver().lookup(testing.io, "a.example", 80, null, &out)).len);
-    try testing.expectEqual(@as(usize, 2), (try cache.resolver().lookup(testing.io, "a.example", 80, null, &out)).len);
+    try testing.expectEqual(@as(usize, 2), (try cache.resolver().lookup(test_io.io(), "a.example", 80, null, &out)).len);
+    try testing.expectEqual(@as(usize, 2), (try cache.resolver().lookup(test_io.io(), "a.example", 80, null, &out)).len);
     try testing.expectEqual(@as(u32, 2), counting.calls);
 }

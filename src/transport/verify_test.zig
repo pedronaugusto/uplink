@@ -1,7 +1,7 @@
 //! What Zig 0.17's `Io.Threaded` does with a timed socket operation, which
 //! the connection's deadlines are built on (uplink's verification V1). If a
 //! Zig release changes the answer, this test says so, and the design of
-//! `Timer` and `Connection.perform` is revisited.
+//! reactor's `net.Deadlines` and `Connection.perform` is revisited.
 
 const std = @import("std");
 const builtin = @import("builtin");

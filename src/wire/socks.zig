@@ -1,6 +1,5 @@
 //! SOCKS CONNECT framing (SOCKS4, SOCKS4a, SOCKS5 of RFC 1928 with the
-//! user and password of RFC 1929), negotiated as curl's lib/socks.c
-//! negotiates it. Reads consume exactly one reply; bytes of the tunneled
+//! user and password of RFC 1929). Reads consume exactly one reply; bytes of the tunneled
 //! protocol stay put.
 
 const std = @import("std");
@@ -106,7 +105,7 @@ pub fn reply(r: *Io.Reader, version: Version, status: ?*u16) ReplyError!void {
 }
 
 /// Authenticate SOCKS5, offering no-auth and, when supplied, RFC 1929.
-/// Curl ignores the RFC 1929 reply version; the status alone decides it.
+/// The RFC 1929 reply version is ignored; the status alone decides it.
 pub fn authenticate(r: *Io.Reader, w: *Io.Writer, credential: ?Credential) AuthenticateError!void {
     try w.writeAll(if (credential != null) &.{ 5, 2, 0, 2 } else &.{ 5, 1, 0 });
     try w.flush();

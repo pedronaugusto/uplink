@@ -5,9 +5,9 @@
 //! are seconds since the Unix epoch, in UTC.
 //!
 //! A recipient may read leniently (RFC 9110 §5.6.7): the zone may be
-//! written `UTC` as well as `GMT`, as Go reads it, the weekday is checked to
-//! be one but not checked against the date, and an RFC 850 two-digit year
-//! is taken as 19xx from 70 up and 20xx below, as curl takes it.
+//! written `UTC` as well as `GMT`, the weekday is checked to be one but not
+//! checked against the date, and an RFC 850 two-digit year is taken as
+//! 19xx from 70 up and 20xx below.
 
 const std = @import("std");
 

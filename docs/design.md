@@ -20,8 +20,10 @@ to use it.
 ```
 
 Each layer imports only the ones below it. `wire` imports `std` and aegis;
-`tls` imports `std` alone, and a test reads its sources to hold it to that.
-`net` and `tls` are siblings: neither knows the other. The rule is not a
+`tls` imports `std` alone, and a test reads its sources to hold it to that;
+`net` and `transport` import reactor, the evented `std.Io`, for the sockets'
+deadlines, name lookup and connecting. `net` and `tls` are siblings: neither
+knows the other. The rule is not a
 convention: `ci/layers.zig` gives every production source one place in an
 ordered list of finer layers, and gantry's lint fails a source that imports
 upward or has no place. A second rule bans the spelling of `io.async` and
@@ -38,7 +40,7 @@ or allocates per message.
 | A socket, its layers, its buffers while busy | `transport.Connection`, held by an exchange while busy and by the pool while idle |
 | Which connection serves which request; idle sets; per-route counts and waiters | `pool.Pool`, and nothing else |
 | The I/O buffers connections and exchanges borrow | `transport.BufferPool` |
-| Read and write deadlines | `transport.Timer`: connections store a deadline, the timer enforces it |
+| Read and write deadlines | reactor's `net.Deadlines`, held by `transport.Context`: a connection hands it each operation's nearest deadline |
 | The proxies, and their answers to challenges | `transport.Context` (the proxies), `transport.ProxyAuth` (one answer per proxy, shared by its connections) |
 | Answers to servers' 401s | `client.OriginAuth`: per origin, counted by the requests using them, told to `Credentials` once |
 | Trusted authorities | `tls.Trust`, shareable between clients, locked inside |
@@ -61,8 +63,8 @@ the lock, and say so where they are declared.
   longer promises `io.async` runs beside its caller, so a wait on it can be a
   wait on nothing. Work another task waits on is started with `io.concurrent`
   or done inline.
-- **No task per connection.** Deadlines, idle expiry and waiting use one timer
-  task per client at most, and park when nothing is armed.
+- **No task per connection.** Deadlines, idle expiry and waiting use at most one
+  task per client, and none on a reactor runtime, where the kernel keeps them.
 - **A warm exchange allocates nothing.** On a kept HTTP/1.1 connection,
   cookies and a kept answer to a challenge included, a small exchange takes
   buffers from the client's pool, writes with one `writev`, reads once and
@@ -138,10 +140,9 @@ the lock, and say so where they are declared.
   body reader share one buffer, and a decoder with its window another. The
   pool keeps a bounded number of each size, threaded through the free buffers
   themselves.
-- **`Pool.Kind` is a union** that has an arm for HTTP/1.1 only. Another
-  protocol joins as an arm of its own, and the pool's rules (routes, limits,
-  waiters) stay as they are. `wire.Version` carries `h2` and `h3` so a
-  `switch` written now stays exhaustive.
+- **`Pool.Kind` is a union** with one arm, HTTP/1.1; the pool's rules (routes,
+  limits, waiters) do not depend on the protocol. `wire.Version` names `h2` and
+  `h3` so that a `switch` over it is exhaustive.
 - **Layers on a connection are what the route needs, in order**: TLS to an
   `https` proxy, a `CONNECT` tunnel or a SOCKS negotiation, TLS to the server.
   A request to an `http` server through an HTTP proxy goes in absolute form
@@ -155,23 +156,27 @@ the lock, and say so where they are declared.
   nothing, `low_speed` a connection that moves too little over a window, and a
   request's own `timeout` everything from waiting for a connection to the last
   read of its body, retries and redirects included. The nearest deadline of an
-  operation is an atomic store on its connection; `transport.Timer` shuts the
-  socket of one that is past it. The task ticks at a tenth of the shortest
-  timeout while anything is armed and parks otherwise, so an idle client costs
-  no wakeups and an operation with no deadline reads no clock.
-- **Why a timer at all.** Zig 0.17's `Io.Threaded` cannot bound a socket
+  operation goes to reactor's `Deadlines` with the operation. On a reactor
+  runtime it is the kernel's: the operation ends at its deadline and no task
+  watches. On any other `Io` it is an atomic store on the connection, and one
+  task per client shuts the socket of one that is past it; the task ticks at a
+  tenth of the shortest timeout while anything is armed and parks otherwise, so
+  an idle client costs no wakeups. Either way an operation with no deadline
+  reads no clock.
+- **Why a task on other `Io`s.** Zig 0.17's `Io.Threaded` cannot bound a socket
   operation everywhere: on Windows a timed read or write is refused, on POSIX
   a timed write waits only for the socket to take bytes and then blocks in
   `sendmsg` while the peer keeps its window shut, and the connect timeout is
-  not implemented on any system. An abandoned connect is canceled through the
-  task it runs on.
+  not implemented on any system. reactor's connect keeps its timeout in the
+  kernel on a runtime and, on any other `Io`, abandons the attempt by canceling
+  the task it runs on.
 - **Without a task to spare the client degrades and says so**: reads are
   bounded by `Io.operateTimeout` where the `Io` can, connects are not bounded,
   `Dialed.timeout_enforced` is false, and `Client.stats().timeouts_unenforced`
   counts what was not kept. A timeout that cannot be kept is reported, not
   assumed.
 - **Instants on the awake clock are a type of their own** (`transport.awake`),
-  stored as `i64` nanoseconds in the atomics the timer and pool keep. A time
+  stored as `i64` nanoseconds in the pool's idle list. A time
   from another clock cannot meet one, spans are checked, and a deadline too far
   off to hold is the latest instant instead of an overflow.
 - **Every wait is `io.sleep` or a timed wait on the `Io`**, so tests move time
@@ -179,23 +184,27 @@ the lock, and say so where they are declared.
 
 ### Names and dialing
 
-- **A lookup runs as a task of its own while the caller drains it.** std's
-  lookup puts its answers one at a time into a queue, and run inline with
-  nothing draining the queue it waits on itself once a name has more answers
-  than the queue holds. `getaddrinfo` puts every result libc gives, and std's
-  own DNS client puts one per record and one per line of the hosts file,
-  whatever its documented bound. With no task to spare, a libc target calls
-  `getaddrinfo` on the caller's task into a bounded slice; any other target
-  returns `ConcurrencyUnavailable` for a name (an address needs no lookup).
-  It does not hang.
+- **A lookup is reactor's.** std's lookup puts its answers one at a time into a
+  queue, and run inline with nothing draining the queue it waits on itself once
+  a name has more answers than the queue holds: `getaddrinfo` puts every result
+  libc gives, and std's own DNS client puts one per record and one per line of
+  the hosts file, whatever its documented bound. reactor's `net.resolve` never
+  puts more than its queue holds on a runtime, runs as a task of its own
+  elsewhere, and with no task to spare a libc target calls `getaddrinfo` on the
+  caller's task into a bounded slice while any other target returns
+  `ConcurrencyUnavailable` for a name (an address needs no lookup). It does not
+  hang. The limit on a lookup is uplink's: it races the lookup against a sleep
+  within the `connect` budget.
 - **Happy Eyeballs is uplink's own** (RFC 8305): the addresses are ordered
   with the families alternating from the first the resolver gave, attempts
   start one at a time, each `attempt_delay` (250 ms) after the last or at once
   when it fails, and the first to connect wins while the rest are canceled. std's
   `HostName.connect` is not used, because it starts its attempts with
-  `io.async`. The delay is armed beside an attempt and a delay outrun by a
-  failure is recognised as stale by the count of attempts it was armed at.
-  Without a task to spare the addresses are tried in turn. A broken IPv6 path
+  `io.async`. Each attempt is reactor's `net.connect` ending at the one
+  deadline, so a single address is dialed on the caller's own task, with no
+  task beside it on a runtime. The delay is armed beside an attempt and a delay
+  outrun by a failure is recognised as stale by the count of attempts it was
+  armed at. Without a task to spare the addresses are tried in turn. A broken IPv6 path
   costs a quarter second, not a timeout, and a healthy host is not hit with a
   connection per address.
 - **The test for the delay runs on a manual clock**, so its bound is exact: the
@@ -209,7 +218,8 @@ the lock, and say so where they are declared.
 - **Sockets are tuned in one place** (`net.sys`): `TCP_NODELAY` on by default,
   keepalive when asked, `SO_NOSIGPIPE` where the system has it, because a
   library cannot count on its program having ignored the signal. Everything
-  else uplink does to a socket goes through the caller's `Io`.
+  else uplink does to a socket goes through the caller's `Io`, or through
+  reactor's networking over it.
 
 ### Policy
 
@@ -278,8 +288,9 @@ point. The shape is in the README; what the design depends on is:
 - **Time is moved by the test.** Timeouts, the delay between attempts and the
   stepped clock a certificate is checked at all run on shakedown's `Clock`.
 - **Concurrency is varied.** Every timeout runs with a task to spare and
-  without, and the lookup is run against a resolver that answers one address at
-  a time.
+  without. The whole suite runs twice, on `Io.Threaded` and on a reactor
+  runtime with worker threads of its own, so what is proved of the client is
+  proved of both.
 - **Peers are real where they are the proof**: `openssl s_server` for TLS 1.3
   and 1.2 and every key kind and format, with certificates made per run in a
   scratch `HOME`; a proxy and a server of the test tree for the rest.
@@ -289,8 +300,8 @@ point. The shape is in the README; what the design depends on is:
 ## Left out, and why
 
 - **HTTP/2, a server, WebSocket and a TLS engine of uplink's own** are not in
-  the package. The seams above (the pool's `Kind`, `Version`, the `Session`
-  layer) are where they join.
+  the package. The pool's `Kind`, `Version` and the `Session` layer assume
+  neither HTTP/1.1 alone nor one TLS client.
 - **HTTP/3** belongs to a QUIC package of its own: QUIC is a transport, as large
   as this package, with users that have no HTTP.
 - **NTLM, Negotiate and SOCKS5 GSSAPI** need the system's SSPI or GSSAPI. **PAC
@@ -300,10 +311,10 @@ point. The shape is in the README; what the design depends on is:
 - **No HTTP cache, no JSON.** A store is a different concern, a layer above the
   client; JSON belongs to the JSON library, and uplink hands over readers and
   bytes.
-- **No local address to bind**: Zig 0.17's `Io` has no bind before connect.
+- **No local address or interface to bind a connection to.**
 - **No `.netrc`**, no bandwidth limit (the caller throttles its reader or
   writer), no IDNA (callers pass punycode).
 - **No event loop of its own.** uplink makes only `Io` calls on sockets, apart
-  from the socket options and the inline `getaddrinfo`, and runs on the `Io` it
-  is given. Zig 0.17's evented `Io`s on Linux and macOS cannot open a TCP
-  connection yet, so it runs on `Io.Threaded` there.
+  from the socket options, and runs on the `Io` it is given. reactor's runtime
+  is the evented one: std 0.17's `Uring` and `Dispatch` cannot open a TCP
+  connection, and its `Kqueue` panics on a connect timeout.

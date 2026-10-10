@@ -1,6 +1,6 @@
 //! How a client answers its proxy, once the proxy has asked: one answer,
-//! shared by every connection, as curl keeps one for git. A Digest answer
-//! counts its uses of the nonce across them; a stale nonce is answered once
+//! shared by every connection, so a tunnel through a proxy that wants one
+//! is answered once. A Digest answer counts its uses of the nonce across them; a stale nonce is answered once
 //! more with the fresh one.
 
 const std = @import("std");
@@ -109,8 +109,7 @@ pub fn challenged(pa: *ProxyAuth, gpa: Allocator, io: Io, credential: ?Proxy.Cre
     return true;
 }
 
-/// A client nonce for Digest as curl makes one: thirty-two random hex
-/// digits, in base64.
+/// A client nonce for Digest: thirty-two random hex digits, in base64.
 fn cnonce(io: Io) [44]u8 {
     var raw: [16]u8 = undefined;
     io.random(&raw);
@@ -121,6 +120,7 @@ fn cnonce(io: Io) [44]u8 {
 }
 
 const testing = std.testing;
+const test_io = @import("../testing/io.zig");
 
 fn headersOf(comptime challenge: []const u8) fields.Headers {
     const list = [_]fields.Field{.{ .name = "Proxy-Authenticate", .value = challenge }};
@@ -128,7 +128,7 @@ fn headersOf(comptime challenge: []const u8) fields.Headers {
 }
 
 test "Basic is sent from the start when asked for, else only once the proxy asks" {
-    const io = testing.io;
+    const io = test_io.io();
     var buf: [256]u8 = undefined;
     var w: Io.Writer = .fixed(&buf);
     var pa: ProxyAuth = .init;
@@ -139,7 +139,7 @@ test "Basic is sent from the start when asked for, else only once the proxy asks
 }
 
 test "a Digest challenge is answered, a stale nonce answered again, and a refusal not" {
-    const io = testing.io;
+    const io = test_io.io();
     var pa: ProxyAuth = .init;
     defer pa.deinit(io);
     var offered_buf: [64]u8 = undefined;
@@ -167,10 +167,10 @@ test "a challenge leaves nothing allocated when allocation stops" {
     const Check = struct {
         fn run(gpa: Allocator) !void {
             var pa: ProxyAuth = .init;
-            defer pa.deinit(testing.io);
+            defer pa.deinit(test_io.io());
             var offered_buf: [64]u8 = undefined;
             var offered: Io.Writer = .fixed(&offered_buf);
-            _ = try pa.challenged(gpa, testing.io, .{ .user = "a", .password = "b" }, &headersOf("Negotiate, Digest realm=\"r\", nonce=\"n\", opaque=\"o\""), &offered);
+            _ = try pa.challenged(gpa, test_io.io(), .{ .user = "a", .password = "b" }, &headersOf("Negotiate, Digest realm=\"r\", nonce=\"n\", opaque=\"o\""), &offered);
         }
     };
     var no_resize: shakedown.alloc.NoResize = .init(testing.allocator);

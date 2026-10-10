@@ -29,7 +29,8 @@ options: Options,
 /// How a client connects and what it does with what comes back.
 pub const Options = struct {
     /// The proxy requests go through: none, one, or the one the
-    /// environment names per request, by curl's rules or Go's.
+    /// environment names per request, by either set of rules (see
+    /// `Proxy.fromEnvironment`).
     proxy: Proxy.Choice = .none,
     tls: tls.ClientOptions = .{},
     timeouts: Context.Timeouts = .{},
@@ -41,9 +42,8 @@ pub const Options = struct {
     dns_cache: ?Resolver.Cache.Options = .{},
     /// Send `Accept-Encoding: gzip, deflate, zstd` unless a request names
     /// its own, and decode such bodies. A request with a `Range`, or a
-    /// `HEAD`, is sent without it, as Go sends them: a range of coded bytes
-    /// cannot be decoded from its middle, and a `HEAD` would report the
-    /// coded length.
+    /// `HEAD`, is sent without it: a range of coded bytes cannot be decoded
+    /// from its middle, and a `HEAD` would report the coded length.
     decompress: bool = true,
     /// The largest zstd window decoded: a body asking for more is refused
     /// as it is read. A client keeps one window of this size, plus a
@@ -62,7 +62,7 @@ pub const Options = struct {
     /// Called before every attempt is written.
     prepare: ?Prepare = null,
     /// How long a request with `expect_continue` waits for the server's
-    /// go-ahead before sending its body anyway: Go's default.
+    /// go-ahead before sending its body anyway.
     expect_continue_timeout: Io.Duration = .fromSeconds(1),
     /// The largest response head, and the most fields in one.
     limits: h1.Limits = .{},

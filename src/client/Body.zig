@@ -163,6 +163,7 @@ fn failed(b: *Body, state: State) error{ReadFailed} {
 }
 
 const testing = std.testing;
+const test_io = @import("../testing/io.zig");
 
 fn readAll(b: *Body) ![]u8 {
     return b.interface.allocRemaining(testing.allocator, .unlimited);
@@ -201,21 +202,21 @@ test "a chunked body is decoded where it lies, and what follows it is left" {
 
 test "a chunked body's trailer fields are gathered, and an empty section takes nothing" {
     var pool: BufferPool = .init(testing.allocator, 1);
-    defer pool.deinit(testing.io);
+    defer pool.deinit(test_io.io());
     var in: Io.Reader = .fixed("3\r\nabc\r\n0\r\nChecksum: 9\r\n\r\nNEXT");
     var buf: [2]u8 = undefined;
     var b: Body = .init(&in, .chunked, &buf);
     b.trailer_pool = &pool;
-    b.trailer_io = testing.io;
+    b.trailer_io = test_io.io();
     const got = try readAll(&b);
     defer testing.allocator.free(got);
     try testing.expectEqualStrings("abc", got);
     try testing.expectEqualStrings("Checksum: 9\r\n\r\n", b.trailerBytes().?);
-    pool.release(testing.io, b.trailer);
+    pool.release(test_io.io(), b.trailer);
     var plain: Io.Reader = .fixed("3\r\nabc\r\n0\r\n\r\n");
     var none: Body = .init(&plain, .chunked, &buf);
     none.trailer_pool = &pool;
-    none.trailer_io = testing.io;
+    none.trailer_io = test_io.io();
     const body = try readAll(&none);
     defer testing.allocator.free(body);
     try testing.expectEqual(null, none.trailerBytes());

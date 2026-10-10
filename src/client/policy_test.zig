@@ -8,6 +8,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
 const testing = std.testing;
+const test_io = @import("../testing/io.zig");
 const shakedown = @import("shakedown");
 const Client = @import("Client.zig");
 const CookieJar = @import("CookieJar.zig");
@@ -76,7 +77,7 @@ fn redirecting(_: ?*anyopaque, request: Server.Request) Server.Answer {
 
 test "redirects are followed as RFC 9110 has them, the method and body changed or kept" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     const server = try Server.start(gpa, io, .{ .answer = redirecting });
     defer server.stop();
     var client: Client = .init(gpa, .{});
@@ -137,7 +138,7 @@ fn elsewhere(context: ?*anyopaque, request: Server.Request) Server.Answer {
 
 test "a redirect to another origin drops the caller's credentials and cookies" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     const target = try Server.start(gpa, io, .{ .answer = redirecting });
     defer target.stop();
     const first = try Server.start(gpa, io, .{ .context = &target.port, .answer = elsewhere });
@@ -159,7 +160,7 @@ test "a redirect to another origin drops the caller's credentials and cookies" {
 
 test "a redirect off the origin keeps the proxy's answer, and the jar's cookies for where it leads" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     const target = try Server.start(gpa, io, .{ .answer = redirecting });
     defer target.stop();
     const first = try Server.start(gpa, io, .{ .context = &target.port, .answer = elsewhere });
@@ -174,7 +175,7 @@ test "a redirect off the origin keeps the proxy's answer, and the jar's cookies 
     try jar.store(io, try url_mod.parse(target.url(&target_url, "/")), "there=1");
     var proxy_url: [64]u8 = undefined;
     var client: Client = .init(gpa, .{
-        .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&proxy_url, "http://u:p@127.0.0.1:{d}", .{proxy.port}), .curl) },
+        .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&proxy_url, "http://u:p@127.0.0.1:{d}", .{proxy.port}), .lowercase) },
         .cookies = &jar,
     });
     defer client.deinit(io);
@@ -198,7 +199,7 @@ fn unavailableFirst(context: ?*anyopaque, request: Server.Request) Server.Answer
 
 test "statuses the retries cover are tried again after Retry-After or a backoff, within the deadline" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     const fast: Client.Options = .{ .retries = .{ .statuses = policy.Retries.transient, .base = .fromMilliseconds(1), .cap = .fromMilliseconds(5) } };
     var buf: [64]u8 = undefined;
     for ([_][]const u8{ "0", "Thu, 01 Jan 1970 00:00:00 GMT" }) |after| {
@@ -251,7 +252,7 @@ fn hangUpFirst(_: ?*anyopaque, request: Server.Request) Server.Answer {
 
 test "a connection that fails before any answer is tried again when the request can go again" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     var buf: [64]u8 = undefined;
     const fast: Client.Options = .{ .retries = .{ .base = .fromMilliseconds(1) } };
     {
@@ -321,7 +322,7 @@ const Store = struct {
 
 test "a 401 is answered from the caller's credentials once, and the answer sent from then on" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     var buf: [64]u8 = undefined;
     for ([_]struct { []const u8, Credentials.Secret }{
         .{ "Basic", .{ .password = .{ .user = "Mufasa", .password = "Circle of Life" } } },
@@ -349,7 +350,7 @@ test "a 401 is answered from the caller's credentials once, and the answer sent 
 
 test "a refused answer is reported and the 401 handed back, and a request's own credentials go unasked" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     var buf: [64]u8 = undefined;
     const scheme: []const u8 = "Basic";
     const server = try Server.start(gpa, io, .{ .context = @ptrCast(@constCast(&scheme)), .answer = guarded }); // safe: the handler only reads it
@@ -376,7 +377,7 @@ fn session(_: ?*anyopaque, request: Server.Request) Server.Answer {
 
 test "cookies set on a redirect go with the redirected request and every later one" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     const server = try Server.start(gpa, io, .{ .answer = session });
     defer server.stop();
     var jar: CookieJar = .init(gpa, .{});
@@ -400,7 +401,7 @@ fn slowOk(_: ?*anyopaque, _: Server.Request) Server.Answer {
 
 test "a route at its limit makes requests wait their turn, or time out waiting" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     const server = try Server.start(gpa, io, .{ .answer = slowOk });
     defer server.stop();
     var client: Client = .init(gpa, .{ .pool = .{ .max_per_route = 1 } });
@@ -413,7 +414,7 @@ test "a route at its limit makes requests wait their turn, or time out waiting" 
         }
         fn each(c: *Client, u: []const u8) !void {
             for (0..3) |_| {
-                const body = try get(c, testing.io, .{ .url = u });
+                const body = try get(c, test_io.io(), .{ .url = u });
                 defer testing.allocator.free(body);
                 if (!std.mem.eql(u8, body, "slow")) return error.TestUnexpectedResult;
             }
@@ -442,7 +443,7 @@ fn kib(_: ?*anyopaque, _: Server.Request) Server.Answer {
 
 test "a body left unread is drained when it is small, so the connection is kept" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     const server = try Server.start(gpa, io, .{ .answer = kib });
     defer server.stop();
     var buf: [64]u8 = undefined;
@@ -459,7 +460,7 @@ test "a body left unread is drained when it is small, so the connection is kept"
 
 test "a request's deadline bounds its head and its body's reads" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     var buf: [64]u8 = undefined;
     const ms100: Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } };
     {
@@ -487,7 +488,7 @@ test "a request's deadline bounds its head and its body's reads" {
 
 test "a connection slower than the low-speed limit is given up on" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     const trickle = "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n" ++ "abcdefghijklmnopqrst";
     const server = try Server.start(gpa, io, Server.fixedAnswer(.{ .bytes = trickle, .piece = 1, .pause = .fromMilliseconds(30) }));
     defer server.stop();
@@ -506,7 +507,7 @@ test "a connection slower than the low-speed limit is given up on" {
 
 test "Expect: 100-continue sends the body on the go-ahead, or never when refused" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     var buf: [64]u8 = undefined;
     for ([_]Server.Expect{ .go_ahead, .ignore, .refuse }) |expect| {
         // Windows' Io cannot wait a bounded time on a socket: the body goes
@@ -534,7 +535,7 @@ test "Expect: 100-continue sends the body on the go-ahead, or never when refused
 
 test "a written body waits for the go-ahead too, and goes nowhere when the server answers first" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     var buf: [64]u8 = undefined;
     for ([_]Server.Expect{ .go_ahead, .refuse }) |expect| {
@@ -561,7 +562,7 @@ fn switching(_: ?*anyopaque, _: Server.Request) Server.Answer {
 
 test "a 101 hands the connection over, and so does a CONNECT through a proxy" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     const server = try Server.start(gpa, io, .{ .answer = switching });
     defer server.stop();
     var client: Client = .init(gpa, .{});
@@ -583,7 +584,7 @@ test "a 101 hands the connection over, and so does a CONNECT through a proxy" {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     var proxy_url: [64]u8 = undefined;
-    var through: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&proxy_url, "127.0.0.1:{d}", .{proxy.port}), .curl) } });
+    var through: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&proxy_url, "127.0.0.1:{d}", .{proxy.port}), .lowercase) } });
     defer through.deinit(io);
     var tunnel = try through.send(io, .{ .method = .CONNECT, .url = echo_server.url(&buf, "/") });
     try testing.expectEqual(std.http.Status.ok, tunnel.status);
@@ -602,7 +603,7 @@ test "a 101 hands the connection over, and so does a CONNECT through a proxy" {
 
 test "a chunked body's trailer fields are read once the body is" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     const server = try Server.start(gpa, io, Server.fixed("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTrailer: Checksum\r\n\r\n2\r\nok\r\n0\r\nChecksum: abc\r\nX-Folded: a\r\n b\r\n\r\n"));
     defer server.stop();
     var client: Client = .init(gpa, .{});
@@ -656,7 +657,7 @@ const Numbering = struct {
 
 test "the observer sees each step, and the prepare hook every attempt" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     const server = try Server.start(gpa, io, .{ .answer = redirecting });
     defer server.stop();
     var recorder: Recorder = .{};
@@ -672,7 +673,7 @@ test "the observer sees each step, and the prepare hook every attempt" {
 
 test "a proxy is chosen from the environment per request, and no_proxy goes around it" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     const server = try Server.start(gpa, io, .{ .answer = redirecting });
     defer server.stop();
     const proxy = try TestProxy.start(gpa, io, .{});
@@ -684,7 +685,7 @@ test "a proxy is chosen from the environment per request, and no_proxy goes arou
     try env.put("no_proxy", "bypass.test");
     const entries = [_]Resolver.Static.Entry{.{ .host = "bypass.test", .addresses = &.{.{ .ip4 = .loopback(0) }} }};
     const static: Resolver.Static = .{ .entries = &entries };
-    var client: Client = .init(gpa, .{ .proxy = .{ .environment = .{ .env = &env, .rules = .curl } }, .resolver = static.resolver() });
+    var client: Client = .init(gpa, .{ .proxy = .{ .environment = .{ .env = &env, .rules = .lowercase } }, .resolver = static.resolver() });
     defer client.deinit(io);
     var buf: [64]u8 = undefined;
     const via = try get(&client, io, .{ .url = server.url(&buf, "/echo") });
@@ -701,7 +702,7 @@ test "a proxy is chosen from the environment per request, and no_proxy goes arou
 
 test "a Unix socket carries requests for any host, which the Host field still names" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     if (!Io.net.has_unix_sockets) return error.SkipZigTest;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -727,7 +728,7 @@ test "a Unix socket carries requests for any host, which the Host field still na
 
 test "Server-Sent Events are read from a body as it streams" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     const stream = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n" ++
         "e\r\ndata: one\n\nid:\r\n" ++ "e\r\n 7\ndata: two\n\n\r\n" ++ "0\r\n\r\n";
     const server = try Server.start(gpa, io, Server.fixedAnswer(.{ .bytes = stream, .piece = 19, .pause = .fromMilliseconds(5) }));
@@ -754,7 +755,7 @@ fn sessionGuarded(_: ?*anyopaque, request: Server.Request) Server.Answer {
 }
 
 test "a warm client with cookies and a kept answer still allocates nothing per request" {
-    const io = testing.io;
+    const io = test_io.io();
     const server = try Server.start(testing.allocator, io, .{ .answer = sessionGuarded });
     defer server.stop();
     var counting: shakedown.alloc.Counting = .init(testing.allocator);

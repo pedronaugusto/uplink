@@ -103,7 +103,7 @@ pub const ResolveError = error{
 /// The URL `reference` names relative to `base`, an absolute URL, by RFC
 /// 3986 §5.2, into `out`: what a `Location` field leads to. Dot segments
 /// are removed; a space, a control character or a byte past ASCII in the
-/// reference is percent-encoded, as browsers and curl encode them; and a
+/// reference is percent-encoded, as browsers encode them; and a
 /// reference with no fragment keeps the base's (RFC 9110 §10.2.2).
 pub fn resolve(base: []const u8, reference: []const u8, out: []u8) ResolveError![]u8 {
     const b = split(base);

@@ -125,9 +125,10 @@ fn bytesOf(node: *Node, len: usize) []align(alignment.toByteUnits()) u8 {
 }
 
 const testing = std.testing;
+const test_io = @import("../testing/io.zig");
 
 test "a given-back buffer is handed out again, and past the cap it is freed" {
-    const io = testing.io;
+    const io = test_io.io();
     var pool: BufferPool = .init(testing.allocator, 1);
     defer pool.deinit(io);
     const a = try pool.acquire(io, .small);

@@ -282,6 +282,7 @@ pub fn refreshNonce(oa: *OriginAuth, io: Io, e: *Entry, challenges: []const auth
 }
 
 const testing = std.testing;
+const test_io = @import("../testing/io.zig");
 const Unwiped = @import("../testing/Unwiped.zig");
 
 const Store = struct {
@@ -311,7 +312,7 @@ fn challengesOf(arena: Allocator, value: []const u8) ![]const auth.Challenge {
 }
 
 test "an answer is kept per origin, sent only there, and told once" {
-    const io = testing.io;
+    const io = test_io.io();
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     var oa: OriginAuth = .init(testing.allocator);
@@ -339,7 +340,7 @@ test "an answer is kept per origin, sent only there, and told once" {
 }
 
 test "a password answers Digest when offered, and a stale nonce is answered again" {
-    const io = testing.io;
+    const io = test_io.io();
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     var oa: OriginAuth = .init(testing.allocator);
@@ -363,7 +364,7 @@ test "a password answers Digest when offered, and a stale nonce is answered agai
 }
 
 test "a token answers Bearer, and nothing answers what no secret can" {
-    const io = testing.io;
+    const io = test_io.io();
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     var oa: OriginAuth = .init(testing.allocator);
@@ -383,7 +384,7 @@ test "a token answers Bearer, and nothing answers what no secret can" {
 }
 
 test "a forgotten answer is wiped before it is freed" {
-    const io = testing.io;
+    const io = test_io.io();
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     var unwiped: Unwiped = .init(testing.allocator, "Circle of Life");
@@ -411,10 +412,10 @@ test "an answer leaves nothing allocated when allocation stops" {
             var arena: std.heap.ArenaAllocator = .init(testing.allocator);
             defer arena.deinit();
             var oa: OriginAuth = .init(gpa);
-            defer oa.deinit(testing.io);
+            defer oa.deinit(test_io.io());
             var store: Store = .{};
             const url = try url_mod.parse("http://h.test/");
-            _ = try oa.answer(testing.io, store.credentials(), url, "http://h.test/", try challengesOf(arena.allocator(), "Digest realm=\"r\", nonce=\"n\", opaque=\"o\""));
+            _ = try oa.answer(test_io.io(), store.credentials(), url, "http://h.test/", try challengesOf(arena.allocator(), "Digest realm=\"r\", nonce=\"n\", opaque=\"o\""));
         }
     };
     var no_resize: shakedown.alloc.NoResize = .init(testing.allocator);

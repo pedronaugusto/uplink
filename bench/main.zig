@@ -5,6 +5,11 @@
 //!
 //!     zig build bench-build && zig-out/bench/uplink-bench --row client/keepalive
 //!
+//! The rows run on a reactor runtime, the `Io` uplink is built for; `--io
+//! threaded` runs them on `Io.Threaded` instead, to put the two side by side,
+//! and `--workers N` sets the runtime's worker threads (the default is the
+//! logical CPUs less one).
+//!
 //! Rows:
 //! - `wire/parse`: response heads from the seeded corpus (5 to 40 fields,
 //!   cookie-heavy), parsed and their framing decided.
@@ -30,6 +35,7 @@
 const std = @import("std");
 const Io = std.Io;
 const uplink = @import("uplink");
+const reactor = @import("reactor");
 const bench = @import("shakedown").bench;
 const provenance = @import("preflight_bench_options");
 const gen = @import("gen.zig");
@@ -40,22 +46,46 @@ const WorkloadError = uplink.Client.SendError || Io.Reader.Error || Io.Reader.St
     uplink.wire.h1.ParseError || uplink.wire.h1.FramingError || uplink.wire.h1.ChunkedDecoder.Error ||
     error{ ConcurrencyUnavailable, DataTooLong, FieldTooLong, MalformedHead, ShortBody };
 
-pub const OptionsError = error{ UnknownArgument, MissingRow, DuplicateArgument };
+pub const OptionsError = error{ UnknownArgument, MissingRow, MissingIo, UnknownIo, MissingWorkers, InvalidWorkers, DuplicateArgument };
 
-pub fn options(args: []const []const u8) OptionsError!bench.Options {
-    var result: bench.Options = .{};
+/// Which `Io` the rows run on.
+pub const Backend = enum { reactor, threaded };
+
+pub const Arguments = struct {
+    bench: bench.Options = .{},
+    io: Backend = .reactor,
+    /// The runtime's worker threads; null: its default.
+    workers: ?u16 = null,
+};
+
+pub fn options(args: []const []const u8) OptionsError!Arguments {
+    var result: Arguments = .{};
     var i: usize = 1;
     var row_seen = false;
+    var io_seen = false;
+    var workers_seen = false;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--smoke")) {
-            if (result.smoke) return error.DuplicateArgument;
-            result.smoke = true;
+            if (result.bench.smoke) return error.DuplicateArgument;
+            result.bench.smoke = true;
         } else if (std.mem.eql(u8, args[i], "--row")) {
             if (row_seen) return error.DuplicateArgument;
             row_seen = true;
             i += 1;
             if (i == args.len or std.mem.startsWith(u8, args[i], "--")) return error.MissingRow;
-            result.prefix = args[i];
+            result.bench.prefix = args[i];
+        } else if (std.mem.eql(u8, args[i], "--io")) {
+            if (io_seen) return error.DuplicateArgument;
+            io_seen = true;
+            i += 1;
+            if (i == args.len) return error.MissingIo;
+            result.io = std.meta.stringToEnum(Backend, args[i]) orelse return error.UnknownIo;
+        } else if (std.mem.eql(u8, args[i], "--workers")) {
+            if (workers_seen) return error.DuplicateArgument;
+            workers_seen = true;
+            i += 1;
+            if (i == args.len) return error.MissingWorkers;
+            result.workers = std.fmt.parseInt(u16, args[i], 10) catch return error.InvalidWorkers;
         } else return error.UnknownArgument;
     }
     return result;
@@ -66,11 +96,24 @@ pub fn main(init: std.process.Init) !void {
     const selected = try options(args);
     var output_buffer: [4096]u8 = undefined;
     var output = Io.File.stdout().writerStreaming(init.io, &output_buffer);
-    try measure(init.gpa, init.io, &output.interface, selected, .{
+    const metadata: bench.Metadata = .{
         .commit = provenance.commit,
         .cpu = provenance.cpu,
         .os = provenance.os,
-    });
+    };
+    switch (selected.io) {
+        .threaded => try measure(init.gpa, init.io, &output.interface, selected.bench, metadata),
+        .reactor => {
+            // The runtime is large, so it lives on the heap; the root runs
+            // here, on the home thread, as a program's would.
+            const runtime = try init.gpa.create(reactor.Runtime);
+            defer init.gpa.destroy(runtime);
+            try runtime.init(init.gpa, .{ .environ = init.minimal.environ, .workers = selected.workers });
+            defer runtime.deinit();
+            try runtime.start();
+            try measure(init.gpa, runtime.io(), &output.interface, selected.bench, metadata);
+        },
+    }
     try output.interface.flush();
 }
 

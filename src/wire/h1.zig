@@ -4,8 +4,7 @@
 //!
 //! **Strict on requests, lenient on responses.** A response may end its
 //! lines with a bare LF and fold a field value over lines (`obs-fold`), as
-//! RFC 9112 §2.2 and §5.2 allow a recipient to accept and as curl and Go
-//! do; the fold is replaced by spaces in place. A request doing either is
+//! RFC 9112 §2.2 and §5.2 allow a recipient to accept; the fold is replaced by spaces in place. A request doing either is
 //! refused, as a server must refuse it.
 //!
 //! Nothing here allocates. The head's lines are found sixteen and thirty-two

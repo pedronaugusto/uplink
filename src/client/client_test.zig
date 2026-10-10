@@ -4,6 +4,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
 const testing = std.testing;
+const test_io = @import("../testing/io.zig");
 const Client = @import("Client.zig");
 const Server = @import("../testing/Server.zig");
 const Diagnostics = @import("../transport/Diagnostics.zig");
@@ -21,7 +22,7 @@ fn get(client: *Client, io: Io, url: []const u8) ![]u8 {
 }
 
 test "requests to one server go over one kept connection" {
-    const io = testing.io;
+    const io = test_io.io();
     const server = try Server.start(testing.allocator, io, Server.fixed(ok_answer));
     defer server.stop();
     var client: Client = .init(testing.allocator, .{});
@@ -40,8 +41,8 @@ test "requests to one server go over one kept connection" {
     try testing.expectEqual(@as(u32, 1), server.accepted.load(.monotonic));
 }
 
-test "a request's head is written as curl writes it, with nothing unchecked" {
-    const io = testing.io;
+test "a request's head is written exactly, with nothing unchecked" {
+    const io = test_io.io();
     const server = try Server.start(testing.allocator, io, Server.fixed(ok_answer));
     defer server.stop();
     var client: Client = .init(testing.allocator, .{ .user_agent = "uplink-test", .decompress = false });
@@ -70,7 +71,7 @@ test "a request's head is written as curl writes it, with nothing unchecked" {
 
 /// The body of a response to `GET /` with `answer`, read whole.
 fn bodyOf(comptime answer: []const u8, options: Client.Options) ![]u8 {
-    const io = testing.io;
+    const io = test_io.io();
     // An answer framed by the connection's end ends the connection.
     const close = comptime std.mem.startsWith(u8, answer, "HTTP/1.0");
     const server = try Server.start(testing.allocator, io, Server.fixedAnswer(.{ .bytes = answer, .close = close }));
@@ -111,7 +112,7 @@ fn compressed(gpa: std.mem.Allocator, container: std.compress.flate.Container, t
 
 test "gzip and deflate bodies are decoded, and other codings handed over as they came" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     const text = "a body worth compressing: repeated repeated repeated repeated";
     for ([_]struct { std.compress.flate.Container, []const u8 }{ .{ .gzip, "gzip" }, .{ .zlib, "deflate" } }) |case| {
         const coded = try compressed(gpa, case[0], text);
@@ -175,7 +176,7 @@ test "zstd bodies are decoded, and one whose window passes the client's cap refu
 
 test "a body read through the caller's buffer is peeked as far as that buffer holds" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     const body_len = 70_000;
     const Ctx = struct {
         fn answerFn(context: ?*anyopaque, _: Server.Request) Server.Answer {
@@ -208,7 +209,7 @@ test "a body read through the caller's buffer is peeked as far as that buffer ho
 
 test "a range or a HEAD is asked for without a coding, whose bytes and length it would count instead" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     const server = try Server.start(gpa, io, Server.fixed(ok_answer));
     defer server.stop();
     var client: Client = .init(gpa, .{});
@@ -254,7 +255,7 @@ fn echo(_: ?*anyopaque, request: Server.Request) Server.Answer {
 }
 
 test "a body from a reader goes with its length, or in chunks, and a short one is refused" {
-    const io = testing.io;
+    const io = test_io.io();
     const server = try Server.start(testing.allocator, io, .{ .answer = echo });
     defer server.stop();
     var client: Client = .init(testing.allocator, .{});
@@ -286,7 +287,7 @@ test "a body from a reader goes with its length, or in chunks, and a short one i
 }
 
 test "a body the caller writes goes exactly at its length, or in chunks" {
-    const io = testing.io;
+    const io = test_io.io();
     const server = try Server.start(testing.allocator, io, .{ .answer = echo });
     defer server.stop();
     var client: Client = .init(testing.allocator, .{});
@@ -342,7 +343,7 @@ fn closing(_: ?*anyopaque, request: Server.Request) Server.Answer {
 }
 
 test "a kept connection the server closed is noticed before it is used, or replaced when it fails" {
-    const io = testing.io;
+    const io = test_io.io();
     const server = try Server.start(testing.allocator, io, .{ .answer = closing });
     defer server.stop();
     var buf: [64]u8 = undefined;
@@ -374,7 +375,7 @@ test "a kept connection the server closed is noticed before it is used, or repla
 }
 
 test "an answer that stops coming is given up on at the activity timeout, and its connection not kept" {
-    const io = testing.io;
+    const io = test_io.io();
     const server = try Server.start(testing.allocator, io, Server.fixedAnswer(.{ .silent = true }));
     defer server.stop();
     var client: Client = .init(testing.allocator, .{ .timeouts = .{ .activity = .fromMilliseconds(100) } });
@@ -405,9 +406,9 @@ const Serial = shakedown.Layer(u8, .{
 });
 
 test "with no task to spare, reads are bounded by the Io where it can, and counted where it cannot" {
-    const server = try Server.start(testing.allocator, testing.io, Server.fixedAnswer(.{ .silent = true }));
+    const server = try Server.start(testing.allocator, test_io.io(), Server.fixedAnswer(.{ .silent = true }));
     defer server.stop();
-    var serial: Serial = .init(testing.io, 0);
+    var serial: Serial = .init(test_io.io(), 0);
     const io = serial.io();
     var client: Client = .init(testing.allocator, .{ .timeouts = .{ .activity = .fromMilliseconds(100) } });
     defer client.deinit(io);
@@ -423,7 +424,7 @@ test "with no task to spare, reads are bounded by the Io where it can, and count
 }
 
 test "tasks sending at once through one client share the connections it keeps" {
-    const io = testing.io;
+    const io = test_io.io();
     const server = try Server.start(testing.allocator, io, Server.fixed(ok_answer));
     defer server.stop();
     var client: Client = .init(testing.allocator, .{ .pool = .{ .max_idle_per_route = 4 }, .timeouts = .{ .connect = .fromSeconds(10), .activity = .fromSeconds(10) } });
@@ -436,7 +437,7 @@ test "tasks sending at once through one client share the connections it keeps" {
         }
         fn each(c: *Client, u: []const u8) !void {
             for (0..5) |_| {
-                const body = try get(c, testing.io, u);
+                const body = try get(c, test_io.io(), u);
                 defer testing.allocator.free(body);
                 if (!std.mem.eql(u8, body, "ok")) return error.TestUnexpectedResult;
             }
@@ -453,7 +454,7 @@ test "tasks sending at once through one client share the connections it keeps" {
 }
 
 test "a request on a warm client allocates nothing" {
-    const io = testing.io;
+    const io = test_io.io();
     const server = try Server.start(testing.allocator, io, Server.fixed(ok_answer));
     defer server.stop();
     var counting: shakedown.alloc.Counting = .init(testing.allocator);
@@ -499,9 +500,9 @@ const Counted = struct {
 };
 
 test "a small exchange on a kept connection is one write and one read, and a look at the socket that waits for nothing" {
-    const server = try Server.start(testing.allocator, testing.io, Server.fixed(ok_answer));
+    const server = try Server.start(testing.allocator, test_io.io(), Server.fixed(ok_answer));
     defer server.stop();
-    var counted: Counted.L = .init(testing.io, .{});
+    var counted: Counted.L = .init(test_io.io(), .{});
     const io = counted.io();
     var client: Client = .init(testing.allocator, .{});
     defer client.deinit(io);
@@ -523,7 +524,7 @@ test "a small exchange on a kept connection is one write and one read, and a loo
 
 test "a request through an HTTP proxy is sent whole, and the proxy's Digest challenge answered" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     const server = try Server.start(gpa, io, Server.fixed(ok_answer));
     defer server.stop();
     const proxy = try TestProxy.start(gpa, io, .{ .credential = "user:secret", .scheme = .digest });
@@ -531,7 +532,7 @@ test "a request through an HTTP proxy is sent whole, and the proxy's Digest chal
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     var proxy_url: [64]u8 = undefined;
-    var client: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&proxy_url, "http://user:secret@127.0.0.1:{d}", .{proxy.port}), .curl) } });
+    var client: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&proxy_url, "http://user:secret@127.0.0.1:{d}", .{proxy.port}), .lowercase) } });
     defer client.deinit(io);
     var buf: [64]u8 = undefined;
     const body = try get(&client, io, server.url(&buf, "/repo.git/info/refs"));
@@ -546,14 +547,14 @@ test "a request through an HTTP proxy is sent whole, and the proxy's Digest chal
 
 test "a proxy is refused by name: schemes not spoken, a refusal, credentials refused" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     var url_buf: [96]u8 = undefined;
     {
         const proxy = try TestProxy.start(gpa, io, .{ .credential = "a:b", .challenge = "Negotiate, NTLM" });
         defer proxy.stop();
-        var client: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "http://a:b@127.0.0.1:{d}", .{proxy.port}), .curl) } });
+        var client: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "http://a:b@127.0.0.1:{d}", .{proxy.port}), .lowercase) } });
         defer client.deinit(io);
         var diagnostics: Diagnostics = .{};
         try testing.expectError(error.ProxyAuthMethodUnsupported, client.send(io, .{ .url = "https://git.test/", .diagnostics = &diagnostics }));
@@ -567,7 +568,7 @@ test "a proxy is refused by name: schemes not spoken, a refusal, credentials ref
     {
         const proxy = try TestProxy.start(gpa, io, .{ .refuse = 403 });
         defer proxy.stop();
-        var client: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "127.0.0.1:{d}", .{proxy.port}), .curl) } });
+        var client: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "127.0.0.1:{d}", .{proxy.port}), .lowercase) } });
         defer client.deinit(io);
         var diagnostics: Diagnostics = .{};
         try testing.expectError(error.ProxyRefused, client.send(io, .{ .url = "https://git.test/", .diagnostics = &diagnostics }));
@@ -577,7 +578,7 @@ test "a proxy is refused by name: schemes not spoken, a refusal, credentials ref
     {
         const proxy = try TestProxy.start(gpa, io, .{ .kind = .socks, .credential = "user:right" });
         defer proxy.stop();
-        var client: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "socks5h://user:wrong@127.0.0.1:{d}", .{proxy.port}), .curl) } });
+        var client: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "socks5h://user:wrong@127.0.0.1:{d}", .{proxy.port}), .lowercase) } });
         defer client.deinit(io);
         try testing.expectError(error.ProxyAuthenticationRequired, client.send(io, .{ .url = "http://git.test/" }));
     }
@@ -585,7 +586,7 @@ test "a proxy is refused by name: schemes not spoken, a refusal, credentials ref
 
 test "SOCKS 4, 4a, 5 and 5h reach the server, looking the name up where each says" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     const server = try Server.start(gpa, io, Server.fixed(ok_answer));
     defer server.stop();
     const proxy = try TestProxy.start(gpa, io, .{ .kind = .socks });
@@ -594,7 +595,7 @@ test "SOCKS 4, 4a, 5 and 5h reach the server, looking the name up where each say
     defer arena.deinit();
     for ([_][]const u8{ "socks4", "socks4a", "socks5", "socks5h" }) |scheme| {
         var url_buf: [96]u8 = undefined;
-        var client: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "{s}://127.0.0.1:{d}", .{ scheme, proxy.port }), .curl) } });
+        var client: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "{s}://127.0.0.1:{d}", .{ scheme, proxy.port }), .lowercase) } });
         defer client.deinit(io);
         var target_buf: [64]u8 = undefined;
         const body = get(&client, io, try std.mem.print(&target_buf, "http://localhost:{d}/", .{server.port})) catch |err| {
@@ -607,7 +608,7 @@ test "SOCKS 4, 4a, 5 and 5h reach the server, looking the name up where each say
     const log = try proxy.lines(gpa);
     defer gpa.free(log);
     // SOCKS4 sends an IPv4 address; 4a and 5h send the name; 5 sends
-    // whichever address of the name's comes first in curl's preference.
+    // the name's first IPv6 address, else its first.
     var lines = std.mem.splitScalar(u8, log, '\n');
     try testing.expect(std.mem.startsWith(u8, lines.next().?, "SOCKS 4 127.0.0.1:"));
     try testing.expect(std.mem.startsWith(u8, lines.next().?, "SOCKS 4 localhost:"));
@@ -618,7 +619,7 @@ test "SOCKS 4, 4a, 5 and 5h reach the server, looking the name up where each say
 
 test "a SOCKS5 refusal is named by its reply code, which the diagnostics keep" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     // RFC 1928's codes, 1 to 8: a general failure, not allowed, network and
@@ -629,7 +630,7 @@ test "a SOCKS5 refusal is named by its reply code, which the diagnostics keep" {
         const proxy = try TestProxy.start(gpa, io, .{ .kind = .socks, .reply = @intCast(code) });
         defer proxy.stop();
         var url_buf: [64]u8 = undefined;
-        var client: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "socks5h://127.0.0.1:{d}", .{proxy.port}), .curl) } });
+        var client: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "socks5h://127.0.0.1:{d}", .{proxy.port}), .lowercase) } });
         defer client.deinit(io);
         var diagnostics: Diagnostics = .{};
         try testing.expectError(expected, client.send(io, .{ .url = "http://git.test/", .diagnostics = &diagnostics }));
@@ -641,7 +642,7 @@ test "a SOCKS5 refusal is named by its reply code, which the diagnostics keep" {
 
 test "a SOCKS negotiation that stalls is given up on at the connect timeout, and at the handshake timeout" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const cases = [_]struct { Timeouts, Diagnostics.Timeout }{
@@ -653,7 +654,7 @@ test "a SOCKS negotiation that stalls is given up on at the connect timeout, and
         defer proxy.stop();
         var url_buf: [64]u8 = undefined;
         var client: Client = .init(gpa, .{
-            .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "socks5h://127.0.0.1:{d}", .{proxy.port}), .curl) },
+            .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "socks5h://127.0.0.1:{d}", .{proxy.port}), .lowercase) },
             .timeouts = case[0],
         });
         defer client.deinit(io);

@@ -1,6 +1,5 @@
 //! What a client does for a request, step by step, with how long each step
-//! took, told as it happens: Go's `httptrace` and curl's timings in one
-//! callback. An observer is called on the task sending the request; it
+//! took, told as it happens, in one callback. An observer is called on the task sending the request; it
 //! must be quick, and may be called from several tasks at once when the
 //! client is shared. Every slice in an event is valid only during the call.
 //!

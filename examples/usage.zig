@@ -9,18 +9,26 @@
 
 const std = @import("std");
 const Io = std.Io;
+const reactor = @import("reactor");
 const uplink = @import("uplink");
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
+    // The example runs evented, on a reactor runtime; `init.io` would do as
+    // well.
+    var runtime: reactor.Runtime = undefined;
+    try runtime.init(gpa, .{ .environ = init.minimal.environ });
+    defer runtime.deinit();
+    try runtime.start();
     var server: Answering = undefined;
-    try server.start(init.io);
-    defer server.stop(init.io);
+    try server.start(runtime.io());
+    defer server.stop(runtime.io());
     var url_buffer: [64]u8 = undefined;
     const url = try std.mem.print(&url_buffer, "http://127.0.0.1:{d}/hello", .{server.port});
 
     // --- README:usage ---
-    const io = init.io;
+    // Any `std.Io`: here a reactor runtime's, the evented one.
+    const io = runtime.io();
 
     // One client for the program: it keeps connections for reuse, follows
     // redirects, tries failed requests again where that is safe, and may be

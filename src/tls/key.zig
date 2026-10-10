@@ -567,7 +567,7 @@ test "a key is refused by name: no passphrase, a wrong one, a cipher not read, a
     try testing.expect(!p256.matches(others[0]));
     const rsa_key = try PrivateKey.parse(a, @embedFile("testdata/rsa.pkcs1.pem"), null);
     try testing.expect(!rsa_key.matches(others[0]));
-    // A key and its certificate in one file, as curl reads `http.sslCert`.
+    // A key and its certificate in one file, as git's `http.sslCert` names one.
     const both = try std.mem.concat(a, u8, &.{ @embedFile("testdata/p256.cert.pem"), @embedFile("testdata/p256.sec1.pem") });
     const from_both = try PrivateKey.parse(a, both, null);
     try testing.expect(from_both.matches((try certificates(a, both))[0]));

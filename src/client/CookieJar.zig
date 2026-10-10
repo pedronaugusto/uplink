@@ -1,8 +1,8 @@
 //! A cookie store (RFC 6265bis): what servers set with `Set-Cookie`, kept
 //! and sent back in a `Cookie` field to the requests it belongs to. A jar
 //! is the caller's: one may serve several clients, and is safe to share
-//! between tasks. It reads and writes the Netscape cookie file that curl,
-//! git (`http.cookieFile`, `http.saveCookies`) and browsers' exporters use.
+//! between tasks. It reads and writes the Netscape cookie file that git
+//! (`http.cookieFile`, `http.saveCookies`) and browsers' exporters use.
 //!
 //! Cookies are filed by domain, so a request looks at the few domains its
 //! host lies in, not at every cookie. Storing allocates; sending never
@@ -383,7 +383,7 @@ pub const LoadError = error{
     OutOfMemory,
 };
 
-/// Read cookies from a Netscape cookie file, as curl writes one:
+/// Read cookies from a Netscape cookie file:
 /// `domain`, `TRUE` when hosts under it get it, `path`, `TRUE` for secure,
 /// expiry in seconds (0 for a session cookie), name and value, separated by
 /// tabs; `#HttpOnly_` before an HTTP-only cookie's domain; other `#` lines
@@ -467,8 +467,8 @@ fn loadLine(jar: *CookieJar, io: Io, line: []const u8, now: i64) Allocator.Error
 
 /// Which cookies `save` writes.
 pub const SaveOptions = struct {
-    /// Session cookies too, with expiry 0, as curl writes them; git's
-    /// `http.saveCookies` keeps only persistent ones.
+    /// Session cookies too, with expiry 0; git's `http.saveCookies` keeps
+    /// only persistent ones.
     session: bool = false,
 };
 
@@ -506,6 +506,7 @@ fn older(_: void, a: *Cookie, b: *Cookie) bool {
 }
 
 const testing = std.testing;
+const test_io = @import("../testing/io.zig");
 const shakedown = @import("shakedown");
 
 fn field(jar: *CookieJar, io: Io, url: []const u8) ![]const u8 {
@@ -518,7 +519,7 @@ fn field(jar: *CookieJar, io: Io, url: []const u8) ![]const u8 {
 }
 
 test "cookies go back to their host, domain and path, longest path first" {
-    var clock: shakedown.Clock = .init(testing.io, .{});
+    var clock: shakedown.Clock = .init(test_io.io(), .{});
     const io = clock.io();
     var jar: CookieJar = .init(testing.allocator, .{});
     defer jar.deinit(io);
@@ -535,7 +536,7 @@ test "cookies go back to their host, domain and path, longest path first" {
 }
 
 test "the store's rules refuse what a browser refuses" {
-    var clock: shakedown.Clock = .init(testing.io, .{});
+    var clock: shakedown.Clock = .init(test_io.io(), .{});
     const io = clock.io();
     var jar: CookieJar = .init(testing.allocator, .{});
     defer jar.deinit(io);
@@ -559,7 +560,7 @@ test "the store's rules refuse what a browser refuses" {
 }
 
 test "a cookie is replaced by name, domain and path, and expires as it says" {
-    var clock: shakedown.Clock = .init(testing.io, .{});
+    var clock: shakedown.Clock = .init(test_io.io(), .{});
     const io = clock.io();
     var jar: CookieJar = .init(testing.allocator, .{});
     defer jar.deinit(io);
@@ -579,7 +580,7 @@ test "a cookie is replaced by name, domain and path, and expires as it says" {
 }
 
 test "a domain keeps its cap, and the jar its own, by dropping the oldest" {
-    var clock: shakedown.Clock = .init(testing.io, .{});
+    var clock: shakedown.Clock = .init(test_io.io(), .{});
     const io = clock.io();
     var jar: CookieJar = .init(testing.allocator, .{ .max_per_domain = 2, .max_total = 3 });
     defer jar.deinit(io);
@@ -595,8 +596,8 @@ test "a domain keeps its cap, and the jar its own, by dropping the oldest" {
     try testing.expectEqualStrings("Cookie: three=3\r\n", try field(&jar, io, "http://a.test/"));
 }
 
-test "the Netscape file is read and written as curl reads and writes it" {
-    var clock: shakedown.Clock = .init(testing.io, .{});
+test "the Netscape file is read and written in its tab-separated form" {
+    var clock: shakedown.Clock = .init(test_io.io(), .{});
     const io = clock.io();
     var jar: CookieJar = .init(testing.allocator, .{});
     defer jar.deinit(io);
@@ -634,13 +635,13 @@ test "a store that runs out of memory keeps the jar whole" {
     const Check = struct {
         fn run(gpa: Allocator) !void {
             var jar: CookieJar = .init(gpa, .{});
-            defer jar.deinit(testing.io);
+            defer jar.deinit(test_io.io());
             const url = try url_mod.parse("http://h.test/a/b");
-            try jar.store(testing.io, url, "a=1; Path=/");
-            try jar.store(testing.io, url, "b=2; Domain=h.test");
+            try jar.store(test_io.io(), url, "a=1; Path=/");
+            try jar.store(test_io.io(), url, "b=2; Domain=h.test");
             var buf: [128]u8 = undefined;
             var w: Io.Writer = .fixed(&buf);
-            _ = try jar.writeField(testing.io, &w, url);
+            _ = try jar.writeField(test_io.io(), &w, url);
         }
     };
     var no_resize: shakedown.alloc.NoResize = .init(testing.allocator);

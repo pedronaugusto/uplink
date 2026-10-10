@@ -58,12 +58,11 @@ pub const Options = struct {
     idle_timeout: ?Io.Duration = .fromSeconds(90),
     /// The most of an unread body a finished response reads to keep its
     /// connection, within the activity timeout; past it, the connection is
-    /// closed. Go 1.27's choice.
+    /// closed.
     drain_limit: aegis.units.Bytes(u32) = .fromRaw(64 << 10),
 };
 
-/// A connection of whichever protocol it speaks. HTTP/2 connections join
-/// as an arm of their own.
+/// A connection of whichever protocol it speaks; HTTP/1.1 is the only one.
 pub const Kind = union(enum) {
     h1: *Connection,
 
@@ -326,6 +325,7 @@ pub fn count(p: *const Pool) u32 {
 }
 
 const testing = std.testing;
+const test_io = @import("../testing/io.zig");
 const shakedown = @import("shakedown");
 
 fn connWith(route: Route) Connection {
@@ -335,7 +335,7 @@ fn connWith(route: Route) Connection {
 }
 
 test "the last kept is taken first, a route keeps its cap, and the pool its own" {
-    const io = testing.io;
+    const io = test_io.io();
     var pool: Pool = .init(testing.allocator, .{ .max_idle_per_route = 2, .max_idle = 3 });
     defer pool.deinit(io);
     var conns: [5]Connection = undefined;
@@ -363,7 +363,7 @@ test "the last kept is taken first, a route keeps its cap, and the pool its own"
 }
 
 test "a pool that keeps nothing hands every connection back" {
-    const io = testing.io;
+    const io = test_io.io();
     var pool: Pool = .init(testing.allocator, .{ .max_idle = 0 });
     defer pool.deinit(io);
     var conn = connWith(.{ .secure = false, .host = "a", .port = 80 });
@@ -371,7 +371,7 @@ test "a pool that keeps nothing hands every connection back" {
 }
 
 test "a connection idle past its time is handed out to be closed, not used" {
-    var clock: shakedown.Clock = .init(testing.io, .{});
+    var clock: shakedown.Clock = .init(test_io.io(), .{});
     const io = clock.io();
     var pool: Pool = .init(testing.allocator, .{ .idle_timeout = .fromSeconds(90) });
     defer pool.deinit(io);
@@ -392,7 +392,7 @@ test "a connection idle past its time is handed out to be closed, not used" {
 }
 
 test "a full route makes exchanges wait in order, for a kept connection or for room" {
-    const io = testing.io;
+    const io = test_io.io();
     var pool: Pool = .init(testing.allocator, .{ .max_per_route = 1 });
     defer pool.deinit(io);
     const route: Route = .{ .secure = false, .host = "a", .port = 80 };
@@ -401,7 +401,7 @@ test "a full route makes exchanges wait in order, for a kept connection or for r
     try testing.expect(!waited);
     const Wait = struct {
         fn run(pl: *Pool, r: Route, out: *AcquireError!Acquired, flag: *bool) void {
-            out.* = pl.acquire(testing.io, r, null, flag);
+            out.* = pl.acquire(test_io.io(), r, null, flag);
         }
     };
     var first: AcquireError!Acquired = undefined;
@@ -428,7 +428,7 @@ test "a full route makes exchanges wait in order, for a kept connection or for r
 }
 
 test "a wait for a full route ends at its deadline and leaves nothing behind" {
-    var clock: shakedown.Clock = .init(testing.io, .{});
+    var clock: shakedown.Clock = .init(test_io.io(), .{});
     const io = clock.io();
     var pool: Pool = .init(testing.allocator, .{ .max_per_route = 1 });
     defer pool.deinit(io);
@@ -443,11 +443,11 @@ test "a wait for a full route ends at its deadline and leaves nothing behind" {
     };
     var result: AcquireError!Acquired = undefined;
     const deadline = Io.Clock.awake.now(io).addDuration(.fromSeconds(5));
-    var task = testing.io.concurrent(Wait.run, .{ &pool, io, route, deadline, &result }) catch return error.SkipZigTest;
-    defer task.cancel(testing.io);
+    var task = test_io.io().concurrent(Wait.run, .{ &pool, io, route, deadline, &result }) catch return error.SkipZigTest;
+    defer task.cancel(test_io.io());
     try clock.awaitArmed(1, .{ .duration = .{ .raw = .fromSeconds(10), .clock = .awake } });
     clock.advance(.fromSeconds(5));
-    task.await(testing.io);
+    task.await(test_io.io());
     try testing.expectError(error.TimedOut, result);
     pool.closed(io, route);
     try testing.expectEqual(@as(usize, 0), routeCount(&pool));
@@ -455,19 +455,19 @@ test "a wait for a full route ends at its deadline and leaves nothing behind" {
 
 /// How many limited routes the pool keeps state for.
 fn routeCount(p: *Pool) usize {
-    var held = p.state.acquireUncancelable(testing.io);
-    defer held.deinit(testing.io);
+    var held = p.state.acquireUncancelable(test_io.io());
+    defer held.deinit(test_io.io());
     return held.value().routes.items.len;
 }
 
 /// Wait, briefly, until `n` exchanges wait for `route`.
 fn waitForWaiters(p: *Pool, route: Route, n: usize) !void {
     for (0..2000) |_| {
-        var held = p.state.acquireUncancelable(testing.io);
+        var held = p.state.acquireUncancelable(test_io.io());
         const have = if (findState(held.value(), route)) |state| state.waiters.len() else 0;
-        held.deinit(testing.io);
+        held.deinit(test_io.io());
         if (have == n) return;
-        try testing.io.sleep(.fromMilliseconds(1), .awake);
+        try test_io.io().sleep(.fromMilliseconds(1), .awake);
     }
     return error.TestUnexpectedResult;
 }

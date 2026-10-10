@@ -23,16 +23,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Proxies: HTTP (absolute form, or a `CONNECT` tunnel with TLS to the server
   inside it), HTTPS, and SOCKS 4, 4a, 5 and 5h; Basic and Digest (MD5,
   SHA-256, SHA-512-256, `-sess`, userhash) answers to a proxy's challenge.
-  `Proxy.parse`, `Proxy.fromEnvironment` and `Proxy.bypassed` by curl's rules
-  or Go's.
-- Timeouts for connecting, each handshake, and each read or write, kept by one
-  task per client, by the `Io` where it has no task to spare, and counted where
-  neither can.
+  `Proxy.parse`, `Proxy.fromEnvironment` and `Proxy.bypassed` by either of
+  two sets of rules, `Proxy.Rules`.
+- Timeouts for connecting, each handshake, and each read or write, kept in the
+  kernel on a reactor runtime, by one task per client on any other `Io`, by the
+  `Io` itself where it has no task to spare, and counted where neither can.
 - `tls`: the standard library's TLS client with client certificates, held to
   std by its recorded diff; `Trust`, shareable authorities; `PrivateKey` and
   `ClientAuth`; a key log through a writer.
-- `net`: name lookup that never waits on itself, and connections raced over a
-  name's addresses within one deadline.
+- `net`: connections raced over a name's addresses within one deadline.
 - `wire`: HTTP/1.1 heads parsed in place, strict on requests and lenient on
   responses; framing by RFC 9112 §6.3; a chunked decoder and writers; header
   fields and lists; content codings; authentication challenges; SOCKS; URLs.
@@ -54,14 +53,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `Prepare`, a hook called before every attempt is written, and `Observer`,
   told every step of every request with its timing.
 - Timeouts: `Request.timeout` over the whole request, its retries, redirects
-  and body reads included, and `Timeouts.low_speed`, curl's and git's low
-  speed limit.
+  and body reads included, and `Timeouts.low_speed`, a low speed limit as
+  git has it.
 - Pool: `max_per_route` with first-come waiters bounded by the request's
   deadline, `idle_timeout`, and `drain_limit`, the unread body read so its
   connection is kept.
 - `Proxy.Choice.environment`: the environment's proxy chosen per request.
-- `net.Resolver`: the system's lookup, `Resolver.Static` (curl's
-  `--resolve`) and `Resolver.Cache`, which a client keeps by default;
+- `net.Resolver`: the system's lookup, `Resolver.Static` (chosen names
+  with chosen addresses) and `Resolver.Cache`, which a client keeps by default;
   addresses raced by Happy Eyeballs; `Dial.unix_socket`; TCP keepalive.
 - `Expect: 100-continue` for a body given or written; `Response.upgrade` for
   a 101 or a `CONNECT`'s tunnel; `Response.trailers`; zstd bodies, with the
@@ -72,6 +71,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Depends on [reactor](https://github.com/pedronaugusto/reactor), the family's
+  evented `std.Io`, which now owns what uplink kept for itself: the task that
+  keeps socket deadlines (`net.Deadlines`), name lookup (`net.resolve`) and
+  connecting with a timeout (`net.connect`). uplink runs on any `Io` and is
+  evented on reactor's runtime, where a deadline is the kernel's and a single
+  address is dialed with no task beside the caller's; std 0.17's own evented
+  `Io`s cannot open a TCP connection (`Uring`, `Dispatch`) or panic on a
+  connect timeout (`Kqueue`). The test suite runs twice, on `Io.Threaded` and
+  on a reactor runtime, and the benchmarks run on a runtime unless asked for
+  `--io threaded`.
+- Pins the newest aegis, shakedown and reactor.
 - Depends on aegis, the family's std-only safety library. Locks sit beside the
   data they guard (`BlockingGuarded`) in the pool, the buffer pool, the
   cookie jar, the answers kept per origin and for the proxy, the name cache,
@@ -81,7 +91,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   environment names (parsed in wiped scratch, no longer left in the arena
   the proxies free), and the Digest and Basic intermediates of an answer.
 - A timeout deadline too far off for an `i64` of nanoseconds is the latest
-  instant instead of an integer overflow in `Timer.arm`.
+  instant instead of an integer overflow.
+- Breaking: `Proxy.Rules` is `lowercase` and `uppercase`, which were named for
+  the programs whose environment conventions they follow.
+- Breaking: `net.resolve`, `net.sys.abort` and `net.sys.getaddrinfo` are gone,
+  reactor's `net.resolve` and `net.abort` being their owners; `Resolver.LookupError`
+  is reactor's `net.ResolveError`.
 - Breaking: `CookieJar.deinit`, `Resolver.Cache.deinit` take the `Io`, as
   `Client.deinit` does.
 - Breaking: `Pool.Options.max_per_route` is `?u16`, null for no limit; zero,

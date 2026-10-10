@@ -1,7 +1,7 @@
 //! The few calls on a socket that `std.Io` does not make: socket options,
-//! a look that neither waits nor takes anything, and `getaddrinfo` on the
-//! caller's own task. Everything else uplink does
-//! to a socket goes through the caller's `Io`.
+//! and a look that neither waits nor takes anything. Everything else uplink
+//! does to a socket goes through the caller's `Io`, or reactor's networking
+//! over it.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -70,31 +70,6 @@ fn setAfd(io: Io, handle: Io.net.Socket.Handle, level: i32, name: u32, value: u3
     _ = io.operate(operation) catch {};
 }
 
-/// End every operation under way on a socket, from another task: on POSIX
-/// a shutdown of both directions, which wakes a blocked `recvmsg` or
-/// `sendmsg`; on Windows an abortive disconnect, since AFD's graceful one
-/// leaves a pending receive waiting for the peer. The socket is not
-/// closed; its owner closes it. A refusal means it is ended already.
-pub fn abort(io: Io, handle: Io.net.Socket.Handle) void {
-    if (os == .windows) {
-        const windows = std.os.windows;
-        const info: windows.AFD.PARTIAL_DISCONNECT_INFO = .{
-            .DisconnectMode = .{ .SEND = true, .RECEIVE = true, .ABORTIVE = true },
-            .Timeout = -1,
-        };
-        const operation: Io.Operation = .{ .device_io_control = .{
-            .file = .{ .handle = handle, .flags = .{ .nonblocking = false } },
-            .code = windows.IOCTL.AFD.PARTIAL_DISCONNECT,
-            .in = std.mem.asBytes(&info),
-        } };
-        // ziglint-ignore: Z026 a socket that cannot be disconnected is ended already, which is what this asks
-        _ = io.operate(operation) catch {};
-        return;
-    }
-    // ziglint-ignore: Z026 a socket that cannot be shut down is ended already, which is what this asks
-    io.vtable.netShutdown(io.userdata, handle, .both) catch {};
-}
-
 /// What a look at an idle socket finds.
 pub const Peek = enum {
     /// Nothing waiting: the peer has said nothing.
@@ -123,57 +98,8 @@ pub fn peek(handle: Io.net.Socket.Handle) ?Peek {
     }
 }
 
-/// Whether this target has a name lookup that runs on the caller's own
-/// task: libc's `getaddrinfo`.
-pub const own_lookup = builtin.link_libc and os != .windows;
-
-/// Errors from `getaddrinfo`.
-pub const LookupError = error{
-    /// The name has no address, or the resolver failed.
-    LookupFailed,
-};
-
-/// `name`'s addresses by libc's `getaddrinfo`, called on this task: the
-/// first `out.len` of them, in its order. It blocks until it answers, and
-/// cannot be canceled, as std's own libc lookup cannot.
-pub fn getaddrinfo(name: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress) LookupError![]IpAddress {
-    if (!own_lookup) @compileError("getaddrinfo needs libc");
-    var name_buffer: [Io.net.HostName.max_len:0]u8 = undefined;
-    if (name.len > Io.net.HostName.max_len) return error.LookupFailed;
-    @memcpy(name_buffer[0..name.len], name);
-    name_buffer[name.len] = 0;
-    var port_buffer: [8]u8 = undefined;
-    const port_text = std.mem.printSentinel(&port_buffer, "{d}", .{port}, 0) catch unreachable; // unreachable: a u16 is at most five digits
-    const hints: std.c.addrinfo = .{
-        .flags = .{ .NUMERICSERV = true },
-        .family = if (family) |f| switch (f) {
-            .ip4 => std.c.AF.INET,
-            .ip6 => std.c.AF.INET6,
-        } else std.c.AF.UNSPEC,
-        .socktype = std.c.SOCK.STREAM,
-        .protocol = std.c.IPPROTO.TCP,
-        .canonname = null,
-        .addr = null,
-        .addrlen = 0,
-        .next = null,
-    };
-    var list: ?*std.c.addrinfo = null;
-    if (@backingInt(std.c.getaddrinfo(name_buffer[0..name.len :0].ptr, port_text.ptr, &hints, &list)) != 0) return error.LookupFailed;
-    defer if (list) |first| std.c.freeaddrinfo(first);
-    var count: usize = 0;
-    var entry = list;
-    while (entry) |info| : (entry = info.next) {
-        const addr = info.addr orelse continue;
-        if (addr.family != std.c.AF.INET and addr.family != std.c.AF.INET6) continue;
-        if (count == out.len) break;
-        out[count] = Io.Threaded.addressFromPosix(@alignCast(@fieldParentPtr("any", addr))); // safe: getaddrinfo's INET and INET6 entries point at a whole sockaddr of their family
-        count += 1;
-    }
-    if (count == 0) return error.LookupFailed;
-    return out[0..count];
-}
-
 const testing = std.testing;
+const test_io = @import("../testing/io.zig");
 
 /// A socket option's value, read back; null where this test cannot read
 /// one.
@@ -191,7 +117,7 @@ fn readOption(handle: Io.net.Socket.Handle, level: i32, name: u32) ?c_int {
 
 test "a tuned socket has Nagle's algorithm off and keepalive on at the idle time asked" {
     if (os == .windows or os == .wasi) return error.SkipZigTest;
-    const io = testing.io;
+    const io = test_io.io();
     var listener = try (try IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
     defer listener.deinit(io);
     const stream = try listener.socket.address.connect(io, .{ .mode = .stream });

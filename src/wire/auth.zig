@@ -10,8 +10,7 @@
 //! request's method and target, and a count and a nonce of the client's
 //! own, with MD5, SHA-256 and SHA-512-256 and their `-sess` forms, `qop=auth`
 //! or none, and a hashed user name when the server asks for one. `auth-int`,
-//! which hashes the body too, is not answered; curl does not offer it for a
-//! proxy either. Bearer (RFC 6750) answers with a token the caller holds.
+//! which hashes the body too, is not answered. Bearer (RFC 6750) answers with a token the caller holds.
 //! Negotiate and NTLM need a security library of the system's and are not
 //! spoken: `pick` names them unsupported.
 
@@ -144,7 +143,7 @@ fn skip(text: []const u8, from: usize, set: []const u8) usize {
 }
 
 /// Which schemes may answer: `any` answers the strongest offered that is
-/// spoken here, Digest before Basic, as curl's anyauth picks; the others
+/// spoken here, Digest before Basic; the others
 /// answer only their own.
 pub const Method = enum { any, basic, digest };
 
@@ -157,7 +156,7 @@ pub const Pick = union(enum) {
     unsupported,
 };
 
-/// The challenge to answer out of `challenges`, as curl picks it. When none
+/// The challenge to answer out of `challenges`. When none
 /// can be, the offered schemes' names, `, `-joined, are written to
 /// `offered`, as many as fit.
 pub fn pick(challenges: []const Challenge, method: Method, offered: *Writer) Pick {
@@ -329,7 +328,7 @@ pub const Digest = struct {
         var user_buf: [max_hex]u8 = undefined;
         const shown_user = if (d.userhash) d.hash(&user_buf, &.{ user, ":", d.realm }) else user;
 
-        // curl's order.
+        // The fields in the order servers document them.
         try w.writeAll("Digest username=\"");
         try writeQuoted(w, shown_user);
         try w.writeAll("\", realm=\"");

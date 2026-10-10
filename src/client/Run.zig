@@ -102,7 +102,7 @@ pub fn init(c: *Shared, io: Io, request: Request) Error!Run {
     var deadline: ?Io.Timestamp = null;
     if (request.timeout.toTimestamp(io)) |t| {
         deadline = t.toClock(io, .awake).raw;
-        c.context.timer.tighten(io, Io.Clock.awake.now(io).durationTo(deadline.?));
+        c.context.deadlines.tighten(io, Io.Clock.awake.now(io).durationTo(deadline.?));
     }
     return .{
         .shared = c,
@@ -392,7 +392,7 @@ pub fn writeHead(run: *Run, io: Io, conn: *Connection, r: Context.Route, framing
     try url.writeAuthority(w, false);
     try w.writeAll("\r\n");
     if (conn.absolute_form) {
-        // Answered for with the path as the Digest target, as curl answers.
+        // Answered for with the path as the Digest target.
         const path = if (url.target.len != 0 and url.target[0] == '/') url.target else "/";
         const slot = r.proxy.?;
         _ = try slot.auth.writeField(io, w, slot.proxy.credential, run.method.name, path);
@@ -519,7 +519,7 @@ fn judge(run: *Run, io: Io, response: *Response) Error!Next {
 }
 
 /// A 407 from an HTTP proxy the request went to whole: answered, and the
-/// request sent again, as curl does; a stale Digest nonce once more.
+/// request sent again; a stale Digest nonce once more.
 fn answerProxy(run: *Run, io: Io, response: *Response) Error!bool {
     const r = try run.route(io);
     if (!absoluteForm(r)) return false;

@@ -6,6 +6,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const testing = std.testing;
+const test_io = @import("../testing/io.zig");
 const shakedown = @import("shakedown");
 const Client = @import("Client.zig");
 const tls = @import("../tls.zig");
@@ -32,7 +33,7 @@ fn trustServer(io: Io, pki: *openssl.Pki, trust: *tls.Trust) !void {
 
 test "a server is checked against the authorities given, in TLS 1.3 and 1.2" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     const pki = try openssl.Pki.make(gpa, io);
     defer pki.destroy();
     var trust: tls.Trust = .init(gpa);
@@ -113,7 +114,7 @@ fn loadAuth(gpa: Allocator, arena: Allocator, io: Io, pki: *openssl.Pki, cert_na
 
 test "a server's demand for a client certificate is answered in TLS 1.3 and 1.2, with RSA, ECDSA and Ed25519 keys, plain and encrypted" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     const pki = try openssl.Pki.make(gpa, io);
     defer pki.destroy();
     var trust: tls.Trust = .init(gpa);
@@ -155,11 +156,11 @@ test "a server's demand for a client certificate is answered in TLS 1.3 and 1.2,
 
 test "each handshake checks the server's certificate at the time it is made" {
     const gpa = testing.allocator;
-    const pki = try openssl.Pki.make(gpa, testing.io);
+    const pki = try openssl.Pki.make(gpa, test_io.io());
     defer pki.destroy();
-    var server = try openssl.SServer.start(gpa, testing.io, pki, .{});
-    defer server.stop(testing.io);
-    var clock: shakedown.Clock = .init(testing.io, .{ .real = Io.Clock.real.now(testing.io) });
+    var server = try openssl.SServer.start(gpa, test_io.io(), pki, .{});
+    defer server.stop(test_io.io());
+    var clock: shakedown.Clock = .init(test_io.io(), .{ .real = Io.Clock.real.now(test_io.io()) });
     const io = clock.io();
     var trust: tls.Trust = .init(gpa);
     defer trust.deinit();
@@ -186,7 +187,7 @@ test "each handshake checks the server's certificate at the time it is made" {
 
 test "TLS to the server runs inside a CONNECT tunnel and inside SOCKS" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     const pki = try openssl.Pki.make(gpa, io);
     defer pki.destroy();
     var server = try openssl.SServer.start(gpa, io, pki, .{});
@@ -203,7 +204,7 @@ test "TLS to the server runs inside a CONNECT tunnel and inside SOCKS" {
         const proxy_url = try std.mem.print(&proxy_url_buf, "{s}://user:secret@127.0.0.1:{d}", .{ if (kind == .http) "http" else "socks5h", proxy.port });
         var client: Client = .init(gpa, .{
             .tls = .{ .trust = &trust },
-            .proxy = .{ .fixed = try Proxy.parse(arena_state.allocator(), proxy_url, .curl) },
+            .proxy = .{ .fixed = try Proxy.parse(arena_state.allocator(), proxy_url, .lowercase) },
         });
         defer client.deinit(io);
         const page = try fetch(gpa, io, &client, server.port, null);
@@ -217,7 +218,7 @@ test "TLS to the server runs inside a CONNECT tunnel and inside SOCKS" {
 
 test "a handshake that does not come is given up on at the handshake timeout" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     const server = try Server.start(gpa, io, Server.fixedAnswer(.{ .silent = true }));
     defer server.stop();
     var client: Client = .init(gpa, .{ .tls = .{ .verify = .none }, .timeouts = .{ .handshake = .fromMilliseconds(100) } });
@@ -231,7 +232,7 @@ test "a handshake that does not come is given up on at the handshake timeout" {
 
 test "a session's secrets go to the key log the client was given, and nowhere else" {
     const gpa = testing.allocator;
-    const io = testing.io;
+    const io = test_io.io();
     const pki = try openssl.Pki.make(gpa, io);
     defer pki.destroy();
     var server = try openssl.SServer.start(gpa, io, pki, .{ .version = "-tls1_3" });

@@ -1,5 +1,5 @@
 //! The awake clock as a number: nanoseconds since its start, in an `i64`,
-//! as the timer keeps them in an atomic and the pool in its idle list. An
+//! as the pool keeps them in its idle list. An
 //! `Instant` is its own type, so a time read from another clock cannot
 //! meet one, and a span between two is checked.
 
@@ -21,7 +21,6 @@ pub fn now(io: Io) Instant {
 pub fn of(t: Io.Timestamp) Instant {
     return Instant.fromIoTimestamp(t.withClock(.awake), .exact) catch |err| switch (err) {
         error.Overflow => .fromRaw(if (t.nanoseconds < 0) std.math.minInt(i64) else std.math.maxInt(i64)),
-        error.Inexact => unreachable, // unreachable: nanoseconds convert to nanoseconds exactly
         error.ClockMismatch => unreachable, // unreachable: the timestamp was given the awake clock just above
     };
 }

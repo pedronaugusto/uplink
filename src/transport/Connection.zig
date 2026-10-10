@@ -7,9 +7,10 @@
 //! Every read and write on the socket goes through one place, which keeps
 //! the connection's deadlines: the activity timeout of the operation, the
 //! handshake's while one is under way, the request's own deadline, and the
-//! low-speed window's end. With the client's timer running the nearest is
-//! armed for the timer to keep; without one, the operation is bounded by
-//! the `Io` itself where it can be (`operateTimeout`), and counted as
+//! low-speed window's end. The nearest is kept by the client's
+//! `Deadlines`: in the kernel on a reactor runtime, by one task on any
+//! other `Io`. Where no task can be had for that, the operation is bounded
+//! by the `Io` itself where it can be (`operateTimeout`), and counted as
 //! unenforced where it cannot. An operation with no deadline to keep reads
 //! no clock. A connection whose deadline fired is never used again.
 //!
@@ -18,6 +19,7 @@
 
 const std = @import("std");
 const aegis = @import("aegis");
+const reactor = @import("reactor");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -25,13 +27,11 @@ const tls = @import("../tls.zig");
 const h1 = @import("../wire/h1.zig");
 const fields = @import("../wire/fields.zig");
 const socks = @import("../wire/socks.zig");
-const resolve = @import("../net/resolve.zig");
 const dial = @import("../net/dial.zig");
 const sys = @import("../net/sys.zig");
 const Context = @import("Context.zig");
 const Diagnostics = @import("Diagnostics.zig");
 const Proxy = @import("Proxy.zig");
-const Timer = @import("Timer.zig");
 
 const Connection = @This();
 
@@ -57,8 +57,8 @@ session_buffers: [2][2][]u8 = undefined,
 absolute_form: bool = false,
 /// Private: how deadlines are kept.
 mode: Mode = .unwatched,
-/// Private: the operation deadline the timer keeps.
-watch: Timer.Watch,
+/// Private: the operation deadline `Deadlines` keeps.
+watch: reactor.net.Deadlines.Watch,
 /// Private: when the handshake under way must be done, on the awake clock.
 handshake_until: ?Io.Timestamp = null,
 /// Private: the timeout `handshake_until` keeps, which for a SOCKS
@@ -79,8 +79,8 @@ diagnostics: ?*Diagnostics = null,
 const Mode = enum {
     /// No deadline kept yet: the first operation with one decides.
     unwatched,
-    /// The client's timer keeps them.
-    timer,
+    /// The client's `Deadlines` keep them.
+    deadlines,
     /// `Io.operateTimeout` keeps them.
     operate,
     /// Asked for, and nothing could keep them.
@@ -132,8 +132,8 @@ pub const OpenOptions = struct {
 /// A connection to `route`, through its proxy, with every layer started.
 pub fn open(ctx: *Context, io: Io, route: Context.Route, options: OpenOptions) OpenError!*Connection {
     // A proxy that asks for an answer to a tunnel is asked again on a new
-    // connection, as curl asks, with the answer; and once more for a
-    // Digest nonce gone stale.
+    // connection, with the answer; and once more for a Digest nonce gone
+    // stale.
     var attempts: u8 = 0;
     while (true) : (attempts += 1) {
         var again = false;
@@ -222,7 +222,7 @@ fn create(ctx: *Context, io: Io, route: Context.Route, stream: Io.net.Stream, di
         .route = route,
         .input = .init(read_buffer),
         .output = .init(write_buffer),
-        .watch = .{ .handle = stream.socket.handle },
+        .watch = .init(stream.socket.handle),
         .diagnostics = diagnostics,
     };
     @memcpy(conn.host_storage[0..route.host.len], route.host);
@@ -281,7 +281,7 @@ fn teardown(conn: *Connection, io: Io, polite: bool) void {
         for (conn.session_buffers[i]) |b| conn.ctx.buffers.release(io, b);
         conn.session_on[i] = false;
     }
-    if (conn.mode == .timer) conn.ctx.timer.remove(io, &conn.watch);
+    if (conn.mode == .deadlines) conn.ctx.deadlines.remove(io, &conn.watch);
     conn.stream.close(io);
     conn.releaseSocketBuffers(io);
     conn.ctx.gpa.destroy(conn);
@@ -497,10 +497,10 @@ fn missingCertificateReset(conn: *Connection) bool {
     return false;
 }
 
-/// Have the client's timer keep this connection's deadlines, or the `Io`
-/// when no task can be had for the timer.
+/// Have the client's `Deadlines` keep this connection's, or the `Io` when
+/// no task can be had for them.
 fn startWatch(conn: *Connection, io: Io) void {
-    conn.mode = if (conn.ctx.timer.add(io, &conn.watch)) .timer else .operate;
+    conn.mode = if (conn.ctx.deadlines.add(io, &conn.watch)) .deadlines else .operate;
 }
 
 /// A deadline, which limit it is, and the time it was found at.
@@ -538,11 +538,12 @@ fn perform(conn: *Connection, op: Io.Operation) error{Failed}!Io.Operation.Resul
     conn.armed = limit.kind;
     if (conn.mode == .unwatched) conn.startWatch(io);
     switch (conn.mode) {
-        .timer => {
-            const timer = &conn.ctx.timer;
-            timer.arm(io, &conn.watch, limit.at);
-            defer timer.disarm(&conn.watch);
-            return io.operate(op) catch return conn.fail(.canceled);
+        .deadlines => return conn.ctx.deadlines.operate(io, &conn.watch, op, .{ .raw = limit.at, .clock = .awake }) catch |err| switch (err) {
+            error.Timeout => {
+                conn.noteTimedOut(limit.kind);
+                return error.Failed;
+            },
+            error.Canceled => conn.fail(.canceled),
         },
         .operate => return io.operateTimeout(op, .{ .deadline = .{ .raw = limit.at, .clock = .awake } }) catch |err| switch (err) {
             error.Timeout => {
@@ -627,14 +628,7 @@ const SocketReader = struct {
             conn.note(.broken);
             return error.ReadFailed;
         }).data_len;
-        if (n == 0) {
-            // A socket the timer shut reads as ended.
-            if (conn.watch.fired.load(.acquire)) {
-                conn.noteTimedOut(conn.armed);
-                return error.ReadFailed;
-            }
-            return error.EndOfStream;
-        }
+        if (n == 0) return error.EndOfStream;
         conn.moved(n);
         if (n > data_size) {
             r.end += n - data_size;
@@ -694,8 +688,8 @@ fn startTls(conn: *Connection, slot: usize, host: []const u8) OpenError!void {
 }
 
 /// The authorities a session in `slot` checks its server against, or null
-/// for none. An `https` proxy of its own trust is always checked, as curl
-/// checks it whatever `verify` says.
+/// for none. An `https` proxy of its own trust is always checked, whatever
+/// `verify` says.
 fn trustFor(conn: *Connection, slot: usize) OpenError!?*tls.Trust {
     const ctx = conn.ctx;
     if (slot == 0) switch (conn.route.proxy.?.proxy.tls.trust) {
@@ -735,7 +729,7 @@ fn handshakeFailed(conn: *Connection, session: *tls.Session, err: tls.Session.St
     };
 }
 
-/// Ask the proxy for a tunnel to the route with `CONNECT`, as curl asks.
+/// Ask the proxy for a tunnel to the route with `CONNECT`.
 fn tunnel(conn: *Connection, proxy: Proxy, again: *bool) OpenError!void {
     const ctx = conn.ctx;
     const io = conn.io;
@@ -804,9 +798,9 @@ fn readHeadInPlace(r: *Io.Reader, field_buf: []fields.Field, max: u32) (h1.Parse
     }
 }
 
-/// Curl counts SOCKS negotiation, local lookup included, as connecting:
-/// it runs within what is left of the connect timeout, and each step
-/// within the handshake timeout too.
+/// SOCKS negotiation, local lookup included, counts as connecting: it runs
+/// within what is left of the connect timeout, and each step within the
+/// handshake timeout too.
 fn socksTunnel(conn: *Connection, proxy: Proxy, started: Io.Timestamp) OpenError!void {
     const ctx = conn.ctx;
     const io = conn.io;
@@ -827,9 +821,9 @@ fn socksTunnel(conn: *Connection, proxy: Proxy, started: Io.Timestamp) OpenError
     };
     conn.handshake_until = until;
     conn.handshake_bound = bound;
-    // The timer ticks fine enough for a negotiation bounded by `connect`
-    // alone, which no per-operation timeout sets its tick for.
-    if (until) |u| ctx.timer.tighten(io, Io.Clock.awake.now(io).durationTo(u));
+    // The deadlines tick fine enough for a negotiation bounded by `connect`
+    // alone, which no per-operation timeout sets their tick for.
+    if (until) |u| ctx.deadlines.tighten(io, Io.Clock.awake.now(io).durationTo(u));
     defer {
         conn.handshake_until = null;
         conn.handshake_bound = .handshake;
@@ -845,7 +839,7 @@ fn socksTunnel(conn: *Connection, proxy: Proxy, started: Io.Timestamp) OpenError
     const host = conn.route.host;
     if ((version == .socks4 or version == .socks4a) and std.mem.findScalar(u8, host, ':') != null) return error.ProxyAddressUnsupported;
     if (version == .socks5 or version == .socks5h) socks.authenticate(conn.reader(), conn.writer(), credential) catch |err| return conn.socksFailed(err);
-    const literal = resolve.literal(host, conn.route.port);
+    const literal = reactor.net.literal(host, conn.route.port);
     const address: ?Io.net.IpAddress = switch (version) {
         .socks4a => null,
         .socks5h => literal,
@@ -860,11 +854,11 @@ fn socksTunnel(conn: *Connection, proxy: Proxy, started: Io.Timestamp) OpenError
 }
 
 /// The target's address, looked up here for SOCKS4 and SOCKS5: the first
-/// IPv4 one for SOCKS4, which carries no other, and the first of curl's
-/// preferred family otherwise.
+/// IPv4 one for SOCKS4, which carries no other, and otherwise the first
+/// IPv6 one, else the first.
 fn socksLookup(conn: *Connection, ipv4: bool, until: ?Io.Timestamp) OpenError!Io.net.IpAddress {
     const io = conn.io;
-    var storage: [resolve.max_addresses]Io.net.IpAddress = undefined;
+    var storage: [reactor.net.max_addresses]Io.net.IpAddress = undefined;
     const timeout: ?Io.Duration = if (until) |u| Io.Clock.awake.now(io).durationTo(u) else null;
     if (timeout) |t| if (t.nanoseconds <= 0) return conn.timedOutOpen();
     var bounded = true;

@@ -1,10 +1,11 @@
 //! What every connection a client makes shares: its settings, its buffers,
-//! its timer, its proxies and their answers, its resolver and the
+//! its deadlines, its proxies and their answers, its resolver and the
 //! authorities it trusts. A client holds one, and each connection it opens
 //! points at it, so the client must not move once it has opened one.
 
 const std = @import("std");
 const aegis = @import("aegis");
+const reactor = @import("reactor");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const tls_mod = @import("../tls.zig");
@@ -14,14 +15,14 @@ const BufferPool = @import("BufferPool.zig");
 const Observer = @import("Observer.zig");
 const Proxy = @import("Proxy.zig");
 const ProxyAuth = @import("ProxyAuth.zig");
-const Timer = @import("Timer.zig");
 
 const Context = @This();
 
 gpa: Allocator,
 buffers: BufferPool,
-/// Keeps the deadlines of operations; its task starts at the first one.
-timer: Timer,
+/// Keeps the deadlines of operations: in the kernel on a reactor runtime,
+/// by one task on any other `Io`, started at the first one.
+deadlines: reactor.net.Deadlines,
 proxies: Proxies,
 tls: tls_mod.ClientOptions,
 system_trust: SystemTrust = .init,
@@ -64,7 +65,7 @@ pub fn init(gpa: Allocator, options: Options) Context {
     return .{
         .gpa = gpa,
         .buffers = .init(gpa, options.max_free_buffers),
-        .timer = .init(options.timeouts.shortestPerOperation()),
+        .deadlines = .init(options.timeouts.shortestPerOperation() orelse .fromSeconds(10)),
         .proxies = .init(gpa, options.proxy),
         .tls = options.tls,
         .timeouts = options.timeouts,
@@ -85,7 +86,7 @@ pub fn resolve(ctx: *Context) Resolver {
 
 /// Release what the connections shared. Every connection must be closed.
 pub fn deinit(ctx: *Context, io: Io) void {
-    ctx.timer.deinit(io);
+    ctx.deadlines.deinit(io);
     ctx.proxies.deinit(io);
     ctx.system_trust.deinit(io);
     if (ctx.dns_cache) |*c| c.deinit(io);
@@ -141,8 +142,7 @@ pub const Timeouts = struct {
     /// coming, a server that stops taking a body.
     activity: ?Io.Duration = null,
     /// A connection moving fewer than `bytes_per_second` on average over
-    /// `window`, while a request waits on it, is given up on: curl's
-    /// `LOW_SPEED_LIMIT` and `LOW_SPEED_TIME`, git's
+    /// `window`, while a request waits on it, is given up on: git's
     /// `http.lowSpeedLimit` and `http.lowSpeedTime`.
     low_speed: ?LowSpeed = null,
 
@@ -178,8 +178,8 @@ pub const Dial = struct {
     /// How long one address is tried alone before the next joins it
     /// (Happy Eyeballs, RFC 8305).
     attempt_delay: Io.Duration = .fromMilliseconds(250),
-    /// Connect to this Unix socket instead, whatever the URL's host: curl's
-    /// `--unix-socket`, for local daemons. The URL still names the `Host`.
+    /// Connect to this Unix socket instead, whatever the URL's host, for
+    /// local daemons. The URL still names the `Host`.
     unix_socket: ?[]const u8 = null,
 };
 
@@ -372,6 +372,7 @@ pub const SystemTrust = struct {
 };
 
 const testing = std.testing;
+const test_io = @import("../testing/io.zig");
 const Unwiped = @import("../testing/Unwiped.zig");
 
 test "routes are equal without case in the host, and the shortest per-operation timeout is found" {
@@ -388,12 +389,12 @@ test "routes are equal without case in the host, and the shortest per-operation 
 }
 
 test "the environment's proxies are read once per scheme, and no_proxy applies per request" {
-    const io = testing.io;
+    const io = test_io.io();
     var env: std.process.Environ.Map = .init(testing.allocator);
     defer env.deinit();
     try env.put("http_proxy", "http://user:pw@proxy.test:3128");
     try env.put("no_proxy", "internal.test");
-    var p: Proxies = .init(testing.allocator, .{ .environment = .{ .env = &env, .rules = .curl } });
+    var p: Proxies = .init(testing.allocator, .{ .environment = .{ .env = &env, .rules = .lowercase } });
     defer p.deinit(io);
     const slot = (try p.forUrl(io, try url_mod.parse("http://git.test/x"))).?;
     try testing.expectEqualStrings("proxy.test", slot.proxy.host);
@@ -402,18 +403,18 @@ test "the environment's proxies are read once per scheme, and no_proxy applies p
     try testing.expectEqual(null, try p.forUrl(io, try url_mod.parse("http://a.internal.test/")));
     try testing.expectEqual(null, try p.forUrl(io, try url_mod.parse("https://git.test/")));
     try env.put("https_proxy", "unsupported://x");
-    var bad: Proxies = .init(testing.allocator, .{ .environment = .{ .env = &env, .rules = .curl } });
+    var bad: Proxies = .init(testing.allocator, .{ .environment = .{ .env = &env, .rules = .lowercase } });
     defer bad.deinit(io);
     try testing.expectError(error.InvalidProxy, bad.forUrl(io, try url_mod.parse("https://git.test/")));
 }
 
 test "an environment proxy's password is in no freed memory unwiped" {
-    const io = testing.io;
+    const io = test_io.io();
     var env: std.process.Environ.Map = .init(testing.allocator);
     defer env.deinit();
     try env.put("http_proxy", "http://user:pwtoken%21@proxy.test:3128");
     var unwiped: Unwiped = .init(testing.allocator, "pwtoken");
-    var p: Proxies = .init(unwiped.allocator(), .{ .environment = .{ .env = &env, .rules = .curl } });
+    var p: Proxies = .init(unwiped.allocator(), .{ .environment = .{ .env = &env, .rules = .lowercase } });
     const slot = (try p.forUrl(io, try url_mod.parse("http://git.test/x"))).?;
     try testing.expectEqualStrings("proxy.test", slot.proxy.host);
     try testing.expectEqualStrings("user", slot.proxy.credential.?.user);
@@ -424,7 +425,7 @@ test "an environment proxy's password is in no freed memory unwiped" {
 
 test "a zstd window is kept for the next body, and one past it freed" {
     var ctx: Context = .init(testing.allocator, .{ .max_free_buffers = 1, .max_zstd_window = .fromRaw(1 << 10) });
-    defer ctx.deinit(testing.io);
+    defer ctx.deinit(test_io.io());
     const a = try ctx.acquireZstdWindow();
     const b = try ctx.acquireZstdWindow();
     ctx.releaseZstdWindow(a);

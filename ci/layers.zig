@@ -50,9 +50,6 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "net system", .patterns = &.{
         "src/net/sys.zig",
     } },
-    .{ .name = "net lookup", .patterns = &.{
-        "src/net/resolve.zig",
-    } },
     .{ .name = "net resolver", .patterns = &.{
         "src/net/Resolver.zig",
     } },
@@ -70,7 +67,6 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/transport/Diagnostics.zig",
         "src/transport/BufferPool.zig",
         "src/transport/Observer.zig",
-        "src/transport/Timer.zig",
     } },
     .{ .name = "transport shared", .patterns = &.{
         "src/transport/ProxyAuth.zig",
@@ -127,9 +123,11 @@ pub const references: []const gantry.rules.ReferenceRule = &.{
     .{ .name = "named dependencies", .unresolved_only = true, .except_targets = &.{
         "aegis",
         "builtin",
+        "reactor",
         "shakedown",
         "std",
         "std_tls_client",
+        "test_io",
         "uplink",
     } },
     .{ .name = "source siblings", .suffix = ".zig", .relative = true, .except_targets = &.{"src/**"} },

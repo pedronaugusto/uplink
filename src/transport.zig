@@ -11,8 +11,6 @@ pub const Proxy = @import("transport/Proxy.zig");
 pub const ProxyAuth = @import("transport/ProxyAuth.zig");
 /// The I/O buffers connections and exchanges borrow.
 pub const BufferPool = @import("transport/BufferPool.zig");
-/// The task that keeps read and write timeouts.
-pub const Timer = @import("transport/Timer.zig");
 /// The awake clock as a checked number.
 pub const awake = @import("transport/awake.zig");
 /// Why an exchange failed, in detail.
@@ -26,7 +24,6 @@ test {
     _ = Proxy;
     _ = ProxyAuth;
     _ = BufferPool;
-    _ = Timer;
     _ = awake;
     _ = Diagnostics;
     _ = Observer;

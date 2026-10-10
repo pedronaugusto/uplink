@@ -1,7 +1,8 @@
 //! The HTTP version a message was exchanged in.
 
-/// `h2` is spoken from uplink's HTTP/2 phase on; `h3` is reserved for the
-/// QUIC package, so a `switch` written today stays exhaustive then.
+/// The versions uplink exchanges messages in are `http1_0` and `http1_1`.
+/// `h2` and `h3` are named so that a `switch` over a version is exhaustive;
+/// no message is read or written in either.
 pub const Version = enum {
     http1_0,
     http1_1,
