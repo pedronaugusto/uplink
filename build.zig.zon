@@ -16,18 +16,19 @@
     },
     .dependencies = .{
         .aegis = .{
-            .url = "git+https://github.com/pedronaugusto/aegis#28e8df5b3fde1fca2d5b61f6ab110c4acac2f688",
-            .hash = "aegis-0.0.0-rsxougITBwB_VYWvOCMfzQ4ra79s9U5QTAiuKH6ZWOl5",
+            .url = "git+https://github.com/pedronaugusto/aegis#39d3bea8da17f1094ee85577e636b127f93e0973",
+            .hash = "aegis-0.0.0-rsxouiIXBwCCAncc-oK7MrA3OcZBLFlIBm1d0K9ME3uR",
         },
 
         .reactor = .{
-            .url = "git+https://github.com/pedronaugusto/reactor#6c7bdc53041f5be6fdd9abedb18ca82bf4e0a571",
-            .hash = "reactor-0.1.0-MjQ-WBcZEgAC9meGd696FQWIOuyVFa7HiGcGrkZepHkX",
+            .url = "git+https://github.com/pedronaugusto/reactor#b593f969e9513e6ea92dcf1d66cea356c46ae9a0",
+            .hash = "reactor-0.1.0-MjQ-WAofEgC6lAdvnmSzINVwRH4cQEdWULjbSu1nYXuw",
             .lazy = true,
         },
+
         .cloak = .{
-            .url = "git+https://github.com/pedronaugusto/cloak#d624bba120f3200bfccfd30e141c0cd7e2100752",
-            .hash = "cloak-0.1.0-9onwcT3d8QLaVCrlrklO4F2AdBEG8dE1gqhMNG2opkSO",
+            .url = "git+https://github.com/pedronaugusto/cloak#ee73c129d1f130c98fb5faadd568cb760c0fe3a7",
+            .hash = "cloak-0.1.0-9onwcUTw8QL1GPTTw_bmgpiBwVh2UNSlEEm9hE7m5ano",
             .lazy = true,
         },
     },
