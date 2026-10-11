@@ -248,11 +248,16 @@ reactor's runtime both are kept on every system.
 - [preflight](https://github.com/pedronaugusto/preflight) runs the source checks,
   the tests and CI.
 - [shakedown](https://github.com/pedronaugusto/shakedown) is the layered `Io`,
-  manual clock and counting allocator the tests run on, fetched only for them.
+  manual clock and counting allocator the tests run on.
+
+preflight and shakedown are dev dependencies, which [bay](https://github.com/pedronaugusto/bay)
+gives uplink's own development and a project that depends on uplink never sees.
 
 ## Testing
 
-`zig build test` runs the unit suite and the example. The suite runs twice,
+Development runs through bay.
+
+`bay test` runs the unit suite and the example. The suite runs twice,
 on `Io.Threaded` and on a reactor runtime; the codecs, which take no `Io`, run
 once. They are tested rule by rule and fuzzed: the response parser is held to a reference written
 from RFC 9112's grammar on fixed and random heads, references are resolved as
@@ -275,7 +280,7 @@ refused, client certificates of the key kinds cloak signs with and an RSA one
 refused, a certificate checked at a stepped clock, and TLS inside a `CONNECT`
 tunnel and SOCKS.
 
-`zig build bench` measures head parsing, chunked decoding, Server-Sent Events
+`bay bench` measures head parsing, chunked decoding, Server-Sent Events
 and `Set-Cookie` reading, keep-alive requests with their latency percentiles
 plain, with cookies and with a kept answer, a redirect, tasks sharing a
 client, and downloads plain, chunked and gzip, against a server in the same
