@@ -31,12 +31,11 @@ pub fn build(b: *std.Build) void {
 }
 
 /// uplink's development: its tests, example, checks and benchmarks, under
-/// preflight's gate, with shakedown bound to uplink's aegis. Run through bay.
+/// preflight's gate. Run through bay.
 pub fn dev(b: *std.Build, tools: type) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const preflight = tools.preflight;
-    use_aegis = tools.shakedown.useAegis;
     const package = b.dependency("uplink", .{ .target = target, .optimize = optimize });
     const p = package.builder;
     const aegis_package = p.dependency("aegis", .{ .target = target, .optimize = optimize });
@@ -46,7 +45,7 @@ pub fn dev(b: *std.Build, tools: type) void {
     const cloak_package = p.dependencyLazy("cloak", .{ .target = target, .optimize = optimize }) catch return;
     const reactor = reactor_package.module("reactor");
     const cloak = cloak_package.module("cloak");
-    const shakedown = boundShakedown(b, target, optimize);
+    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
 
     const module = package.module("uplink");
     const wire = package.module("uplink.wire");
@@ -158,32 +157,21 @@ pub fn dev(b: *std.Build, tools: type) void {
     addColdConsumerCheck(b, p);
 }
 
-/// `tools.shakedown.useAegis`, set by `dev` for the benchmark imports, which are built without `tools`.
-var use_aegis: *const fn (*std.Build.Dependency, *std.Build.Module) void = undefined;
-
 /// uplink in the mode a benchmark builds in: an imported module keeps its
 /// own mode, so a ReleaseFast benchmark over the Debug module would time
-/// the Debug module. And shakedown, bound to uplink's aegis.
+/// the Debug module. And shakedown.
 fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) []const std.Build.Module.Import {
     const package = b.dependency("uplink", .{ .target = target, .optimize = optimize });
     const p = package.builder;
     const reactor = p.dependency("reactor", .{ .target = target, .optimize = optimize }).module("reactor");
     const cloak = p.dependency("cloak", .{ .target = target, .optimize = optimize }).module("cloak");
-    const shakedown = boundShakedown(b, target, optimize);
+    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
     return b.allocator.dupe(std.Build.Module.Import, &.{
         .{ .name = "uplink", .module = package.module("uplink") },
         .{ .name = "reactor", .module = reactor },
         .{ .name = "cloak", .module = cloak },
         .{ .name = "shakedown", .module = shakedown.module("shakedown") },
     }) catch @panic("OOM");
-}
-
-/// shakedown bound to uplink's aegis, so a build links one aegis.
-fn boundShakedown(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) *std.Build.Dependency {
-    const p = b.dependency("uplink", .{ .target = target, .optimize = optimize }).builder;
-    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize, .aegis = .consumer });
-    use_aegis(shakedown, p.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis"));
-    return shakedown;
 }
 
 /// What the build publishes: the codecs, and with a client, everything.
