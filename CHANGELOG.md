@@ -10,22 +10,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - uplink is developed with [bay](https://github.com/pedronaugusto/bay): preflight and shakedown are dev dependencies, and the tests, example, checks and benchmarks are the development build's (`bay test`, `bay check`, `bay bench`). uplink ships with aegis and, for the client, the lazy reactor and cloak, and the option `-Dclient`; what a project that depends on it builds is unchanged.
 
-### Fixed
-
-- A client checks a server against the system's authorities on macOS and Windows: cloak verifies a snapshot of the system's policy with the system's own verifier, where it handed it, rootless, to the portable verifier, so no public server verified there. A host written with its trailing dot (`example.com.`) is opened; a CA file with comments before its certificates, as curl's bundle and the Fedora and RHEL bundles have, is read.
-
-### Changed
-
-- The Smith fuzz tests are shakedown `check` properties.
-- Breaking: TLS is [cloak](https://github.com/pedronaugusto/cloak)'s. The copy of std's TLS client with client authentication, its recorded diff and check, `tls.Trust`, `tls.ClientAuth`, `tls.PrivateKey`, `tls.key` and `tls.Session` are gone; `tls.ClientOptions` takes a `cloak.Trust.Snapshot` for `trust` and a `cloak.ClientAuth` for `client_auth` (build them with cloak's `Trust.addPem`, `PrivateKey.parse` and `ClientAuth.initPem`), `Proxy.Tls` the same, and `Diagnostics.tls_alert` is a `cloak.tls.Alert`, the server's or the one the client sent for a failure of its own. `Diagnostics.tls_error` names what cloak reports (`PeerAlert`, `VerificationRejected`) instead of `TlsAlert...` and `Certificate...` errors.
-- Breaking: TLS 1.3 only, until cloak adds TLS 1.2, which the std client's fork spoke: a server that speaks only TLS 1.2 is turned away with a `protocol_version` alert. A client key that is RSA fails a handshake with `ClientCertificateSchemeUnsupported` until cloak signs with RSA-PSS; ECDSA on P-256 and P-384 and Ed25519 keys are answered. A server's request for a certificate a client has no usable scheme for is no longer an error of its own: the client sends none and the server decides.
-- cloak is a lazy dependency like reactor, fetched only for the client; `uplink.wire` still imports `std` and aegis alone. On macOS and Windows cloak links the platform's trust store.
-- The family's newest aegis, preflight, shakedown and reactor; the exception files and `ci/glint.json` give way to glint's rules in `ci/preflight.json` (Z026 gates) and `glint-ignore` comments at the sites.
-
 ### Added
 
 - `check-cold-consumer`: a project that depends on uplink as a client is built from an empty package cache, so the module is declared before the lazy dependencies are fetched.
-
 - `Client`: HTTP/1.1 requests over kept connections, shared by tasks, with
   `send` for a body given whole or from a reader and `begin` for one the caller
   writes. A kept connection is checked before reuse, and a request that fails
@@ -95,6 +82,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The Smith fuzz tests are shakedown `check` properties.
+- Breaking: TLS is [cloak](https://github.com/pedronaugusto/cloak)'s. The copy of std's TLS client with client authentication, its recorded diff and check, `tls.Trust`, `tls.ClientAuth`, `tls.PrivateKey`, `tls.key` and `tls.Session` are gone; `tls.ClientOptions` takes a `cloak.Trust.Snapshot` for `trust` and a `cloak.ClientAuth` for `client_auth` (build them with cloak's `Trust.addPem`, `PrivateKey.parse` and `ClientAuth.initPem`), `Proxy.Tls` the same, and `Diagnostics.tls_alert` is a `cloak.tls.Alert`, the server's or the one the client sent for a failure of its own. `Diagnostics.tls_error` names what cloak reports (`PeerAlert`, `VerificationRejected`) instead of `TlsAlert...` and `Certificate...` errors.
+- Breaking: TLS 1.3 only, until cloak adds TLS 1.2, which the std client's fork spoke: a server that speaks only TLS 1.2 is turned away with a `protocol_version` alert. A client key that is RSA fails a handshake with `ClientCertificateSchemeUnsupported` until cloak signs with RSA-PSS; ECDSA on P-256 and P-384 and Ed25519 keys are answered. A server's request for a certificate a client has no usable scheme for is no longer an error of its own: the client sends none and the server decides.
+- cloak is a lazy dependency like reactor, fetched only for the client; `uplink.wire` still imports `std` and aegis alone. On macOS and Windows cloak links the platform's trust store.
+- The family's newest aegis, preflight, shakedown and reactor; the exception files and `ci/glint.json` give way to glint's rules in `ci/preflight.json` (Z026 gates) and `glint-ignore` comments at the sites.
+- Pins aegis 0.1.0, reactor 0.2.0 and cloak 0.2.0.
 - reactor is a lazy dependency, fetched only for the client: a project that
   sets `.client = false` does not fetch it.
 - Depends on [reactor](https://github.com/pedronaugusto/reactor), the family's
@@ -107,7 +100,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   connect timeout (`Kqueue`). The test suite runs twice, on `Io.Threaded` and
   on a reactor runtime, and the benchmarks run on a runtime unless asked for
   `--io threaded`.
-- Pins the newest aegis, preflight, shakedown and reactor.
 - Depends on aegis, the family's std-only safety library. Locks sit beside the
   data they guard (`BlockingGuarded`) in the pool, the buffer pool, the
   cookie jar, the answers kept per origin and for the proxy, the name cache,
@@ -130,3 +122,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Breaking: `Pool.Options.drain_limit`, `Client.Options.max_zstd_window` and
   `Timeouts.lowSpeedNeed` are aegis byte counts (`units.Bytes`): construct
   with `.fromRaw(n)`, read with `.raw()`.
+
+### Fixed
+
+- A client checks a server against the system's authorities on macOS and Windows: cloak verifies a snapshot of the system's policy with the system's own verifier, where it handed it, rootless, to the portable verifier, so no public server verified there. A host written with its trailing dot (`example.com.`) is opened; a CA file with comments before its certificates, as common CA bundles and the Fedora and RHEL bundles have, is read.
+
+[Unreleased]: https://github.com/pedronaugusto/uplink/commits/main
