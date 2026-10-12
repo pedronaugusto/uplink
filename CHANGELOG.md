@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-12
+
 ### Fixed
 
 - A closed connection gives its room on a limited route back. Closing it read its route's host from the connection after freeing it, so the pool could miss the route: a request waiting for the route then waited forever, and a read of the freed bytes could crash, as it did on Windows in ReleaseSafe. The pool closes a connection itself now, its route read first, and a route it does not know is an assertion, not a silent miss.
