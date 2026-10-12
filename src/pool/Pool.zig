@@ -278,6 +278,22 @@ pub fn keep(p: *Pool, io: Io, k: Kind) Kept {
     return kept;
 }
 
+/// Close `k` and give its room on its route to the first exchange waiting
+/// for the route. Its route is read before it is freed: the route's host
+/// is the connection's own bytes.
+pub fn close(p: *Pool, io: Io, k: Kind) void {
+    switch (k) {
+        .h1 => |conn| {
+            var host: [Io.net.HostName.max_len]u8 = undefined;
+            var route = conn.route;
+            @memcpy(host[0..route.host.len], route.host);
+            route.host = host[0..route.host.len];
+            conn.close(io);
+            p.closed(io, route);
+        },
+    }
+}
+
 /// A connection of `route` was closed, or one the pool made room for could
 /// not be opened: its room goes to the first exchange waiting for the
 /// route.
@@ -286,15 +302,17 @@ pub fn closed(p: *Pool, io: Io, route: Route) void {
     var held = p.state.acquireUncancelable(io);
     defer held.deinit(io);
     const s = held.value();
-    const state = findState(s, route) orelse return;
-    if (state.waiters.popFirst()) |node| {
+    const state = findState(s, route);
+    aegis.assert.invariant(state != null, "a limited route keeps its state while anything is open on it");
+    const limited = state.?;
+    if (limited.waiters.popFirst()) |node| {
         const w: *Waiter = @fieldParentPtr("node", node);
         w.granted = .open;
         w.event.set(io);
         return;
     }
-    state.open -= 1;
-    p.forget(s, state);
+    limited.open -= 1;
+    p.forget(s, limited);
 }
 
 fn findState(s: *State, route: Route) ?*RouteState {

@@ -198,19 +198,19 @@ pub fn acquire(run: *Run, io: Io, r: Context.Route) Error!Lease {
             error.OutOfMemory => error.OutOfMemory,
         };
         switch (got) {
-            .expired => |k| Response.closeConnection(io, &c.pool, k.h1),
+            .expired => |k| c.pool.close(io, k),
             .idle => |k| {
                 const conn = k.h1;
                 conn.unpark(io, d, run.deadline) catch {
-                    Response.closeConnection(io, &c.pool, conn);
+                    c.pool.close(io, .{ .h1 = conn });
                     return error.OutOfMemory;
                 };
                 const alive = conn.alive(io) catch {
-                    Response.closeConnection(io, &c.pool, conn);
+                    c.pool.close(io, .{ .h1 = conn });
                     return error.Canceled;
                 };
                 if (!alive) {
-                    Response.closeConnection(io, &c.pool, conn);
+                    c.pool.close(io, .{ .h1 = conn });
                     continue;
                 }
                 _ = c.context.counters.in_use.fetchAdd(1, .monotonic);

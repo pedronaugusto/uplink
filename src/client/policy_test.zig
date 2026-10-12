@@ -437,6 +437,25 @@ test "a route at its limit makes requests wait their turn, or time out waiting" 
     try testing.expectEqual(Diagnostics.Timeout.deadline, d.timeout.?);
 }
 
+test "a client with a route limit closes its kept connections reading no connection it freed" {
+    // Freed memory stays inaccessible on this allocator: a read of a closed
+    // connection's bytes faults here, where another allocator hands them out
+    // again and the read goes on with whatever is there.
+    var quarantine: shakedown.alloc.Quarantine = .init(.{});
+    defer quarantine.deinit();
+    const io = test_io.io();
+    const server = try Server.start(testing.allocator, io, .{ .answer = slowOk });
+    defer server.stop();
+    var client: Client = .init(quarantine.allocator(), .{ .pool = .{ .max_per_route = 1 } });
+    var buf: [64]u8 = undefined;
+    var response = try client.send(io, .{ .url = server.url(&buf, "/") });
+    const body = try response.reader(io).allocRemaining(testing.allocator, .unlimited);
+    defer testing.allocator.free(body);
+    response.deinit(io);
+    try testing.expectEqual(@as(u32, 1), client.stats().idle);
+    client.deinit(io);
+}
+
 fn kib(_: ?*anyopaque, _: Server.Request) Server.Answer {
     const body: [1000]u8 = @splat('k');
     return .{ .bytes = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3e8\r\n" ++ body ++ "\r\n0\r\n\r\n" };

@@ -51,8 +51,6 @@ pub fn readFailure(u: *Upgraded) Error {
 /// Close the stream; TLS close_notify is sent as a courtesy.
 pub fn close(u: *Upgraded, io: Io) void {
     _ = u.ctx.counters.in_use.fetchSub(1, .monotonic);
-    const route = u.conn.route;
-    u.conn.close(io);
-    u.pool.closed(io, route);
+    u.pool.close(io, .{ .h1 = u.conn });
     u.* = undefined;
 }

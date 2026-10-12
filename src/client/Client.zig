@@ -47,9 +47,7 @@ pub fn init(gpa: Allocator, options: Options) Client {
 /// connections must have been released first.
 pub fn deinit(c: *Client, io: Io) void {
     const s = &c.shared;
-    while (s.pool.drain(io)) |k| switch (k) {
-        .h1 => |conn| Response.closeConnection(io, &s.pool, conn),
-    };
+    while (s.pool.drain(io)) |k| s.pool.close(io, k);
     s.pool.deinit(io);
     s.origin_auth.deinit(io);
     s.context.deinit(io);

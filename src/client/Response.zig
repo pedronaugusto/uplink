@@ -267,19 +267,10 @@ fn drain(r: *Response, io: Io) void {
 /// and one idle past its time.
 pub fn release(io: Io, ctx: *Context, pool: *Pool, conn: *Connection, reusable: bool) void {
     _ = ctx.counters.in_use.fetchSub(1, .monotonic);
-    if (!reusable) return closeConnection(io, pool, conn);
+    if (!reusable) return pool.close(io, .{ .h1 = conn });
     conn.park(io);
     const kept = pool.keep(io, .{ .h1 = conn });
-    for ([_]?Pool.Kind{ kept.evicted, kept.expired }) |out| if (out) |k| switch (k) {
-        .h1 => |old| closeConnection(io, pool, old),
-    };
-}
-
-/// Close a connection and give its room on its route to whoever waits.
-pub fn closeConnection(io: Io, pool: *Pool, conn: *Connection) void {
-    const route = conn.route;
-    conn.close(io);
-    pool.closed(io, route);
+    for ([_]?Pool.Kind{ kept.evicted, kept.expired }) |out| if (out) |k| pool.close(io, k);
 }
 
 /// Errors from `receive`.
