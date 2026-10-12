@@ -21,8 +21,8 @@
         },
 
         .reactor = .{
-            .url = "git+https://github.com/pedronaugusto/reactor?ref=v0.2.0#e5069cea36f20594cebbc6c32747f1a94f32dba1",
-            .hash = "reactor-0.2.0-MjQ-WF9DEgDm8j8fBmuYG979mFHaswclSb9hrd4gLmag",
+            .url = "git+https://github.com/pedronaugusto/reactor?ref=v0.2.1#f4733da0c0e92b2f0a96dae7b4a5e043e3718153",
+            .hash = "reactor-0.2.1-MjQ-WOZWEgDai5lRCCxP2m4QKpuXWKjAkOIrZdtuiA0N",
             .lazy = true,
         },
 
@@ -39,8 +39,8 @@
         },
 
         .shakedown = .{
-            .url = "git+https://github.com/pedronaugusto/shakedown?ref=v0.2.1#31e4036197f36dd92c263d34c908848b97e3e4f8",
-            .hash = "shakedown-0.2.1-BR8U48jSFQDHrJkjwgjK5ncP7HKgi8fvB7jZZOXDW6d0",
+            .url = "git+https://github.com/pedronaugusto/shakedown?ref=v0.2.3#d7a3d13d7bf840fb05f18b65da93470746df2c51",
+            .hash = "shakedown-0.2.3-BR8U4-8QFgDdE0m7CkgF-6_8mzBK9fD2TPdRE7FFj2zv",
         },
     },
 }

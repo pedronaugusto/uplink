@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Pins reactor 0.2.1, whose context switch keeps the vector registers on x86_64: on Windows, in optimized builds, a request read values a task held in them across a switch after another task had overwritten them, and crashed or hung.
+
 ## [0.2.1] - 2026-10-12
 
 ### Fixed
