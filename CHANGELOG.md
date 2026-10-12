@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-10-12
+
+### Changed
+
+- Pins aegis 0.1.1, reactor 0.2.2, cloak 0.2.1, preflight 0.3.4 and shakedown 0.2.6.
+
 ## [0.2.2] - 2026-10-12
 
 ### Fixed
