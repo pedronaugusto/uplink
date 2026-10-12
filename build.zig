@@ -165,12 +165,10 @@ fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.l
     const p = package.builder;
     const reactor = p.dependency("reactor", .{ .target = target, .optimize = optimize }).module("reactor");
     const cloak = p.dependency("cloak", .{ .target = target, .optimize = optimize }).module("cloak");
-    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
     return b.allocator.dupe(std.Build.Module.Import, &.{
         .{ .name = "uplink", .module = package.module("uplink") },
         .{ .name = "reactor", .module = reactor },
         .{ .name = "cloak", .module = cloak },
-        .{ .name = "shakedown", .module = shakedown.module("shakedown") },
     }) catch @panic("OOM");
 }
 
