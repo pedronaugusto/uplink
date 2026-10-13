@@ -162,11 +162,10 @@ pub fn dev(b: *std.Build, tools: type) void {
             .optimize = optimize,
         },
     });
-    // A project that depends on uplink by path, with only aegis, reactor
-    // (and the shuttle it switches tasks with), cloak and warp to fetch:
-    // the build a client's user gets.
-    const shuttle_package = reactor_package.builder.dependency("shuttle", .{ .target = target, .optimize = optimize });
-    preflight.addConsumerCheck(b, p, .{ .package = "uplink", .program = p.path("ci/consumer.zig"), .modules = &.{ "uplink", "uplink.wire" }, .packages = &.{ aegis_package, reactor_package, shuttle_package, cloak_package, warp_package } });
+    // A project that depends on uplink by path, with only aegis, reactor,
+    // cloak and warp (and what they depend on) to fetch: the build a
+    // client's user gets.
+    preflight.addConsumerCheck(b, p, .{ .package = "uplink", .program = p.path("ci/consumer.zig"), .modules = &.{ "uplink", "uplink.wire" }, .packages = &.{ aegis_package, reactor_package, cloak_package, warp_package } });
     addWireConsumerCheck(b, p, aegis_package);
     addColdConsumerCheck(b, p);
 }
