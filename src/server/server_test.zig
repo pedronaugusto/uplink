@@ -1,0 +1,308 @@
+//! The server over loopback: against uplink's own client, and against raw
+//! bytes where the bytes are the point (pipelining, smuggling, limits).
+
+const std = @import("std");
+const Io = std.Io;
+const testing = std.testing;
+const test_io = @import("../testing/io.zig");
+const Client = @import("../client/Client.zig");
+const Server = @import("Server.zig");
+const Request = @import("Request.zig");
+const Response = @import("Response.zig");
+const repeat = @import("shakedown").corpus.repeat;
+
+/// A server listening on 127.0.0.1, serving on a task of its own.
+const Running = struct {
+    server: Server,
+    listener: Io.net.Server,
+    task: Io.Future(Server.ServeError!void),
+    port: u16,
+
+    fn start(gpa: std.mem.Allocator, options: Server.Options, handler: Server.Handler) !*Running {
+        const io = test_io.io();
+        const r = try gpa.create(Running);
+        errdefer gpa.destroy(r);
+        r.listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
+        errdefer r.listener.deinit(io);
+        r.port = r.listener.socket.address.getPort();
+        r.server = .init(gpa, options, handler);
+        r.task = io.concurrent(Server.serve, .{ &r.server, io, &r.listener }) catch return error.SkipZigTest;
+        return r;
+    }
+
+    fn stop(r: *Running) void {
+        r.halt();
+        r.free();
+    }
+
+    /// Shut the server down and wait for `serve` to return.
+    fn halt(r: *Running) void {
+        const io = test_io.io();
+        r.server.shutdown(io);
+        // glint-ignore: Z026 -- serve ends with the shutdown; its result is not what the test checks
+        r.task.await(io) catch {};
+    }
+
+    fn free(r: *Running) void {
+        const io = test_io.io();
+        r.server.deinit(io);
+        r.listener.deinit(io);
+        testing.allocator.destroy(r);
+    }
+
+    fn url(r: *const Running, buffer: []u8, path: []const u8) []const u8 {
+        return std.mem.print(buffer, "http://127.0.0.1:{d}{s}", .{ r.port, path }) catch unreachable; // unreachable: callers pass room for a URL
+    }
+
+    /// Send `bytes` on a fresh connection and read until the server
+    /// closes it, or `limit` bytes.
+    fn raw(r: *const Running, gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+        const io = test_io.io();
+        const address = try Io.net.IpAddress.parse("127.0.0.1", r.port);
+        const stream = try address.connect(io, .{ .mode = .stream });
+        defer stream.close(io);
+        var wbuf: [1024]u8 = undefined;
+        var w = stream.writer(io, &wbuf);
+        try w.interface.writeAll(bytes);
+        try w.interface.flush();
+        var rbuf: [4096]u8 = undefined;
+        var rd = stream.reader(io, &rbuf);
+        return rd.interface.allocRemaining(gpa, .limited(1 << 20)) catch |err| switch (err) {
+            error.ReadFailed => gpa.dupe(u8, ""),
+            else => |e| e,
+        };
+    }
+};
+
+fn hello(_: Io, request: *Request, response: *Response) anyerror!void {
+    try response.header("Content-Type", "text/plain");
+    if (std.mem.eql(u8, request.path, "/stream")) {
+        const w = try response.writer(test_io.io());
+        for (0..1000) |i| try w.print("line {d}\n", .{i});
+        return response.end(test_io.io());
+    }
+    try response.send(test_io.io(), "hello");
+}
+
+test "a client's requests are answered over one kept connection" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const running = try Running.start(gpa, .{}, .of(hello));
+    defer running.stop();
+    var client: Client = .init(gpa, .{});
+    defer client.deinit(io);
+    var buf: [64]u8 = undefined;
+    for (0..10) |_| {
+        var response = try client.send(io, .{ .url = running.url(&buf, "/") });
+        defer response.deinit(io);
+        try testing.expectEqual(std.http.Status.ok, response.status);
+        try testing.expectEqualStrings("text/plain", response.headers.get("content-type").?);
+        try testing.expect(response.headers.get("date") != null);
+        const body = try response.collect(gpa, io, .limited(1 << 20));
+        defer gpa.free(body);
+        try testing.expectEqualStrings("hello", body);
+    }
+    try testing.expectEqual(@as(u64, 1), client.stats().connections_opened);
+    try testing.expectEqual(@as(u64, 10), running.server.counters.requests.load(.monotonic));
+}
+
+test "a body longer than the buffer is chunked, and one that fits goes with its length" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const running = try Running.start(gpa, .{}, .of(hello));
+    defer running.stop();
+    var client: Client = .init(gpa, .{});
+    defer client.deinit(io);
+    var buf: [64]u8 = undefined;
+    var response = try client.send(io, .{ .url = running.url(&buf, "/stream") });
+    defer response.deinit(io);
+    try testing.expectEqualStrings("chunked", response.headers.get("transfer-encoding").?);
+    const body = try response.collect(gpa, io, .limited(1 << 20));
+    defer gpa.free(body);
+    try testing.expect(std.mem.startsWith(u8, body, "line 0\nline 1\n"));
+    try testing.expect(std.mem.endsWith(u8, body, "line 999\n"));
+    const plain = try running.raw(gpa, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    defer gpa.free(plain);
+    try testing.expect(std.mem.find(u8, plain, "Content-Length: 5\r\n") != null);
+    try testing.expect(std.mem.find(u8, plain, "Connection: close\r\n") != null);
+    try testing.expect(std.mem.endsWith(u8, plain, "\r\n\r\nhello"));
+}
+
+fn echo(io: Io, request: *Request, response: *Response) anyerror!void {
+    const body = try request.collect(testing.allocator, io, .limited(1 << 20));
+    defer testing.allocator.free(body);
+    try response.send(io, body);
+}
+
+test "pipelined requests are answered in order, each body read as framed" {
+    const gpa = testing.allocator;
+    const running = try Running.start(gpa, .{}, .of(echo));
+    defer running.stop();
+    const got = try running.raw(gpa, "POST /a HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\none" ++
+        "POST /b HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n3\r\ntwo\r\n0\r\n\r\n" ++
+        "POST /c HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nConnection: close\r\n\r\nthree");
+    defer gpa.free(got);
+    const first = std.mem.find(u8, got, "\r\n\r\none").?;
+    const second = std.mem.find(u8, got, "\r\n\r\ntwo").?;
+    const third = std.mem.find(u8, got, "\r\n\r\nthree").?;
+    try testing.expect(first < second and second < third);
+    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, got, "HTTP/1.1 200 OK\r\n"));
+}
+
+test "a client that expects 100 Continue gets it, and its body is echoed" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const running = try Running.start(gpa, .{}, .of(echo));
+    defer running.stop();
+    var client: Client = .init(gpa, .{ .expect_continue_timeout = .literal("10s") });
+    defer client.deinit(io);
+    var buf: [64]u8 = undefined;
+    var response = try client.send(io, .{ .method = .POST, .url = running.url(&buf, "/"), .body = .{ .bytes = "payload" }, .expect_continue = true });
+    defer response.deinit(io);
+    const body = try response.collect(gpa, io, .limited(1 << 20));
+    defer gpa.free(body);
+    try testing.expectEqualStrings("payload", body);
+}
+
+test "smuggling patterns, bad heads and limits are refused, each closing its connection" {
+    const gpa = testing.allocator;
+    const running = try Running.start(gpa, .{ .max_body = .literal("1KiB"), .limits = .{ .max_head = .literal("1KiB") } }, .of(echo));
+    defer running.stop();
+    const cases = [_]struct { []const u8, []const u8 }{
+        .{ "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", "HTTP/1.1 400 " },
+        .{ "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked, gzip\r\n\r\n", "HTTP/1.1 400 " },
+        .{ "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\nabc", "HTTP/1.1 400 " },
+        .{ "GET / HTTP/1.1\nHost: x\n\n", "HTTP/1.1 400 " },
+        .{ "GET / HTTP/1.1\r\nHost: x\r\nX: a\r\n b\r\n\r\n", "HTTP/1.1 400 " },
+        .{ "GET / HTTP/1.1\r\n\r\n", "HTTP/1.1 400 " },
+        .{ "GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n", "HTTP/1.1 400 " },
+        .{ "GET / HTTP/2.0\r\nHost: x\r\n\r\n", "HTTP/1.1 505 " },
+        .{ "GET / HTTP/1.1\r\nHost: x\r\nPad: " ++ repeat("p", 1100) ++ "\r\n\r\n", "HTTP/1.1 431 " },
+        .{ "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 2000\r\n\r\n", "HTTP/1.1 413 " },
+        .{ "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 1\r\nExpect: 200-ok\r\n\r\nx", "HTTP/1.1 417 " },
+        .{ "GET * HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 400 " },
+    };
+    for (cases) |case| {
+        const got = try running.raw(gpa, case[0]);
+        defer gpa.free(got);
+        testing.expect(std.mem.startsWith(u8, got, case[1])) catch |err| {
+            std.debug.print("sent {any}, got {any}\n", .{ case[0], got });
+            return err;
+        };
+        try testing.expect(std.mem.find(u8, got, "Connection: close\r\n") != null);
+    }
+}
+
+test "a HEAD is answered with the head a GET would have, and no body" {
+    const gpa = testing.allocator;
+    const running = try Running.start(gpa, .{}, .of(hello));
+    defer running.stop();
+    const got = try running.raw(gpa, "HEAD / HTTP/1.1\r\nHost: x\r\n\r\nGET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    defer gpa.free(got);
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, got, "Content-Length: 5\r\n"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, got, "hello"));
+    try testing.expect(std.mem.endsWith(u8, got, "hello"));
+}
+
+fn failing(io: Io, request: *Request, response: *Response) anyerror!void {
+    if (std.mem.eql(u8, request.path, "/late")) {
+        const w = try response.writer(io);
+        try w.splatByteAll('x', 10_000);
+        return error.Broken;
+    }
+    try response.header("X-Lost", "yes");
+    return error.Broken;
+}
+
+test "a handler that fails before its head gets a 500, and after it a cut connection" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const running = try Running.start(gpa, .{}, .of(failing));
+    defer running.stop();
+    const early = try running.raw(gpa, "GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    defer gpa.free(early);
+    try testing.expect(std.mem.startsWith(u8, early, "HTTP/1.1 500 "));
+    try testing.expect(std.mem.find(u8, early, "X-Lost") == null);
+    var client: Client = .init(gpa, .{ .retries = .none });
+    defer client.deinit(io);
+    var buf: [64]u8 = undefined;
+    var response = try client.send(io, .{ .url = running.url(&buf, "/late") });
+    defer response.deinit(io);
+    try testing.expectError(error.BodyIncomplete, response.collect(gpa, io, .limited(1 << 20)));
+}
+
+test "a gzip request body is decoded, its checksum verified" {
+    const gpa = testing.allocator;
+    const warp = @import("warp");
+    const running = try Running.start(gpa, .{}, .of(echo));
+    defer running.stop();
+    var compressor: warp.Compressor = try .init(gpa, .{ .level = 6 });
+    defer compressor.deinit();
+    const frame: warp.Compressor.Frame = .{ .container = .gzip };
+    var coded: [256]u8 = undefined;
+    const n = try compressor.compress("a gzip request body", &coded, frame);
+    var request: std.ArrayList(u8) = .empty;
+    defer request.deinit(gpa);
+    try request.print(gpa, "POST / HTTP/1.1\r\nHost: x\r\nContent-Encoding: gzip\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{n});
+    try request.appendSlice(gpa, coded[0..n]);
+    const got = try running.raw(gpa, request.items);
+    defer gpa.free(got);
+    try testing.expect(std.mem.endsWith(u8, got, "\r\n\r\na gzip request body"));
+}
+
+test "shutdown ends idle connections at once and lets an answer under way finish" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const running = try Running.start(gpa, .{}, .of(hello));
+    var client: Client = .init(gpa, .{});
+    defer client.deinit(io);
+    var buf: [64]u8 = undefined;
+    var response = try client.send(io, .{ .url = running.url(&buf, "/") });
+    const body = try response.collect(gpa, io, .limited(1 << 20));
+    gpa.free(body);
+    response.deinit(io);
+    // The client keeps its connection; the server ends it at shutdown.
+    running.halt();
+    defer running.free();
+    try testing.expectEqual(@as(u32, 0), running.server.counters.open.load(.monotonic));
+}
+
+fn item(io: Io, request: *Request, response: *Response) anyerror!void {
+    var buf: [128]u8 = undefined;
+    const text = try std.mem.print(&buf, "item {s} of {s}", .{ request.param("id").?, request.param("list").? });
+    try response.send(io, text);
+}
+
+test "a router serves its patterns, redirects, and answers 405 and 404" {
+    const gpa = testing.allocator;
+    const Router = @import("Router.zig");
+    var router: Router = .init(gpa);
+    defer router.deinit();
+    try router.add("GET /lists/{list}/items/{id}", .of(item));
+    try router.add("/files/", .of(hello));
+    const running = try Running.start(gpa, .{}, router.handler());
+    defer running.stop();
+    const cases = [_]struct { []const u8, []const u8 }{
+        .{ "GET /lists/a%20b/items/7 HTTP/1.1\r\nHost: x\r\n\r\n", "item 7 of a b" },
+        .{ "HEAD /lists/a/items/7 HTTP/1.1\r\nHost: x\r\n\r\n", "Content-Length: 11\r\n" },
+        .{ "DELETE /lists/a/items/7 HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 405 Method Not Allowed\r\n" },
+        .{ "DELETE /lists/a/items/7 HTTP/1.1\r\nHost: x\r\n\r\n", "Allow: GET, HEAD\r\n" },
+        .{ "GET /files HTTP/1.1\r\nHost: x\r\n\r\n", "Location: /files/\r\n" },
+        .{ "GET /a/../files/x?q=1 HTTP/1.1\r\nHost: x\r\n\r\n", "Location: /files/x?q=1\r\n" },
+        .{ "POST /files/../files HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n", "HTTP/1.1 308 Permanent Redirect\r\n" },
+        .{ "GET /nothing HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 404 Not Found\r\n" },
+        .{ "GET /files/%zz HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 400 Bad Request\r\n" },
+    };
+    for (cases) |case| {
+        var request: std.ArrayList(u8) = .empty;
+        defer request.deinit(gpa);
+        try request.appendSlice(gpa, case[0][0 .. case[0].len - 2]);
+        try request.appendSlice(gpa, "Connection: close\r\n\r\n");
+        const got = try running.raw(gpa, request.items);
+        defer gpa.free(got);
+        testing.expect(std.mem.find(u8, got, case[1]) != null) catch |err| {
+            std.debug.print("sent {s}\ngot {s}\n", .{ case[0], got });
+            return err;
+        };
+    }
+}

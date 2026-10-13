@@ -97,6 +97,21 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/client/Outgoing.zig",
         "src/client/Client.zig",
     } },
+    .{ .name = "server patterns", .patterns = &.{
+        "src/server/Pattern.zig",
+    } },
+    .{ .name = "server", .patterns = &.{
+        "src/server/Server.zig",
+        "src/server/Connection.zig",
+        "src/server/Request.zig",
+        "src/server/Response.zig",
+    } },
+    .{ .name = "server routing", .patterns = &.{
+        "src/server/Router.zig",
+    } },
+    .{ .name = "server namespace", .patterns = &.{
+        "src/server.zig",
+    } },
     .{ .name = "client namespace", .patterns = &.{
         "src/client.zig",
     } },

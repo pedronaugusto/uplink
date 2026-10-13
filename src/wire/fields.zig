@@ -233,6 +233,14 @@ pub const ListIterator = struct {
     text: []const u8,
     at: usize = 0,
 
+    /// Whether the list `text` holds the token `element`, compared without
+    /// case.
+    pub fn contains(text: []const u8, element: []const u8) bool {
+        var it: ListIterator = .{ .text = text };
+        while (it.next()) |e| if (std.ascii.eqlIgnoreCase(e, element)) return true;
+        return false;
+    }
+
     pub fn next(it: *ListIterator) ?[]const u8 {
         while (it.at < it.text.len) {
             const start = it.at;

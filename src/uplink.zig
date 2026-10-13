@@ -14,6 +14,10 @@ pub const Client = client.Client;
 pub const Request = client.Request;
 /// A response: its head, and its body read through `reader`.
 pub const Response = client.Response;
+/// An HTTP/1.1 server, its requests and its responses.
+pub const server = @import("server.zig");
+/// An HTTP/1.1 server.
+pub const Server = server.Server;
 /// A request whose body the caller writes.
 pub const Outgoing = client.Outgoing;
 /// A connection a response handed over: after a 101, or a `CONNECT`.
@@ -62,6 +66,7 @@ pub const Headers = wire.fields.Headers;
 test {
     _ = client;
     _ = transport;
+    _ = server;
     _ = tls;
     _ = net;
     _ = @import("coding.zig");

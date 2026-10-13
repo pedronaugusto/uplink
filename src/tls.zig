@@ -1,7 +1,8 @@
 //! How uplink's connections use TLS. The engine, the authorities and the
-//! certificates and keys a client answers with are cloak's; this file is the
-//! HTTP side of them: the options a client takes, what an alert says about
-//! a client certificate, and the shape of a connection's buffers.
+//! certificates and keys a client or a server answers with are cloak's; this
+//! file is the HTTP side of them: the options a client and a server take,
+//! what an alert says about a client certificate, and the shape of a
+//! connection's buffers.
 
 const std = @import("std");
 const Io = std.Io;
@@ -28,6 +29,26 @@ pub const ClientOptions = struct {
 
     pub const Verify = enum { full, none };
 };
+
+/// How a server's TLS connections are accepted.
+pub const ServerOptions = struct {
+    /// The certificate chains presented, each with the names it answers
+    /// for; the first answers a name none lists. The caller keeps them
+    /// alive for as long as the server uses them.
+    credentials: []const cloak.tls.Credential,
+    /// Whether a client is asked for a certificate, and whether it must
+    /// present one.
+    client_certificate: cloak.tls.ClientCertificate = .none,
+    /// The authorities a client's certificate is checked against; null
+    /// takes any chain the client presents, unchecked.
+    client_trust: ?cloak.Trust.Snapshot = null,
+    /// Where every session's secrets are written in the NSS key log format;
+    /// never read from the environment.
+    key_log: ?*Io.Writer = null,
+};
+
+/// The protocols a server offers by ALPN, its preference first.
+pub const server_protocols: []const []const u8 = &.{"http/1.1"};
 
 /// The buffers a TLS session reads and writes through: one whole TLS record
 /// of ciphertext (16 KiB of plaintext, its header, type and tag), which is
