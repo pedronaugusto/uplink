@@ -21,7 +21,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - The server reads a request strictly where Http11Probe found it lenient: a chunked body's line ends and extensions as RFC 9112 writes them, a target with a raw byte past 0x7f or a `#` refused, a `Host` that is empty or not a URI's host refused; a body the client got wrong is answered 400 (or 413 past `max_body`) rather than 500, and a request line past `max_head` 414 or 400 rather than 431.
 - TLS 1.3, and TLS 1.2 (ECDHE, AEAD suites, extended master secret) for servers that speak nothing newer, both cloak's; a client answers a request for its certificate with RSA keys too.
-- Pins aegis 0.1.6, reactor 0.4.0, cloak 0.4.0, shakedown 0.4.1, warp 0.3.1 and preflight 0.4.5.
+- Pins aegis 0.1.6, reactor 0.3.1, cloak 0.4.0, shakedown 0.4.1, warp 0.3.1 and preflight 0.4.5.
 - `Router` answers `OPTIONS *` 200 and a `CONNECT` to a host and port 405, and routes an extended `CONNECT` by its path.
 
 ### Added

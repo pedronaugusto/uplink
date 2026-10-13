@@ -243,7 +243,7 @@ test "a handshake that does not come is given up on at the handshake timeout" {
     const io = test_io.io();
     const server = try Server.start(gpa, io, Server.fixedAnswer(.{ .silent = true }));
     defer server.stop();
-    var client: Client = .init(gpa, .{ .tls = .{ .verify = .none }, .timeouts = .{ .handshake = .fromMilliseconds(100) } });
+    var client: Client = .init(gpa, .{ .tls = .{ .verify = .none }, .timeouts = .{ .handshake = .literal("100ms") } });
     defer client.deinit(io);
     var diagnostics: Diagnostics = .{};
     try testing.expectError(error.TimedOut, fetch(gpa, io, &client, server.port, &diagnostics));
