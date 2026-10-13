@@ -45,7 +45,7 @@ const State = struct {
     /// The limited routes; empty unless `max_per_route` is set.
     routes: std.ArrayList(*RouteState) = .empty,
     /// HTTP/2 connections, shared by every exchange on their route.
-    multiplexed: std.ArrayList(*H2) = .empty,
+    multiplexed: std.ArrayList(Shared) = .empty,
 };
 
 /// How many connections are kept, and opened.
@@ -84,6 +84,14 @@ const Idle = struct {
     kind: Kind,
     /// When it was kept; null when idle connections do not expire.
     since: ?awake.Instant,
+};
+
+/// An HTTP/2 connection the route's exchanges share.
+const Shared = struct {
+    h: *H2,
+    /// When its last exchange ended; null while one uses it, or when idle
+    /// connections do not expire.
+    since: ?awake.Instant = null,
 };
 
 /// A limited route: its connections open, and its waiters.
@@ -159,9 +167,20 @@ pub fn acquire(p: *Pool, io: Io, route: *const Route, deadline: ?Io.Timestamp, w
         var held = p.state.acquireUncancelable(io);
         defer held.deinit(io);
         const s = held.value();
-        for (s.multiplexed.items) |h| {
-            if (!h.conn.route.eql(route) or !h.canOpen(io)) continue;
+        var i: usize = 0;
+        while (i < s.multiplexed.items.len) : (i += 1) {
+            const m = &s.multiplexed.items[i];
+            const h = m.h;
+            if (!h.conn.route.eql(route)) continue;
+            const unused = h.users.load(.acquire) == 0;
+            // One idle past its time, or that can carry nothing more, goes.
+            if (unused and (!h.usable(io) or p.expiredAt(.{ .kind = .{ .h2 = h }, .since = m.since }, awake.now(io)))) {
+                _ = s.multiplexed.swapRemove(i);
+                return .{ .expired = .{ .h2 = h } };
+            }
+            if (!h.canOpen(io)) continue;
             _ = h.users.fetchAdd(1, .monotonic);
+            m.since = null;
             return .{ .shared = h };
         }
         if (p.takeLocked(io, s, route)) |found| return found;
@@ -297,7 +316,7 @@ pub fn keep(p: *Pool, io: Io, k: Kind) Kept {
 pub fn share(p: *Pool, io: Io, h: *H2) Allocator.Error!void {
     var held = p.state.acquireUncancelable(io);
     defer held.deinit(io);
-    try held.value().multiplexed.append(p.gpa, h);
+    try held.value().multiplexed.append(p.gpa, .{ .h = h });
 }
 
 /// An exchange is done with `h`: kept for the next while it can carry one,
@@ -308,12 +327,16 @@ pub fn unshare(p: *Pool, io: Io, h: *H2) void {
         defer held.deinit(io);
         const s = held.value();
         const last = h.users.fetchSub(1, .acq_rel) == 1;
-        if (!last or h.usable(io)) break :blk false;
-        for (s.multiplexed.items, 0..) |x, i| if (x == h) {
+        if (!last) break :blk false;
+        for (s.multiplexed.items, 0..) |*m, i| if (m.h == h) {
+            if (h.usable(io)) {
+                if (p.options.idle_timeout != null) m.since = awake.now(io);
+                break :blk false;
+            }
             _ = s.multiplexed.swapRemove(i);
-            break;
+            break :blk true;
         };
-        break :blk true;
+        break :blk false;
     };
     if (close_it) p.close(io, .{ .h2 = h });
 }
@@ -374,7 +397,7 @@ pub fn drain(p: *Pool, io: Io) ?Kind {
     var held = p.state.acquireUncancelable(io);
     defer held.deinit(io);
     const s = held.value();
-    if (s.multiplexed.pop()) |h| return .{ .h2 = h };
+    if (s.multiplexed.pop()) |m| return .{ .h2 = m.h };
     if (s.len == 0) return null;
     return p.removeAt(s, s.len - 1).kind;
 }

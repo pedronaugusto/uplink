@@ -890,3 +890,19 @@ test "requests at once share one HTTP/2 connection" {
     try testing.expectEqual(@as(u32, 16), ok.load(.monotonic));
     try testing.expectEqual(@as(u64, 1), client.stats().connections_opened);
 }
+
+test "an HTTP/2 connection idle past the pool's idle timeout is closed, and the next request opens another" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const running = try Running.start(gpa, .{ .h2c = .alongside_http1 }, .of(h2Echo));
+    defer running.stop();
+    var client: Client = .init(gpa, .{ .http2 = .prior_knowledge, .pool = .{ .idle_timeout = .literal("50ms") } });
+    defer client.deinit(io);
+    var buf: [64]u8 = undefined;
+    for (0..2) |round| {
+        var response = try client.send(io, .{ .url = running.url(&buf, "/") });
+        response.deinit(io);
+        if (round == 0) try io.sleep(.fromMilliseconds(120), .awake);
+    }
+    try testing.expectEqual(@as(u64, 2), client.stats().connections_opened);
+}
