@@ -26,6 +26,8 @@ pub const sse = @import("wire/sse.zig");
 pub const form = @import("wire/form.zig");
 /// `multipart/form-data` bodies, written.
 pub const multipart = @import("wire/multipart.zig");
+/// Byte ranges: `Range` read, `Content-Range` written.
+pub const range = @import("wire/range.zig");
 /// A request method: any token.
 pub const Method = @import("wire/Method.zig");
 /// The HTTP version a message was exchanged in.
@@ -44,4 +46,5 @@ test {
     _ = sse;
     _ = form;
     _ = multipart;
+    _ = range;
 }

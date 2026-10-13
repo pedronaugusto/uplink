@@ -533,3 +533,67 @@ test "comptime routes serve with typed captures, their escapes undone" {
     defer gpa.free(missing);
     try testing.expect(std.mem.startsWith(u8, missing, "HTTP/1.1 405 "));
 }
+
+test "files are served with their validators, conditions and ranges" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var text: [1000]u8 = undefined;
+    for (&text, 0..) |*c, i| c.* = 'a' + @as(u8, @intCast(i % 26));
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = &text });
+    try tmp.dir.createDirPath(io, "sub");
+    try tmp.dir.writeFile(io, .{ .sub_path = "sub/index.html", .data = "<h1>index</h1>" });
+    var files: server_ns.Files = .init(tmp.dir, .{});
+    const running = try Running.start(gpa, .{}, files.handler());
+    defer running.stop();
+
+    const whole = try running.raw(gpa, "GET /a.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    defer gpa.free(whole);
+    try testing.expect(std.mem.find(u8, whole, "Content-Type: text/plain; charset=utf-8\r\n") != null);
+    try testing.expect(std.mem.endsWith(u8, whole, &text));
+    const etag_at = std.mem.find(u8, whole, "ETag: ").? + "ETag: ".len;
+    const etag = whole[etag_at .. etag_at + std.mem.findScalar(u8, whole[etag_at..], '\r').?];
+
+    var request_buf: [512]u8 = undefined;
+    const conditional = try running.raw(gpa, try std.mem.print(&request_buf, "GET /a.txt HTTP/1.1\r\nHost: x\r\nIf-None-Match: {s}\r\nConnection: close\r\n\r\n", .{etag}));
+    defer gpa.free(conditional);
+    try testing.expect(std.mem.startsWith(u8, conditional, "HTTP/1.1 304 "));
+    try testing.expect(std.mem.endsWith(u8, conditional, "\r\n\r\n"));
+
+    const failed = try running.raw(gpa, "GET /a.txt HTTP/1.1\r\nHost: x\r\nIf-Match: \"other\"\r\nConnection: close\r\n\r\n");
+    defer gpa.free(failed);
+    try testing.expect(std.mem.startsWith(u8, failed, "HTTP/1.1 412 "));
+
+    const one = try running.raw(gpa, "GET /a.txt HTTP/1.1\r\nHost: x\r\nRange: bytes=0-9\r\nConnection: close\r\n\r\n");
+    defer gpa.free(one);
+    try testing.expect(std.mem.startsWith(u8, one, "HTTP/1.1 206 "));
+    try testing.expect(std.mem.find(u8, one, "Content-Range: bytes 0-9/1000\r\n") != null);
+    try testing.expect(std.mem.endsWith(u8, one, "\r\n\r\nabcdefghij"));
+
+    const two = try running.raw(gpa, "GET /a.txt HTTP/1.1\r\nHost: x\r\nRange: bytes=0-1, -2\r\nConnection: close\r\n\r\n");
+    defer gpa.free(two);
+    try testing.expect(std.mem.find(u8, two, "multipart/byteranges; boundary=") != null);
+    try testing.expect(std.mem.find(u8, two, "Content-Range: bytes 998-999/1000\r\n\r\nkl\r\n") != null);
+
+    const beyond = try running.raw(gpa, "GET /a.txt HTTP/1.1\r\nHost: x\r\nRange: bytes=5000-\r\nConnection: close\r\n\r\n");
+    defer gpa.free(beyond);
+    try testing.expect(std.mem.startsWith(u8, beyond, "HTTP/1.1 416 "));
+    try testing.expect(std.mem.find(u8, beyond, "Content-Range: bytes */1000\r\n") != null);
+
+    const dir = try running.raw(gpa, "GET /sub HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    defer gpa.free(dir);
+    try testing.expect(std.mem.find(u8, dir, "Location: /sub/\r\n") != null);
+    const index = try running.raw(gpa, "GET /sub/ HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    defer gpa.free(index);
+    try testing.expect(std.mem.endsWith(u8, index, "<h1>index</h1>"));
+    const named = try running.raw(gpa, "GET /sub/index.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    defer gpa.free(named);
+    try testing.expect(std.mem.find(u8, named, "Location: /sub/\r\n") != null);
+    const escape = try running.raw(gpa, "GET /sub/%2E%2E/a.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    defer gpa.free(escape);
+    try testing.expect(std.mem.startsWith(u8, escape, "HTTP/1.1 404 "));
+    const posted = try running.raw(gpa, "POST /a.txt HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    defer gpa.free(posted);
+    try testing.expect(std.mem.startsWith(u8, posted, "HTTP/1.1 405 "));
+}

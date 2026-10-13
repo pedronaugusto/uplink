@@ -8,6 +8,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/wire/date.zig",
         "src/wire/form.zig",
         "src/wire/sse.zig",
+        "src/wire/range.zig",
     } },
     .{ .name = "wire codecs", .patterns = &.{
         "src/wire/Method.zig",
@@ -125,6 +126,9 @@ pub const layers: []const gantry.rules.Layer = &.{
     } },
     .{ .name = "server comptime routing", .patterns = &.{
         "src/server/routes.zig",
+    } },
+    .{ .name = "server files", .patterns = &.{
+        "src/server/Files.zig",
     } },
     .{ .name = "server namespace", .patterns = &.{
         "src/server.zig",

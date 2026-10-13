@@ -266,7 +266,9 @@ fn sendWhole(r: *Response, body: []const u8) Error!void {
         r.socket.flush() catch return r.fail();
         return;
     }
-    r.declared = body.len;
+    if (bodiless(r.status)) {
+        if (body.len != 0) return error.BodyNotAllowed;
+    } else r.declared = body.len;
     try r.sendHead(.length, null);
     try r.bodyBytes(&.{body}, 1);
     r.state = .ended;

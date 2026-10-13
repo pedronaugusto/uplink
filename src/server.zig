@@ -16,6 +16,8 @@ pub const Router = @import("server/Router.zig");
 pub const Routes = @import("server/routes.zig").Routes;
 /// The typed captures of a comptime route's pattern.
 pub const Captures = @import("server/routes.zig").Captures;
+/// Files from a directory, with conditional and range requests.
+pub const Files = @import("server/Files.zig");
 /// A route pattern and how two of them relate.
 pub const Pattern = @import("server/Pattern.zig");
 
@@ -25,6 +27,7 @@ test {
     _ = Response;
     _ = Router;
     _ = Pattern;
+    _ = Files;
     _ = @import("server/routes.zig");
     _ = Handler;
     _ = @import("server/Connection.zig");
