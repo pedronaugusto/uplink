@@ -14,6 +14,10 @@ const Resolver = @import("../net/Resolver.zig");
 const wire = @import("uplink.wire");
 const url_mod = wire.url;
 const BufferPool = @import("BufferPool.zig");
+const span = @import("../span.zig");
+const Duration = span.Duration;
+const ZstdBuffer = @import("../coding/ZstdBuffer.zig");
+const Timed = @import("Timed.zig");
 const Observer = @import("Observer.zig");
 const Proxy = @import("Proxy.zig");
 const ProxyAuth = @import("ProxyAuth.zig");
@@ -36,15 +40,8 @@ resolver: Resolver,
 /// Private: the cache `resolver` goes through, when it does.
 dns_cache: ?Resolver.Cache,
 observer: ?Observer,
-/// Private: one zstd buffer kept for the next zstd body: taken and given
-/// back with one atomic swap, whose winner owns the buffer, and there is no
-/// state beside it for a lock to guard.
-zstd_window: std.atomic.Value(?[*]u8) = .init(null),
-/// The largest frame window a zstd body may ask for.
-zstd_max_window: aegis.units.Bytes(u32),
-/// The length of a zstd buffer: the window, a block, and room after them
-/// for the decoder's state.
-zstd_window_len: usize,
+/// The buffer zstd bodies are decoded in, and the cap on their window.
+zstd: ZstdBuffer,
 counters: Counters = .{},
 
 /// What a context is made from.
@@ -56,6 +53,7 @@ pub const Options = struct {
     resolver: ?Resolver = null,
     dns_cache: ?Resolver.Cache.Options = .{},
     observer: ?Observer = null,
+    /// The largest window a zstd body may ask for.
     max_zstd_window: aegis.units.Bytes(u32) = .fromRaw(8 << 20),
     /// The most free buffers of each size kept.
     max_free_buffers: u32,
@@ -67,7 +65,7 @@ pub fn init(gpa: Allocator, options: Options) Context {
     return .{
         .gpa = gpa,
         .buffers = .init(gpa, options.max_free_buffers),
-        .deadlines = .init(options.timeouts.shortestPerOperation() orelse .fromSeconds(10)),
+        .deadlines = .init(span.toIo(options.timeouts.shortestPerOperation() orelse .literal("10s"))),
         .proxies = .init(gpa, options.proxy),
         .tls = options.tls,
         .timeouts = options.timeouts,
@@ -75,9 +73,13 @@ pub fn init(gpa: Allocator, options: Options) Context {
         .resolver = options.resolver orelse .system,
         .dns_cache = if (options.dns_cache) |o| .init(gpa, options.resolver orelse .system, o) else null,
         .observer = options.observer,
-        .zstd_max_window = options.max_zstd_window,
-        .zstd_window_len = zstdWindowLen(options.max_zstd_window),
+        .zstd = .init(options.max_zstd_window),
     };
+}
+
+/// What keeps the deadlines of the context's connections.
+pub fn keeper(ctx: *Context) Timed.Keeper {
+    return .{ .deadlines = &ctx.deadlines, .unenforced = &ctx.counters.timeouts_unenforced };
 }
 
 /// The resolver connections use. Pointing at the context's cache, it is
@@ -92,57 +94,21 @@ pub fn deinit(ctx: *Context, io: Io) void {
     ctx.proxies.deinit(io);
     ctx.system_trust.deinit(io);
     if (ctx.dns_cache) |*c| c.deinit(io);
-    if (ctx.zstd_window.load(.acquire)) |w| ctx.gpa.free(alignedZstd(w[0..ctx.zstd_window_len]));
+    ctx.zstd.deinit(ctx.gpa);
     ctx.buffers.deinit(io);
     ctx.* = undefined;
-}
-
-/// The part of a zstd buffer the decoder reads into: the window and a
-/// block. A length no address space holds is the largest there is, which
-/// no allocation will give.
-pub fn zstdBufferLen(ctx: *const Context) usize {
-    return zstdReadLen(ctx.zstd_max_window).raw();
-}
-
-fn zstdReadLen(window: aegis.units.Bytes(u32)) aegis.units.Bytes(usize) {
-    const room = window.convert(usize);
-    return room.add(.fromRaw(std.compress.zstd.block_size_max)) catch .fromRaw(std.math.maxInt(usize));
-}
-
-/// A zstd buffer whole: the read part aligned, and the decoder's state.
-fn zstdWindowLen(window: aegis.units.Bytes(u32)) usize {
-    const read = std.mem.alignForward(usize, zstdReadLen(window).raw(), 64);
-    const whole = aegis.int.Checked(usize).init(read).add(@sizeOf(std.compress.zstd.Decompress)) catch return std.math.maxInt(usize);
-    return whole.raw();
-}
-
-/// A zstd buffer: the one kept, or a new one, aligned for its decoder.
-pub fn acquireZstdWindow(ctx: *Context) Allocator.Error![]u8 {
-    if (ctx.zstd_window.swap(null, .acq_rel)) |w| return w[0..ctx.zstd_window_len];
-    return ctx.gpa.alignedAlloc(u8, .@"64", ctx.zstd_window_len);
-}
-
-/// Give a zstd buffer back: kept when none is, freed otherwise.
-pub fn releaseZstdWindow(ctx: *Context, window: []u8) void {
-    std.debug.assert(window.len == ctx.zstd_window_len);
-    if (ctx.zstd_window.cmpxchgStrong(null, window.ptr, .acq_rel, .acquire) == null) return;
-    ctx.gpa.free(alignedZstd(window));
-}
-
-fn alignedZstd(window: []u8) []align(64) u8 {
-    return @alignCast(window); // safe: every zstd buffer is allocated 64-aligned
 }
 
 /// How long each step may take; null is no limit.
 pub const Timeouts = struct {
     /// The name's lookup and the TCP connection, every address included;
     /// with a SOCKS proxy, its negotiation and local lookup too.
-    connect: ?Io.Duration = null,
+    connect: ?Duration = null,
     /// Each TLS handshake, SOCKS negotiation and `CONNECT` exchange.
-    handshake: ?Io.Duration = null,
+    handshake: ?Duration = null,
     /// Any single read or write that moves no byte: an answer that stops
     /// coming, a server that stops taking a body.
-    activity: ?Io.Duration = null,
+    activity: ?Duration = null,
     /// A connection moving fewer than `bytes_per_second` on average over
     /// `window`, while a request waits on it, is given up on: git's
     /// `http.lowSpeedLimit` and `http.lowSpeedTime`.
@@ -150,23 +116,21 @@ pub const Timeouts = struct {
 
     pub const LowSpeed = struct {
         bytes_per_second: u32,
-        window: Io.Duration,
+        window: Duration,
     };
 
     /// The bytes a low-speed window must move.
     pub fn lowSpeedNeed(l: LowSpeed) aegis.units.Bytes(u64) {
-        const ns: u128 = @intCast(@max(0, l.window.nanoseconds)); // safe: the larger of zero and a span
-        const need = @as(u128, l.bytes_per_second) * ns / std.time.ns_per_s;
-        return .fromRaw(aegis.int.cast(u64, need) catch std.math.maxInt(u64));
+        const window = aegis.int.Checked(u128).init(l.window.raw());
+        const moved = window.mul(l.bytes_per_second) catch unreachable; // unreachable: a u64 times a u32 fits a u128
+        const need = moved.div(std.time.ns_per_s) catch unreachable; // unreachable: the divisor is a nonzero constant
+        return .fromRaw(aegis.int.cast(u64, need.raw()) catch std.math.maxInt(u64));
     }
 
     /// The shortest of the timeouts kept per operation, or null.
-    pub fn shortestPerOperation(t: Timeouts) ?Io.Duration {
-        var shortest: ?Io.Duration = null;
-        for ([_]?Io.Duration{ t.handshake, t.activity, if (t.low_speed) |l| l.window else null }) |maybe| {
-            const d = maybe orelse continue;
-            if (shortest == null or d.nanoseconds < shortest.?.nanoseconds) shortest = d;
-        }
+    pub fn shortestPerOperation(t: Timeouts) ?Duration {
+        var shortest: ?Duration = null;
+        for ([_]?Duration{ t.handshake, t.activity, if (t.low_speed) |l| l.window else null }) |maybe| shortest = span.shorter(shortest, maybe);
         return shortest;
     }
 };
@@ -176,10 +140,10 @@ pub const Dial = struct {
     /// Turn Nagle's algorithm off on every socket.
     nodelay: bool = true,
     /// Turn TCP keepalive on, probing a connection idle this long.
-    keepalive: ?Io.Duration = null,
+    keepalive: ?Duration = null,
     /// How long one address is tried alone before the next joins it
     /// (Happy Eyeballs, RFC 8305).
-    attempt_delay: Io.Duration = .fromMilliseconds(250),
+    attempt_delay: Duration = .literal("250ms"),
     /// Connect to this Unix socket instead, whatever the URL's host, for
     /// local daemons. The URL still names the `Host`.
     unix_socket: ?[]const u8 = null,
@@ -188,16 +152,35 @@ pub const Dial = struct {
 /// Where a connection goes. Connections with equal routes are
 /// interchangeable: TLS settings are the client's, the same for every
 /// route, and a proxy is one of the client's own.
+///
+/// A route owns its host by value, so a copy of one is whole on its own:
+/// it cannot outlive bytes it points at, as a slice into a connection
+/// freed under it could.
 pub const Route = struct {
     /// TLS to the target.
     secure: bool,
-    host: []const u8,
+    /// Private: the host's bytes; `host` reads them.
+    host_name: Host,
     port: u16,
     /// The proxy between, and the answer it is given.
     proxy: ?*Proxies.Slot = null,
 
-    pub fn eql(a: Route, b: Route) bool {
-        return a.secure == b.secure and a.port == b.port and a.proxy == b.proxy and std.ascii.eqlIgnoreCase(a.host, b.host);
+    /// A host name's bytes, held by value.
+    pub const Host = aegis.bounded.Array(u8, Io.net.HostName.max_len);
+
+    /// A route to the host `name`, which is copied; `InvalidHostName` when it is longer than a host name can be.
+    pub fn init(secure: bool, name: []const u8, port: u16, proxy: ?*Proxies.Slot) error{InvalidHostName}!Route {
+        const bytes = Host.fromSlice(name) catch return error.InvalidHostName;
+        return .{ .secure = secure, .host_name = bytes, .port = port, .proxy = proxy };
+    }
+
+    /// The host, as the route holds it.
+    pub fn host(r: *const Route) []const u8 {
+        return r.host_name.constItems();
+    }
+
+    pub fn eql(a: *const Route, b: *const Route) bool {
+        return a.secure == b.secure and a.port == b.port and a.proxy == b.proxy and std.ascii.eqlIgnoreCase(a.host(), b.host());
     }
 };
 
@@ -387,15 +370,17 @@ const test_io = @import("../testing/io.zig");
 const Unwiped = @import("../testing/Unwiped.zig");
 
 test "routes are equal without case in the host, and the shortest per-operation timeout is found" {
-    const a: Route = .{ .secure = true, .host = "Example.com", .port = 443 };
-    try testing.expect(a.eql(.{ .secure = true, .host = "example.COM", .port = 443 }));
-    try testing.expect(!a.eql(.{ .secure = false, .host = "example.com", .port = 443 }));
-    try testing.expect(!a.eql(.{ .secure = true, .host = "example.com", .port = 8443 }));
-    const t: Timeouts = .{ .connect = .fromSeconds(1), .handshake = .fromSeconds(10), .activity = .fromSeconds(5) };
-    try testing.expectEqual(@as(i96, 5 * std.time.ns_per_s), t.shortestPerOperation().?.nanoseconds);
-    try testing.expectEqual(null, (Timeouts{ .connect = .fromSeconds(1) }).shortestPerOperation());
-    const slow: Timeouts = .{ .low_speed = .{ .bytes_per_second = 1000, .window = .fromSeconds(2) } };
-    try testing.expectEqual(@as(i96, 2 * std.time.ns_per_s), slow.shortestPerOperation().?.nanoseconds);
+    const a: Route = try .init(true, "Example.com", 443, null);
+    try testing.expect(a.eql(&try .init(true, "example.COM", 443, null)));
+    try testing.expect(!a.eql(&try .init(false, "example.com", 443, null)));
+    try testing.expect(!a.eql(&try .init(true, "example.com", 8443, null)));
+    const long: [Io.net.HostName.max_len + 1]u8 = @splat('a');
+    try testing.expectError(error.InvalidHostName, Route.init(true, &long, 443, null));
+    const t: Timeouts = .{ .connect = .literal("1s"), .handshake = .literal("10s"), .activity = .literal("5s") };
+    try testing.expectEqual(Duration.literal("5s"), t.shortestPerOperation().?);
+    try testing.expectEqual(null, (Timeouts{ .connect = .literal("1s") }).shortestPerOperation());
+    const slow: Timeouts = .{ .low_speed = .{ .bytes_per_second = 1000, .window = .literal("2s") } };
+    try testing.expectEqual(Duration.literal("2s"), slow.shortestPerOperation().?);
     try testing.expectEqual(@as(u64, 2000), Timeouts.lowSpeedNeed(slow.low_speed.?).raw());
 }
 
@@ -432,16 +417,4 @@ test "an environment proxy's password is in no freed memory unwiped" {
     try testing.expectEqualStrings("pwtoken!", slot.proxy.credential.?.password);
     p.deinit(io);
     try testing.expect(!unwiped.found);
-}
-
-test "a zstd window is kept for the next body, and one past it freed" {
-    var ctx: Context = .init(testing.allocator, .{ .max_free_buffers = 1, .max_zstd_window = .fromRaw(1 << 10) });
-    defer ctx.deinit(test_io.io());
-    const a = try ctx.acquireZstdWindow();
-    const b = try ctx.acquireZstdWindow();
-    ctx.releaseZstdWindow(a);
-    ctx.releaseZstdWindow(b);
-    const c = try ctx.acquireZstdWindow();
-    try testing.expectEqual(a.ptr, c.ptr);
-    ctx.releaseZstdWindow(c);
 }

@@ -43,15 +43,15 @@ and the compiler holds `wire` to its two imports.
 
 Why a module and not only the layer: Zig analyses what is used, so a program
 that imports `uplink` and calls the codecs compiles none of the client. What
-it does not avoid is fetching: a build that reaches `uplink` fetches reactor
-and cloak with it. A separate module buys something only where a part's dependencies
+it does not avoid is fetching: a build that reaches `uplink` fetches reactor,
+cloak and warp with it. A separate module buys something only where a part's dependencies
 should not be fetched by those who do not use it, and the codecs are such a part:
 a server or a proxy parsing HTTP/1.1 has no use for the client's runtime or its
-TLS. `tls`, `net`, `transport`, `pool` and `client` are not modules: they share
-reactor and cloak, and no user wants one without the rest.
+TLS. `tls`, `net`, `transport`, `coding`, `pool` and `client` are not modules:
+they share reactor, cloak and warp, and no user wants one without the rest.
 
 The build has one option, `client`, true unless a project says otherwise.
-reactor and cloak are lazy dependencies, requested only when it is true, so the common
+reactor, cloak and warp are lazy dependencies, requested only when it is true, so the common
 user, who builds the client, writes nothing and gets the whole package, and
 a wire-only user writes `.client = false` and fetches aegis and nothing more. With
 it false the `uplink` module is not defined: it cannot be built without the
@@ -144,7 +144,10 @@ the lock, and say so where they are declared.
 ### Connections and the pool
 
 - **A route is where a connection goes**: TLS or not, host (compared without
-  case), port, and the proxy it goes through. TLS settings are the client's,
+  case), port, and the proxy it goes through. It holds its host by value, in
+  a bounded array the size of the longest host name, so a copy of a route is
+  whole on its own: nothing it names can be freed under it, as a host slice
+  into a closed connection once was. TLS settings are the client's,
   the same for every route, so they are not part of the key. Connections with
   equal routes are interchangeable.
 - **The most recently used idle connection is taken first.** It is the one most
@@ -206,6 +209,13 @@ the lock, and say so where they are declared.
   `Dialed.timeout_enforced` is false, and `Client.stats().timeouts_unenforced`
   counts what was not kept. A timeout that cannot be kept is reported, not
   assumed.
+- **Every span uplink takes or reports is aegis's** (`Duration`, nanoseconds,
+  never negative): a timeout, a delay, a keepalive, a lifetime, and what the
+  observer is told a step took. It reads and writes the same text a command
+  line or a configuration file would (`30s`, `250ms`), a default is written
+  so (`.literal("90s")`), and it logs with `{f}`. Sizes are aegis's `Bytes`
+  the same way (`max_head`, `drain_limit`, the zstd window). std's
+  `Io.Duration` is met only where an `Io` call takes one.
 - **Instants on the awake clock are a type of their own** (`transport.awake`),
   stored as `i64` nanoseconds in the pool's idle list. A time
   from another clock cannot meet one, spans are checked, and a deadline too far
@@ -277,11 +287,18 @@ the lock, and say so where they are declared.
   attempt after redirects and before the write, so a signature is made again
   for each. `Observer` is told every step with its timing. Neither can change
   what the client owns.
-- **Compression is not uplink's.** gzip, deflate and zstd are decoded by std's
-  decoders, with the zstd window capped by an option (one buffer is kept for
-  the next zstd body, taken and given back with one atomic swap).
-  `Accept-Encoding` is set from what is enabled. Brotli is not decoded: such a
-  body is handed over as it came, with its `Content-Encoding`.
+- **Compression is warp's, and every check it offers is made.** gzip,
+  deflate and zstd are decoded by warp's streaming decoders (`coding`):
+  gzip's CRC-32 and length, zlib's Adler-32 and zstd's content checksum are
+  verified, a gzip body of several members is read whole, a stream cut short
+  is refused, and a body under several codings is undone last first. HTTP's
+  `deflate` is zlib, and a raw stream sent under the name is read too. std's
+  decoders were not enough: they read gzip's and zlib's checksums without
+  comparing them, and zstd's not at all. The zstd window is capped by an
+  option; one buffer sized for the cap is kept for the next zstd body, taken
+  and given back with one atomic swap. `Accept-Encoding` is set from what is
+  enabled. Brotli is not decoded: such a body is handed over as it came, with
+  its `Content-Encoding`.
 - **Cookies follow RFC 6265bis** and the Netscape cookie file. The public
   suffix list is a seam (`Options.public_suffix`), not a table in the package;
   without one a cookie for a domain of one label is refused.

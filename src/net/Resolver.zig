@@ -10,6 +10,8 @@ const aegis = @import("aegis");
 const reactor = @import("reactor");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const span = @import("../span.zig");
+const Duration = span.Duration;
 const IpAddress = Io.net.IpAddress;
 
 const Resolver = @This();
@@ -46,7 +48,7 @@ pub const LookupWithinError = error{
 /// `lookup`, abandoned once `timeout` runs out. Keeping the bound needs a
 /// task to race the lookup against; with none to spare the lookup runs
 /// unbounded, and `bounded` is set false.
-pub fn lookupWithin(r: Resolver, io: Io, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress, timeout: ?Io.Duration, bounded: *bool) LookupWithinError![]IpAddress {
+pub fn lookupWithin(r: Resolver, io: Io, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress, timeout: ?Duration, bounded: *bool) LookupWithinError![]IpAddress {
     bounded.* = true;
     const limit = timeout orelse return r.lookupMapped(io, host, port, family, out);
     if (reactor.net.literal(host, port) != null) return r.lookupMapped(io, host, port, family, out);
@@ -61,7 +63,7 @@ pub fn lookupWithin(r: Resolver, io: Io, host: []const u8, port: u16, family: ?I
         bounded.* = false;
         return r.lookupMapped(io, host, port, family, out);
     };
-    race.concurrent(.expired, Io.sleep, .{ io, limit, .awake }) catch {
+    race.concurrent(.expired, Io.sleep, .{ io, span.toIo(limit), .awake }) catch {
         bounded.* = false;
         while (race.cancel()) |late| switch (late) {
             .found => |result| return result,
@@ -166,7 +168,7 @@ pub const Cache = struct {
 
     pub const Options = struct {
         /// How long an answer is kept.
-        ttl: Io.Duration = .fromSeconds(60),
+        ttl: Duration = .literal("60s"),
         /// The most names kept; past it, expired answers go, then the one
         /// closest to expiring.
         max_entries: u32 = 256,
@@ -248,7 +250,7 @@ pub const Cache = struct {
     /// Keep `addresses` for `key`. An answer that cannot be kept for want
     /// of memory is simply not kept.
     fn keep(c: *Cache, io: Io, key: []const u8, now: Io.Timestamp, addresses: []const IpAddress) void {
-        var entry: Entry = .{ .addresses = undefined, .len = @intCast(@min(addresses.len, max_kept)), .expires = now.addDuration(c.options.ttl) };
+        var entry: Entry = .{ .addresses = undefined, .len = @intCast(@min(addresses.len, max_kept)), .expires = now.addDuration(span.toIo(c.options.ttl)) };
         @memcpy(entry.addresses[0..entry.len], addresses[0..entry.len]);
         var held = c.entries.acquireUncancelable(io);
         defer held.deinit(io);
@@ -373,7 +375,7 @@ test "a cached answer is kept for its time, for either family and any port" {
     var clock: shakedown.Clock = .init(test_io.io(), .{});
     const io = clock.io();
     var counting: Counting = .{};
-    var cache: Cache = .init(testing.allocator, counting.resolver(), .{ .ttl = .fromSeconds(60), .max_entries = 2 });
+    var cache: Cache = .init(testing.allocator, counting.resolver(), .{ .ttl = .literal("60s"), .max_entries = 2 });
     defer cache.deinit(io);
     const r = cache.resolver();
     var out: [4]IpAddress = undefined;

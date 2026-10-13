@@ -170,8 +170,61 @@ test "zstd bodies are decoded, and one whose window passes the client's cap refu
     const megabyte = try bodyOf(head ++ comptime rawFrame(20), .{});
     defer gpa.free(megabyte);
     try testing.expectEqualStrings("hello", megabyte);
-    try testing.expectError(error.HttpProtocolError, bodyOf(head ++ comptime rawFrame(24), .{}));
-    try testing.expectError(error.HttpProtocolError, bodyOf(head ++ comptime rawFrame(20), .{ .max_zstd_window = .fromRaw(512 << 10) }));
+    try testing.expectError(error.BadContentEncoding, bodyOf(head ++ comptime rawFrame(24), .{}));
+    try testing.expectError(error.BadContentEncoding, bodyOf(head ++ comptime rawFrame(20), .{ .max_zstd_window = .fromRaw(512 << 10) }));
+}
+
+test "a coded body whose checksum is not its data's is refused, and says why" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const text = "a body worth compressing: repeated repeated repeated repeated";
+    const coded = try compressed(gpa, .gzip, text);
+    defer gpa.free(coded);
+    // The CRC-32 is the trailer's first four bytes.
+    coded[coded.len - 8] ^= 0x10;
+    const answer = try gpa.print("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {d}\r\n\r\n{s}", .{ coded.len, coded });
+    defer gpa.free(answer);
+    const Ctx = struct {
+        fn answerFn(context: ?*anyopaque, _: Server.Request) Server.Answer {
+            const bytes: *const []const u8 = @ptrCast(@alignCast(context.?)); // safe: the test passes a pointer to its answer
+            return .{ .bytes = bytes.* };
+        }
+    };
+    const server = try Server.start(gpa, io, .{ .context = @ptrCast(@constCast(&answer)), .answer = Ctx.answerFn });
+    defer server.stop();
+    var client: Client = .init(gpa, .{});
+    defer client.deinit(io);
+    var buf: [64]u8 = undefined;
+    var response = try client.send(io, .{ .url = server.url(&buf, "/") });
+    defer response.deinit(io);
+    try testing.expectError(error.BadContentEncoding, response.collect(gpa, io, .limited(1 << 20)));
+    try testing.expectEqual(error.ChecksumMismatch, response.decodingFailure().?);
+}
+
+test "a body under two codings is decoded, the last applied first" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const text = "a body worth compressing: repeated repeated repeated repeated";
+    const inner = try compressed(gpa, .zlib, text);
+    defer gpa.free(inner);
+    const outer = try compressed(gpa, .gzip, inner);
+    defer gpa.free(outer);
+    const answer = try gpa.print("HTTP/1.1 200 OK\r\nContent-Encoding: deflate, gzip\r\nContent-Length: {d}\r\n\r\n{s}", .{ outer.len, outer });
+    defer gpa.free(answer);
+    const Ctx = struct {
+        fn answerFn(context: ?*anyopaque, _: Server.Request) Server.Answer {
+            const bytes: *const []const u8 = @ptrCast(@alignCast(context.?)); // safe: the test passes a pointer to its answer
+            return .{ .bytes = bytes.* };
+        }
+    };
+    const server = try Server.start(gpa, io, .{ .context = @ptrCast(@constCast(&answer)), .answer = Ctx.answerFn });
+    defer server.stop();
+    var client: Client = .init(gpa, .{});
+    defer client.deinit(io);
+    var buf: [64]u8 = undefined;
+    const body = try get(&client, io, server.url(&buf, "/"));
+    defer gpa.free(body);
+    try testing.expectEqualStrings(text, body);
 }
 
 test "a body read through the caller's buffer is peeked as far as that buffer holds" {
@@ -378,7 +431,7 @@ test "an answer that stops coming is given up on at the activity timeout, and it
     const io = test_io.io();
     const server = try Server.start(testing.allocator, io, Server.fixedAnswer(.{ .silent = true }));
     defer server.stop();
-    var client: Client = .init(testing.allocator, .{ .timeouts = .{ .activity = .fromMilliseconds(100) } });
+    var client: Client = .init(testing.allocator, .{ .timeouts = .{ .activity = .literal("100ms") } });
     defer client.deinit(io);
     var buf: [64]u8 = undefined;
     var diagnostics: Diagnostics = .{};
@@ -410,7 +463,7 @@ test "with no task to spare, reads are bounded by the Io where it can, and count
     defer server.stop();
     var serial: Serial = .init(test_io.io(), 0);
     const io = serial.io();
-    var client: Client = .init(testing.allocator, .{ .timeouts = .{ .activity = .fromMilliseconds(100) } });
+    var client: Client = .init(testing.allocator, .{ .timeouts = .{ .activity = .literal("100ms") } });
     defer client.deinit(io);
     var buf: [64]u8 = undefined;
     if (builtin.target.os.tag == .windows) {
@@ -427,7 +480,7 @@ test "tasks sending at once through one client share the connections it keeps" {
     const io = test_io.io();
     const server = try Server.start(testing.allocator, io, Server.fixed(ok_answer));
     defer server.stop();
-    var client: Client = .init(testing.allocator, .{ .pool = .{ .max_idle_per_route = 4 }, .timeouts = .{ .connect = .fromSeconds(10), .activity = .fromSeconds(10) } });
+    var client: Client = .init(testing.allocator, .{ .pool = .{ .max_idle_per_route = 4 }, .timeouts = .{ .connect = .literal("10s"), .activity = .literal("10s") } });
     defer client.deinit(io);
     var buf: [64]u8 = undefined;
     const url = server.url(&buf, "/");
@@ -458,7 +511,7 @@ test "a request on a warm client allocates nothing" {
     const server = try Server.start(testing.allocator, io, Server.fixed(ok_answer));
     defer server.stop();
     var counting: shakedown.alloc.Counting = .init(testing.allocator);
-    var client: Client = .init(counting.allocator(), .{ .timeouts = .{ .activity = .fromSeconds(30) } });
+    var client: Client = .init(counting.allocator(), .{ .timeouts = .{ .activity = .literal("30s") } });
     defer client.deinit(io);
     var buf: [64]u8 = undefined;
     const url = server.url(&buf, "/");
@@ -646,8 +699,8 @@ test "a SOCKS negotiation that stalls is given up on at the connect timeout, and
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const cases = [_]struct { Timeouts, Diagnostics.Timeout }{
-        .{ .{ .connect = .fromMilliseconds(50) }, .connect },
-        .{ .{ .handshake = .fromMilliseconds(50) }, .handshake },
+        .{ .{ .connect = .literal("50ms") }, .connect },
+        .{ .{ .handshake = .literal("50ms") }, .handshake },
     };
     for (cases) |case| {
         const proxy = try TestProxy.start(gpa, io, .{ .kind = .socks, .stall = true });

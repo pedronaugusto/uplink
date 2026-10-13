@@ -1,5 +1,5 @@
 //! One connection and what it is made of: the proxy, the layers, the
-//! deadlines and the buffers.
+//! deadlines, the buffers and the bodies read from it.
 
 /// One connection: a socket and the layers on it.
 pub const Connection = @import("transport/Connection.zig");
@@ -17,6 +17,12 @@ pub const awake = @import("transport/awake.zig");
 pub const Diagnostics = @import("transport/Diagnostics.zig");
 /// Every step of a request, with its timing, as it happens.
 pub const Observer = @import("transport/Observer.zig");
+/// A message body as its framing delimits it.
+pub const Body = @import("transport/Body.zig");
+/// A message head gathered into a pooled buffer.
+pub const Head = @import("transport/Head.zig");
+/// One socket's operations, each ended at its deadline.
+pub const Timed = @import("transport/Timed.zig");
 
 test {
     _ = Connection;
@@ -27,4 +33,7 @@ test {
     _ = awake;
     _ = Diagnostics;
     _ = Observer;
+    _ = Body;
+    _ = Timed;
+    _ = Head;
 }

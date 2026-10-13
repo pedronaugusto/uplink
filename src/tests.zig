@@ -2,9 +2,11 @@
 //! from outside.
 test {
     _ = @import("uplink.zig");
+    _ = @import("span.zig");
     _ = @import("tls.zig");
     _ = @import("net.zig");
     _ = @import("transport.zig");
+    _ = @import("coding.zig");
     _ = @import("pool.zig");
     _ = @import("client.zig");
     _ = @import("testing/Unwiped.zig");

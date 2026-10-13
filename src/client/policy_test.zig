@@ -201,7 +201,7 @@ fn unavailableFirst(context: ?*anyopaque, request: Server.Request) Server.Answer
 test "statuses the retries cover are tried again after Retry-After or a backoff, within the deadline" {
     const gpa = testing.allocator;
     const io = test_io.io();
-    const fast: Client.Options = .{ .retries = .{ .statuses = policy.Retries.transient, .base = .fromMilliseconds(1), .cap = .fromMilliseconds(5) } };
+    const fast: Client.Options = .{ .retries = .{ .statuses = policy.Retries.transient, .base = .literal("1ms"), .cap = .literal("5ms") } };
     var buf: [64]u8 = undefined;
     for ([_][]const u8{ "0", "Thu, 01 Jan 1970 00:00:00 GMT" }) |after| {
         const server = try Server.start(gpa, io, .{ .context = @ptrCast(@constCast(&after)), .answer = unavailableFirst }); // safe: the handler only reads it
@@ -255,7 +255,7 @@ test "a connection that fails before any answer is tried again when the request 
     const gpa = testing.allocator;
     const io = test_io.io();
     var buf: [64]u8 = undefined;
-    const fast: Client.Options = .{ .retries = .{ .base = .fromMilliseconds(1) } };
+    const fast: Client.Options = .{ .retries = .{ .base = .literal("1ms") } };
     {
         const server = try Server.start(gpa, io, .{ .answer = hangUpFirst });
         defer server.stop();
@@ -512,7 +512,7 @@ test "a connection slower than the low-speed limit is given up on" {
     const trickle = "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n" ++ "abcdefghijklmnopqrst";
     const server = try Server.start(gpa, io, Server.fixedAnswer(.{ .bytes = trickle, .piece = 1, .pause = .fromMilliseconds(30) }));
     defer server.stop();
-    var client: Client = .init(gpa, .{ .timeouts = .{ .low_speed = .{ .bytes_per_second = 1000, .window = .fromMilliseconds(200) } } });
+    var client: Client = .init(gpa, .{ .timeouts = .{ .low_speed = .{ .bytes_per_second = 1000, .window = .literal("200ms") } } });
     defer client.deinit(io);
     var buf: [64]u8 = undefined;
     var d: Diagnostics = .{};
@@ -535,7 +535,7 @@ test "Expect: 100-continue sends the body on the go-ahead, or never when refused
         if (expect == .refuse and builtin.target.os.tag == .windows) continue;
         const server = try Server.start(gpa, io, .{ .answer = redirecting, .expect = expect });
         defer server.stop();
-        var client: Client = .init(gpa, .{ .expect_continue_timeout = .fromMilliseconds(50) });
+        var client: Client = .init(gpa, .{ .expect_continue_timeout = .literal("50ms") });
         defer client.deinit(io);
         var response = try client.send(io, .{ .method = .PUT, .url = server.url(&buf, "/echo"), .body = .{ .bytes = "payload" }, .expect_continue = true });
         defer response.deinit(io);
@@ -782,7 +782,7 @@ test "a warm client with cookies and a kept answer still allocates nothing per r
     var jar: CookieJar = .init(testing.allocator, .{});
     defer jar.deinit(io);
     var store: Store = .{ .secret = .{ .password = .{ .user = "a", .password = "b" } } };
-    var client: Client = .init(counting.allocator(), .{ .cookies = &jar, .credentials = store.credentials(), .timeouts = .{ .activity = .fromSeconds(30) } });
+    var client: Client = .init(counting.allocator(), .{ .cookies = &jar, .credentials = store.credentials(), .timeouts = .{ .activity = .literal("30s") } });
     defer client.deinit(io);
     var buf: [64]u8 = undefined;
     const url = server.url(&buf, "/");

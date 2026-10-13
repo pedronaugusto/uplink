@@ -1,16 +1,17 @@
-//! A response's body as its framing delimits it: a length, chunks, or the
+//! A message's body as its framing delimits it: a length, chunks, or the
 //! connection's end. The body's bytes pass from the connection's reader to
 //! the caller's writer without a copy of the body reader's own; chunk
 //! framing is consumed where it lies in the connection's buffer. A chunked
 //! body's trailer section, when it has fields, is gathered into a buffer
-//! from the client's pool for `Response.trailers`.
+//! from the pool for the message's `trailers`. A body may be capped, as a
+//! server caps a request's: past the cap it reads no more.
 
 const std = @import("std");
 const Io = std.Io;
 const wire = @import("uplink.wire");
 const h1 = wire.h1;
 const Field = wire.fields.Field;
-const BufferPool = @import("../transport/BufferPool.zig");
+const BufferPool = @import("BufferPool.zig");
 
 const Body = @This();
 
@@ -23,6 +24,9 @@ framing: h1.Framing,
 remaining: u64,
 /// Private: the chunk framing's state.
 chunked: h1.ChunkedDecoder = .{},
+/// Private: the bytes a body without a known length may still have before
+/// it is too large; null is no cap.
+allowed: ?u64 = null,
 /// Where reading stands.
 state: State = .reading,
 /// Private: where trailer bytes go, and the `Io` to borrow it with;
@@ -43,6 +47,8 @@ pub const State = enum {
     incomplete,
     /// The chunk framing was malformed.
     malformed,
+    /// The body passed its cap.
+    too_large,
 };
 
 /// A body read from `in` as `framing` says, with `buffer` for the reader's
@@ -75,19 +81,23 @@ fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!u
     switch (b.state) {
         .reading => {},
         .done => return error.EndOfStream,
-        .read_failed, .incomplete, .malformed => return error.ReadFailed,
+        .read_failed, .incomplete, .malformed, .too_large => return error.ReadFailed,
     }
     if (limit == .nothing) return 0;
     return switch (b.framing) {
         .none => unreachable, // unreachable: a body with no framing starts done
         .length => b.streamLength(w, limit),
-        .until_close => b.in.stream(w, limit) catch |err| switch (err) {
-            error.EndOfStream => {
-                b.state = .done;
-                return error.EndOfStream;
-            },
-            error.ReadFailed => b.failed(.read_failed),
-            error.WriteFailed => error.WriteFailed,
+        .until_close => {
+            const n = b.in.stream(w, try b.capped(limit, std.math.maxInt(u64))) catch |err| return switch (err) {
+                error.EndOfStream => {
+                    b.state = .done;
+                    return error.EndOfStream;
+                },
+                error.ReadFailed => b.failed(.read_failed),
+                error.WriteFailed => error.WriteFailed,
+            };
+            b.count(n);
+            return n;
         },
         .chunked => b.streamChunked(w, limit),
     };
@@ -109,12 +119,13 @@ fn streamChunked(b: *Body, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError
     while (true) {
         const pending = d.pending();
         if (pending != 0) {
-            const n = b.in.stream(w, limit.min(.limited64(pending))) catch |err| return switch (err) {
+            const n = b.in.stream(w, try b.capped(limit, pending)) catch |err| return switch (err) {
                 error.EndOfStream => b.failed(.incomplete),
                 error.ReadFailed => b.failed(.read_failed),
                 error.WriteFailed => error.WriteFailed,
             };
             d.take(n);
+            b.count(n);
             return n;
         }
         if (d.done()) {
@@ -156,6 +167,25 @@ fn keepTrailer(b: *Body, bytes: []const u8) error{OutOfMemory}!void {
 pub fn trailerBytes(b: *Body) ?[]u8 {
     if (b.state != .done or b.trailer.len == 0) return null;
     return b.trailer[0..b.trailer_len];
+}
+
+/// Cap the body at `max` bytes: a longer one reads to the cap, then fails
+/// with its state `too_large`. For a body of known length the caller
+/// compares the length itself, before reading.
+pub fn cap(b: *Body, max: u64) void {
+    b.allowed = max;
+}
+
+/// `limit`, no more than `available` and no more than the cap leaves; a
+/// body with nothing left under its cap and more to come is too large.
+fn capped(b: *Body, limit: Io.Limit, available: u64) error{ReadFailed}!Io.Limit {
+    const allowed = b.allowed orelse return limit.min(.limited64(available));
+    if (allowed == 0) return b.failed(.too_large);
+    return limit.min(.limited64(@min(available, allowed)));
+}
+
+fn count(b: *Body, n: usize) void {
+    if (b.allowed) |*a| a.* -= n;
 }
 
 fn failed(b: *Body, state: State) error{ReadFailed} {
@@ -236,4 +266,19 @@ test "a body to the connection's end, and one with none, end as framed" {
     const nothing = try readAll(&none);
     defer testing.allocator.free(nothing);
     try testing.expectEqual(@as(usize, 0), nothing.len);
+}
+
+test "a capped body reads to its cap and then is too large" {
+    var in: Io.Reader = .fixed("4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n");
+    var buf: [16]u8 = undefined;
+    var b: Body = .init(&in, .chunked, &buf);
+    b.cap(6);
+    try testing.expectError(error.ReadFailed, readAll(&b));
+    try testing.expectEqual(State.too_large, b.state);
+    var fits: Io.Reader = .fixed("4\r\nWiki\r\n0\r\n\r\n");
+    var ok: Body = .init(&fits, .chunked, &buf);
+    ok.cap(4);
+    const got = try readAll(&ok);
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("Wiki", got);
 }

@@ -66,7 +66,8 @@ const token_chars: [256]bool = blk: {
     break :blk table;
 };
 
-/// The field names the framing and the client read, found once at parse.
+/// The field names the framing, the client and the server read, found once
+/// at parse.
 pub const Known = enum(u8) {
     @"accept-encoding",
     @"alt-svc",
@@ -75,6 +76,8 @@ pub const Known = enum(u8) {
     @"content-length",
     @"content-type",
     date,
+    expect,
+    host,
     @"keep-alive",
     location,
     @"proxy-authenticate",

@@ -32,6 +32,9 @@ pub const Prepare = client.Prepare;
 pub const Observer = transport.Observer;
 /// A proxy, read from settings or the environment.
 pub const Proxy = transport.Proxy;
+/// A span of time: every timeout, delay and lifetime uplink takes, and every
+/// duration it reports. `.literal("30s")`, `Duration.parse`, `{f}`.
+pub const Duration = @import("span.zig").Duration;
 /// How long each step of an exchange may take.
 pub const Timeouts = transport.Context.Timeouts;
 /// How connections are made: socket options, Happy Eyeballs, a Unix
@@ -61,6 +64,7 @@ test {
     _ = transport;
     _ = tls;
     _ = net;
+    _ = @import("coding.zig");
     _ = wire;
     _ = @import("pool.zig");
 }

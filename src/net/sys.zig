@@ -7,6 +7,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
 const IpAddress = Io.net.IpAddress;
+const Duration = @import("../span.zig").Duration;
 
 const os = builtin.target.os.tag;
 
@@ -17,7 +18,7 @@ pub const Tuning = struct {
     nodelay: bool = true,
     /// Turn TCP keepalive on, first probing after this long idle; whole
     /// seconds, at least one.
-    keepalive: ?Io.Duration = null,
+    keepalive: ?Duration = null,
 };
 
 /// Tune a connected socket, and, on the systems that have it, keep a write
@@ -25,7 +26,7 @@ pub const Tuning = struct {
 /// program having ignored the signal. A refusal is not a reason to fail the
 /// connection, and is not reported.
 pub fn tune(io: Io, handle: Io.net.Socket.Handle, tuning: Tuning) void {
-    const idle: ?u32 = if (tuning.keepalive) |k| @intCast(std.math.clamp(@divTrunc(k.nanoseconds, std.time.ns_per_s), 1, std.math.maxInt(i32))) else null;
+    const idle: ?u32 = if (tuning.keepalive) |k| @intCast(std.math.clamp(k.convert(.second, u64, .down).raw(), 1, std.math.maxInt(i32))) else null;
     if (os == .windows) {
         const ws2_32 = std.os.windows.ws2_32;
         if (tuning.nodelay) setAfd(io, handle, ws2_32.IPPROTO.TCP, ws2_32.TCP.NODELAY, 1);
@@ -123,7 +124,7 @@ test "a tuned socket has Nagle's algorithm off and keepalive on at the idle time
     const stream = try listener.socket.address.connect(io, .{ .mode = .stream });
     defer stream.close(io);
     const h = stream.socket.handle;
-    tune(io, h, .{ .keepalive = .fromSeconds(45) });
+    tune(io, h, .{ .keepalive = .literal("45s") });
     try testing.expect((readOption(h, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY) orelse return error.SkipZigTest) != 0);
     try testing.expect(readOption(h, std.posix.SOL.SOCKET, std.posix.SO.KEEPALIVE).? != 0);
     const idle_name: ?u32 = if (@hasDecl(std.posix.TCP, "KEEPIDLE")) std.posix.TCP.KEEPIDLE else if (@hasDecl(std.posix.TCP, "KEEPALIVE")) std.posix.TCP.KEEPALIVE else null;

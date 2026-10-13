@@ -7,7 +7,8 @@ and proxies' challenges, keeps cookies, and goes through HTTP, HTTPS and SOCKS
 proxies with TLS to the server inside the tunnel. It presents client
 certificates, keeps connect, handshake, activity, low-speed and per-request
 deadlines without a task per connection, races a name's addresses by Happy
-Eyeballs, and decodes gzip, deflate and zstd bodies. It runs on any `std.Io`
+Eyeballs, and decodes gzip, deflate and zstd bodies with
+[warp](https://github.com/pedronaugusto/warp), every checksum verified. It runs on any `std.Io`
 and evented on [reactor](https://github.com/pedronaugusto/reactor)'s runtime. A warm client makes a
 request without allocating. The codecs it is built from, HTTP/1.1 heads and
 chunked bodies, header fields, dates, cookies, authentication challenges,
@@ -20,8 +21,9 @@ Requires Zig 0.17.0. Fetch with `zig fetch --save
 git+https://github.com/pedronaugusto/uplink` and add the `uplink` module to
 your module's imports. It depends on `std`,
 [aegis](https://github.com/pedronaugusto/aegis),
-[reactor](https://github.com/pedronaugusto/reactor) and
-[cloak](https://github.com/pedronaugusto/cloak), the last two fetched only when
+[reactor](https://github.com/pedronaugusto/reactor),
+[cloak](https://github.com/pedronaugusto/cloak) and
+[warp](https://github.com/pedronaugusto/warp), the last three fetched only when
 the client is built.
 
 The codecs are a module of their own. A program that reads and writes HTTP
@@ -57,7 +59,7 @@ const io = runtime.io();
 var jar: uplink.CookieJar = .init(gpa, .{});
 defer jar.deinit(io);
 var client: uplink.Client = .init(gpa, .{
-    .timeouts = .{ .connect = .fromSeconds(10), .activity = .fromSeconds(30) },
+    .timeouts = .{ .connect = .literal("10s"), .activity = .literal("30s") },
     .cookies = &jar,
     .user_agent = "example/1.0",
 });

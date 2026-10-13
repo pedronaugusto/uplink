@@ -7,6 +7,7 @@ const Io = std.Io;
 const wire = @import("uplink.wire");
 const date = wire.date;
 const url_mod = wire.url;
+const Duration = @import("../span.zig").Duration;
 
 /// Which redirects are followed.
 pub const Redirects = union(enum) {
@@ -76,11 +77,11 @@ pub const Retries = struct {
     /// The first wait; each later one may be twice the last, up to `cap`.
     /// The wait is a random time up to that ("full jitter"), so many
     /// clients failing at once do not come back at once.
-    base: Io.Duration = .fromMilliseconds(100),
-    cap: Io.Duration = .fromSeconds(10),
+    base: Duration = .literal("100ms"),
+    cap: Duration = .literal("10s"),
     /// The longest `Retry-After` honoured; a server asking for longer gets
     /// its response handed back instead.
-    max_wait: Io.Duration = .fromSeconds(60),
+    max_wait: Duration = .literal("60s"),
 
     /// Nothing tried again.
     pub const none: Retries = .{ .max_attempts = 1, .connection = false };
@@ -96,25 +97,24 @@ pub const Retries = struct {
     /// The wait before attempt `next` (2 for the first retry): a random
     /// time up to `base` doubled each attempt, at most `cap`. `random` is
     /// a fresh random number.
-    pub fn backoff(r: Retries, next: u8, random: u64) Io.Duration {
+    pub fn backoff(r: Retries, next: u8, random: u64) Duration {
         std.debug.assert(next >= 2);
         const shift: u6 = @intCast(@min(next - 2, 40));
-        const base: u64 = @intCast(@max(0, r.base.nanoseconds));
-        const cap: u64 = @intCast(@max(0, r.cap.nanoseconds));
-        const ceiling = @min(cap, base *| (@as(u64, 1) << shift));
-        if (ceiling == 0) return .zero;
-        return .fromNanoseconds(random % (ceiling + 1));
+        const ceiling = @min(r.cap.raw(), r.base.raw() *| (@as(u64, 1) << shift));
+        if (ceiling == 0) return .fromRaw(0);
+        return .fromRaw(random % (ceiling + 1));
     }
 };
 
 /// How long a `Retry-After` value asks to wait: seconds, or an HTTP date
 /// against `now` (seconds since the epoch on the real clock). Null when
 /// the value is neither.
-pub fn retryAfter(value: []const u8, now: i64) ?Io.Duration {
+pub fn retryAfter(value: []const u8, now: i64) ?Duration {
     const text = std.mem.trim(u8, value, " \t");
-    if (std.fmt.parseUnsigned(u32, text, 10)) |n| return .fromSeconds(n) else |_| {}
+    if (std.fmt.parseUnsigned(u32, text, 10)) |n| return .fromRaw(@as(u64, n) * std.time.ns_per_s) else |_| {}
     const at = date.parse(text) orelse return null;
-    return .fromSeconds(@max(0, at - now));
+    const seconds: u64 = @intCast(std.math.clamp(at - now, 0, std.math.maxInt(u64) / std.time.ns_per_s)); // safe: clamped to what a span holds
+    return .fromRaw(seconds * std.time.ns_per_s);
 }
 
 /// Whether a status says the server did not act on the request, so even a
@@ -151,22 +151,22 @@ test "a redirect is refused past its count, from https to http, and off its orig
 }
 
 test "backoff grows from its base to its cap, at random below each" {
-    const r: Retries = .{ .base = .fromMilliseconds(100), .cap = .fromSeconds(1) };
-    try testing.expectEqual(@as(i96, 100 * std.time.ns_per_ms), r.backoff(2, 100 * std.time.ns_per_ms).nanoseconds);
-    try testing.expectEqual(@as(i96, 0), r.backoff(2, 100 * std.time.ns_per_ms + 1).nanoseconds);
+    const r: Retries = .{ .base = .literal("100ms"), .cap = .literal("1s") };
+    try testing.expectEqual(@as(u64, 100 * std.time.ns_per_ms), r.backoff(2, 100 * std.time.ns_per_ms).raw());
+    try testing.expectEqual(@as(u64, 0), r.backoff(2, 100 * std.time.ns_per_ms + 1).raw());
     for (2..60) |n| {
         const d = r.backoff(@intCast(n), 0xdead_beef_cafe);
-        try testing.expect(d.nanoseconds >= 0 and d.nanoseconds <= std.time.ns_per_s);
+        try testing.expect(d.compare(.literal("1s")) != .gt);
     }
-    try testing.expectEqual(@as(i96, 0), (Retries{ .base = .zero }).backoff(3, 7).nanoseconds);
+    try testing.expectEqual(@as(u64, 0), (Retries{ .base = .fromRaw(0) }).backoff(3, 7).raw());
     try testing.expect(r.retriesStatus(.ok) == false);
     try testing.expect((Retries{ .statuses = Retries.transient }).retriesStatus(.service_unavailable));
 }
 
 test "Retry-After is read as seconds or as a date" {
-    try testing.expectEqual(@as(i96, 120 * std.time.ns_per_s), retryAfter(" 120 ", 0).?.nanoseconds);
-    try testing.expectEqual(@as(i96, 37 * std.time.ns_per_s), retryAfter("Sun, 06 Nov 1994 08:49:37 GMT", 784111740).?.nanoseconds);
-    try testing.expectEqual(@as(i96, 0), retryAfter("Sun, 06 Nov 1994 08:49:37 GMT", 784111800).?.nanoseconds);
+    try testing.expectEqual(@as(u64, 120 * std.time.ns_per_s), retryAfter(" 120 ", 0).?.raw());
+    try testing.expectEqual(@as(u64, 37 * std.time.ns_per_s), retryAfter("Sun, 06 Nov 1994 08:49:37 GMT", 784111740).?.raw());
+    try testing.expectEqual(@as(u64, 0), retryAfter("Sun, 06 Nov 1994 08:49:37 GMT", 784111800).?.raw());
     try testing.expectEqual(null, retryAfter("soon", 0));
     try testing.expectEqual(null, retryAfter("-1", 0));
 }

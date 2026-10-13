@@ -32,8 +32,10 @@ const socks = wire.socks;
 const dial = @import("../net/dial.zig");
 const sys = @import("../net/sys.zig");
 const Context = @import("Context.zig");
+const span = @import("../span.zig");
 const Diagnostics = @import("Diagnostics.zig");
 const Proxy = @import("Proxy.zig");
+const Timed = @import("Timed.zig");
 
 const Connection = @This();
 
@@ -44,10 +46,8 @@ ctx: *Context,
 io: Io,
 /// Private: the socket.
 stream: Io.net.Stream,
-/// Where the connection goes; its host is in `host_storage`.
+/// Where the connection goes.
 route: Context.Route,
-/// Private.
-host_storage: [Io.net.HostName.max_len]u8 = undefined,
 /// Private: the socket's reader and writer.
 input: SocketReader,
 output: SocketWriter,
@@ -57,10 +57,8 @@ session_on: [2]bool = .{ false, false },
 session_buffers: [2][2][]u8 = undefined,
 /// Requests name the whole URL: through a proxy, to an `http` target.
 absolute_form: bool = false,
-/// Private: how deadlines are kept.
-mode: Mode = .unwatched,
-/// Private: the operation deadline `Deadlines` keeps.
-watch: reactor.net.Deadlines.Watch,
+/// Private: the socket's operations, each ended at its deadline.
+timed: Timed,
 /// Private: when the handshake under way must be done, on the awake clock.
 handshake_until: ?Io.Timestamp = null,
 /// Private: the timeout `handshake_until` keeps, which for a SOCKS
@@ -77,17 +75,6 @@ failure: Failure = .none,
 /// The exchange this connection serves, for its failure details; null
 /// between exchanges.
 diagnostics: ?*Diagnostics = null,
-
-const Mode = enum {
-    /// No deadline kept yet: the first operation with one decides.
-    unwatched,
-    /// The client's `Deadlines` keep them.
-    deadlines,
-    /// `Io.operateTimeout` keeps them.
-    operate,
-    /// Asked for, and nothing could keep them.
-    unenforced,
-};
 
 /// Why an operation failed.
 pub const Failure = enum { none, timed_out, canceled, broken };
@@ -147,10 +134,9 @@ pub fn open(ctx: *Context, io: Io, route: Context.Route, options: OpenOptions) O
 }
 
 fn openOnce(ctx: *Context, io: Io, route: Context.Route, options: OpenOptions, again: *bool) OpenError!*Connection {
-    if (route.host.len > Io.net.HostName.max_len) return error.InvalidHostName;
     const diagnostics = options.diagnostics;
     const proxy: ?Proxy = if (route.proxy) |slot| slot.proxy else null;
-    const first_host = if (proxy) |p| p.host else route.host;
+    const first_host = if (proxy) |p| p.host else route.host();
     const first_port = if (proxy) |p| p.port else route.port;
     if (diagnostics) |d| d.stage = .connect;
     const started = Io.Clock.awake.now(io);
@@ -161,8 +147,8 @@ fn openOnce(ctx: *Context, io: Io, route: Context.Route, options: OpenOptions, a
     if (options.deadline) |d| {
         const left = started.durationTo(d);
         if (left.nanoseconds <= 0) return timedOutBeforeOpen(diagnostics);
-        if (limit == null or left.nanoseconds < limit.?.nanoseconds) {
-            limit = left;
+        if (limit == null or span.of(left).compare(limit.?) == .lt) {
+            limit = span.of(left);
             limit_kind = .deadline;
         }
     }
@@ -191,7 +177,7 @@ fn openOnce(ctx: *Context, io: Io, route: Context.Route, options: OpenOptions, a
         .port = first_port,
         .peer = if (unix) null else dialed.stream.socket.address,
         .lookup = dialed.lookup,
-        .took = started.durationTo(Io.Clock.awake.now(io)),
+        .took = span.of(started.durationTo(Io.Clock.awake.now(io))),
     } });
     const conn = create(ctx, io, route, dialed.stream, diagnostics) catch |err| {
         dialed.stream.close(io);
@@ -224,11 +210,9 @@ fn create(ctx: *Context, io: Io, route: Context.Route, stream: Io.net.Stream, di
         .route = route,
         .input = .init(read_buffer),
         .output = .init(write_buffer),
-        .watch = .init(stream.socket.handle),
+        .timed = .init(stream.socket.handle),
         .diagnostics = diagnostics,
     };
-    @memcpy(conn.host_storage[0..route.host.len], route.host);
-    conn.route.host = conn.host_storage[0..route.host.len];
     return conn;
 }
 
@@ -248,7 +232,7 @@ fn establish(conn: *Connection, proxy: ?Proxy, started: Io.Timestamp, again: *bo
             } else conn.absolute_form = true;
         }
     }
-    if (conn.route.secure) try conn.startTls(1, conn.route.host);
+    if (conn.route.secure) try conn.startTls(1, conn.route.host());
 }
 
 /// The time now, when an observer will want a step's duration.
@@ -259,7 +243,7 @@ fn observeStart(conn: *Connection) ?Io.Timestamp {
 
 fn observeTunnel(conn: *Connection, at: ?Io.Timestamp) void {
     const o = conn.ctx.observer orelse return;
-    o.emit(.{ .tunnel = .{ .took = at.?.durationTo(Io.Clock.awake.now(conn.io)) } });
+    o.emit(.{ .tunnel = .{ .took = span.of(at.?.durationTo(Io.Clock.awake.now(conn.io))) } });
 }
 
 /// Close politely: TLS close_notify, within the activity timeout, unless an
@@ -284,7 +268,7 @@ fn teardown(conn: *Connection, io: Io, polite: bool) void {
         for (conn.session_buffers[i]) |b| conn.ctx.buffers.release(io, b);
         conn.session_on[i] = false;
     }
-    if (conn.mode == .deadlines) conn.ctx.deadlines.remove(io, &conn.watch);
+    conn.timed.deinit(io, conn.ctx.keeper());
     conn.stream.close(io);
     conn.releaseSocketBuffers(io);
     conn.ctx.gpa.destroy(conn);
@@ -385,7 +369,7 @@ pub fn readable(conn: *Connection, io: Io, timeout: Io.Duration) Io.Cancelable!b
 /// Whether the connection may carry another exchange: no operation failed
 /// and no deadline fired.
 pub fn reusable(conn: *const Connection) bool {
-    return conn.failure == .none and !conn.watch.fired.load(.acquire);
+    return conn.failure == .none and !conn.timed.fired();
 }
 
 /// The reader of the top layer.
@@ -437,7 +421,7 @@ pub fn readError(conn: *Connection) IoError {
         .canceled => return error.Canceled,
         .none, .broken => {},
     }
-    if (conn.watch.fired.load(.acquire)) return conn.timedOut(conn.armed);
+    if (conn.timed.fired()) return conn.timedOut(conn.armed);
     for (&conn.sessions, conn.session_on) |*s, on| {
         if (!on) continue;
         const err = s.failure orelse continue;
@@ -468,7 +452,7 @@ pub fn writeError(conn: *Connection) IoError {
         .canceled => return error.Canceled,
         .none, .broken => {},
     }
-    if (conn.watch.fired.load(.acquire)) return conn.timedOut(conn.armed);
+    if (conn.timed.fired()) return conn.timedOut(conn.armed);
     // A server that refused the client's certificate after a TLS 1.3
     // handshake the client thinks is done has sent its alert and closed:
     // the write that failed is the request, and the alert is there to read.
@@ -502,14 +486,8 @@ fn missingCertificateReset(conn: *Connection) bool {
     return false;
 }
 
-/// Have the client's `Deadlines` keep this connection's, or the `Io` when
-/// no task can be had for them.
-fn startWatch(conn: *Connection, io: Io) void {
-    conn.mode = if (conn.ctx.deadlines.add(io, &conn.watch)) .deadlines else .operate;
-}
-
-/// A deadline, which limit it is, and the time it was found at.
-const Limit = struct { at: Io.Timestamp, kind: Diagnostics.Timeout, now: Io.Timestamp = .zero };
+/// A deadline, and which limit it is.
+const Limit = struct { at: Io.Timestamp, kind: Diagnostics.Timeout };
 
 /// The deadline of an operation starting now, or null when none applies,
 /// found without reading the clock.
@@ -519,10 +497,9 @@ fn operationLimit(conn: *Connection, io: Io) ?Limit {
     const now = Io.Clock.awake.now(io);
     var best: ?Limit = null;
     if (conn.handshake_until) |h| nearer(&best, .{ .at = h, .kind = conn.handshake_bound });
-    if (t.activity) |a| nearer(&best, .{ .at = now.addDuration(a), .kind = if (conn.handshake_until != null) .handshake else .activity });
+    if (t.activity) |a| nearer(&best, .{ .at = now.addDuration(span.toIo(a)), .kind = if (conn.handshake_until != null) .handshake else .activity });
     if (conn.deadline) |d| nearer(&best, .{ .at = d, .kind = .deadline });
     if (t.low_speed) |l| nearer(&best, .{ .at = conn.speed.deadline(now, l), .kind = .low_speed });
-    best.?.now = now;
     return best;
 }
 
@@ -534,38 +511,15 @@ fn nearer(best: *?Limit, candidate: Limit) void {
 /// is recorded in `failure`, and `error.Failed` returned.
 fn perform(conn: *Connection, op: Io.Operation) error{Failed}!Io.Operation.Result {
     const io = conn.io;
-    if (conn.mode == .unenforced) return io.operate(op) catch return conn.fail(.canceled);
-    const limit = conn.operationLimit(io) orelse return io.operate(op) catch return conn.fail(.canceled);
-    if (limit.at.nanoseconds <= limit.now.nanoseconds) {
-        conn.noteTimedOut(limit.kind);
-        return error.Failed;
-    }
-    conn.armed = limit.kind;
-    if (conn.mode == .unwatched) conn.startWatch(io);
-    switch (conn.mode) {
-        .deadlines => return conn.ctx.deadlines.operate(io, &conn.watch, op, .{ .raw = limit.at, .clock = .awake }) catch |err| switch (err) {
-            error.Timeout => {
-                conn.noteTimedOut(limit.kind);
-                return error.Failed;
-            },
-            error.Canceled => conn.fail(.canceled),
+    const limit = conn.operationLimit(io);
+    if (limit) |l| conn.armed = l.kind;
+    return conn.timed.perform(io, conn.ctx.keeper(), op, if (limit) |l| l.at else null) catch |err| switch (err) {
+        error.TimedOut => {
+            conn.noteTimedOut(limit.?.kind);
+            return error.Failed;
         },
-        .operate => return io.operateTimeout(op, .{ .deadline = .{ .raw = limit.at, .clock = .awake } }) catch |err| switch (err) {
-            error.Timeout => {
-                conn.noteTimedOut(limit.kind);
-                return error.Failed;
-            },
-            error.Canceled => conn.fail(.canceled),
-            error.ConcurrencyUnavailable => {
-                // This `Io` cannot bound a socket operation: from here on
-                // the connection runs unbounded, counted once.
-                conn.mode = .unenforced;
-                _ = conn.ctx.counters.timeouts_unenforced.fetchAdd(1, .monotonic);
-                return io.operate(op) catch return conn.fail(.canceled);
-            },
-        },
-        .unwatched, .unenforced => unreachable, // unreachable: `startWatch` chose, and unenforced returned above
-    }
+        error.Canceled => conn.fail(.canceled),
+    };
 }
 
 /// `n` bytes moved, for the low-speed window.
@@ -583,15 +537,15 @@ const Speed = struct {
 
     /// When an operation starting `now` gives up for want of speed.
     fn deadline(s: *Speed, now: Io.Timestamp, l: Context.Timeouts.LowSpeed) Io.Timestamp {
-        const over = if (s.start) |start| now.nanoseconds >= start.addDuration(l.window).nanoseconds else true;
+        const over = if (s.start) |start| now.nanoseconds >= start.addDuration(span.toIo(l.window)).nanoseconds else true;
         if (over) {
             s.start = now;
             s.bytes = .fromRaw(0);
         }
-        const end = s.start.?.addDuration(l.window);
+        const end = s.start.?.addDuration(span.toIo(l.window));
         // This window has moved enough: the operation may run into the
         // next, which must move enough by its own end.
-        return if (s.bytes.sub(Context.Timeouts.lowSpeedNeed(l))) |_| end.addDuration(l.window) else |_| end;
+        return if (s.bytes.sub(Context.Timeouts.lowSpeedNeed(l))) |_| end.addDuration(span.toIo(l.window)) else |_| end;
     }
 };
 
@@ -678,7 +632,7 @@ fn startTls(conn: *Connection, slot: usize, host: []const u8) OpenError!void {
     const write_buffer = try ctx.buffers.acquire(io, .record);
     errdefer ctx.buffers.release(io, write_buffer);
     const started = conn.observeStart();
-    if (ctx.timeouts.handshake) |limit| conn.handshake_until = Io.Clock.awake.now(io).addDuration(limit);
+    if (ctx.timeouts.handshake) |limit| conn.handshake_until = Io.Clock.awake.now(io).addDuration(span.toIo(limit));
     defer conn.handshake_until = null;
     const session = &conn.sessions[slot];
     var report: cloak.tls.Session.Diagnostics = .{};
@@ -694,7 +648,7 @@ fn startTls(conn: *Connection, slot: usize, host: []const u8) OpenError!void {
     }, read_buffer, write_buffer) catch |err| return conn.handshakeFailed(err, report);
     conn.session_buffers[slot] = .{ read_buffer, write_buffer };
     conn.session_on[slot] = true;
-    if (ctx.observer) |o| o.emit(.{ .tls = .{ .host = host, .proxy = slot == 0, .took = started.?.durationTo(Io.Clock.awake.now(io)) } });
+    if (ctx.observer) |o| o.emit(.{ .tls = .{ .host = host, .proxy = slot == 0, .took = span.of(started.?.durationTo(Io.Clock.awake.now(io))) } });
 }
 
 /// The authorities a session in `slot` checks its server against, or null
@@ -719,7 +673,7 @@ fn systemTrust(conn: *Connection) OpenError!cloak.Trust.Snapshot {
 }
 
 fn handshakeFailed(conn: *Connection, err: cloak.tls.Session.OpenError, report: cloak.tls.Session.Diagnostics) OpenError {
-    if (conn.failure == .timed_out or conn.watch.fired.load(.acquire)) {
+    if (conn.failure == .timed_out or conn.timed.fired()) {
         if (conn.failure != .timed_out) conn.noteTimedOut(conn.armed);
         return error.TimedOut;
     }
@@ -745,11 +699,11 @@ fn tunnel(conn: *Connection, proxy: Proxy, again: *bool) OpenError!void {
     const ctx = conn.ctx;
     const io = conn.io;
     if (conn.diagnostics) |d| d.stage = .tunnel;
-    if (ctx.timeouts.handshake) |limit| conn.handshake_until = Io.Clock.awake.now(io).addDuration(limit);
+    if (ctx.timeouts.handshake) |limit| conn.handshake_until = Io.Clock.awake.now(io).addDuration(span.toIo(limit));
     defer conn.handshake_until = null;
     var authority_buf: [Io.net.HostName.max_len + 8]u8 = undefined;
     var aw: Io.Writer = .fixed(&authority_buf);
-    writeAuthority(&aw, conn.route.host, conn.route.port) catch return error.InvalidHostName;
+    writeAuthority(&aw, conn.route.host(), conn.route.port) catch return error.InvalidHostName;
     const authority = aw.buffered();
     const default_lines = [_]std.http.Header{
         .{ .name = "Proxy-Authorization", .value = "" },
@@ -801,10 +755,10 @@ fn writeAuthority(w: *Io.Writer, host: []const u8, port: u16) Io.Writer.Error!vo
 /// A response head parsed in `r`'s buffer, not taken from it: a head no
 /// longer than `max` or the buffer.
 fn readHeadInPlace(r: *Io.Reader, field_buf: []fields.Field, max: u32) (h1.ParseError || Io.Reader.Error)!h1.Parsed(h1.ResponseHead) {
-    const limits: h1.Limits = .{ .max_head = @intCast(@min(max, r.buffer.len)), .max_fields = @intCast(field_buf.len) };
+    const limits: h1.Limits = .{ .max_head = .fromRaw(@intCast(@min(max, r.buffer.len))), .max_fields = @intCast(field_buf.len) };
     while (true) {
         if (try h1.parseResponse(r.buffer[r.seek..r.end], field_buf, limits)) |parsed| return parsed;
-        if (r.end - r.seek >= limits.max_head) return error.HeadTooLarge;
+        if (limits.headFull(r.end - r.seek)) return error.HeadTooLarge;
         try r.fillMore();
     }
 }
@@ -818,9 +772,9 @@ fn socksTunnel(conn: *Connection, proxy: Proxy, started: Io.Timestamp) OpenError
     if (conn.diagnostics) |d| d.stage = .tunnel;
     var until: ?Io.Timestamp = null;
     var bound: Diagnostics.Timeout = .connect;
-    if (ctx.timeouts.connect) |limit| until = started.addDuration(limit);
+    if (ctx.timeouts.connect) |limit| until = started.addDuration(span.toIo(limit));
     if (ctx.timeouts.handshake) |limit| {
-        const h = Io.Clock.awake.now(io).addDuration(limit);
+        const h = Io.Clock.awake.now(io).addDuration(span.toIo(limit));
         if (until == null or h.nanoseconds < until.?.nanoseconds) {
             until = h;
             bound = .handshake;
@@ -847,7 +801,7 @@ fn socksTunnel(conn: *Connection, proxy: Proxy, started: Io.Timestamp) OpenError
         .http, .https => unreachable, // unreachable: only SOCKS proxies tunnel this way
     };
     const credential: ?socks.Credential = if (proxy.credential) |c| .{ .user = c.user, .password = c.password } else null;
-    const host = conn.route.host;
+    const host = conn.route.host();
     if ((version == .socks4 or version == .socks4a) and std.mem.findScalar(u8, host, ':') != null) return error.ProxyAddressUnsupported;
     if (version == .socks5 or version == .socks5h) socks.authenticate(conn.reader(), conn.writer(), credential) catch |err| return conn.socksFailed(err);
     const literal = reactor.net.literal(host, conn.route.port);
@@ -873,7 +827,7 @@ fn socksLookup(conn: *Connection, ipv4: bool, until: ?Io.Timestamp) OpenError!Io
     const timeout: ?Io.Duration = if (until) |u| Io.Clock.awake.now(io).durationTo(u) else null;
     if (timeout) |t| if (t.nanoseconds <= 0) return conn.timedOutOpen();
     var bounded = true;
-    const addresses = conn.ctx.resolve().lookupWithin(io, conn.route.host, conn.route.port, if (ipv4) .ip4 else null, &storage, timeout, &bounded) catch |err| return switch (err) {
+    const addresses = conn.ctx.resolve().lookupWithin(io, conn.route.host(), conn.route.port, if (ipv4) .ip4 else null, &storage, if (timeout) |t| span.of(t) else null, &bounded) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
         error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
         error.TimedOut => conn.timedOutOpen(),

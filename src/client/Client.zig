@@ -22,7 +22,7 @@ shared: Shared,
 /// A client with `options`. Nothing is allocated until the first request.
 pub fn init(gpa: Allocator, options: Options) Client {
     var o = options;
-    o.limits.max_head = @min(o.limits.max_head, 64 << 10);
+    o.limits.max_head = .fromRaw(@min(o.limits.max_head.raw(), 64 << 10));
     o.limits.max_fields = @min(o.limits.max_fields, 256);
     return .{ .shared = .{
         .context = .init(gpa, .{

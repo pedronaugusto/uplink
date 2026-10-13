@@ -2,10 +2,7 @@
 //! pool of idle connections, the answers to servers' challenges, and the
 //! options. A client is one of these; each request's run points at it.
 
-const std = @import("std");
 const aegis = @import("aegis");
-const Allocator = std.mem.Allocator;
-const Io = std.Io;
 const wire = @import("uplink.wire");
 const h1 = wire.h1;
 const tls = @import("../tls.zig");
@@ -19,6 +16,7 @@ const Credentials = @import("Credentials.zig");
 const OriginAuth = @import("OriginAuth.zig");
 const Prepare = @import("Prepare.zig");
 const policy = @import("policy.zig");
+const Duration = @import("../span.zig").Duration;
 
 const Shared = @This();
 
@@ -64,7 +62,7 @@ pub const Options = struct {
     prepare: ?Prepare = null,
     /// How long a request with `expect_continue` waits for the server's
     /// go-ahead before sending its body anyway.
-    expect_continue_timeout: Io.Duration = .fromSeconds(1),
+    expect_continue_timeout: Duration = .literal("1s"),
     /// The largest response head, and the most fields in one.
     limits: h1.Limits = .{},
 };

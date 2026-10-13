@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const Io = std.Io;
+const Duration = @import("../span.zig").Duration;
 
 const Observer = @This();
 
@@ -31,18 +32,18 @@ pub const Event = union(enum) {
         /// The address connected to; null for a Unix socket.
         peer: ?Io.net.IpAddress,
         /// The name's lookup; zero for an address.
-        lookup: Io.Duration,
+        lookup: Duration,
         /// The lookup and the connection together.
-        took: Io.Duration,
+        took: Duration,
     },
     /// A tunnel through the proxy was opened: `CONNECT` or SOCKS.
-    tunnel: struct { took: Io.Duration },
+    tunnel: struct { took: Duration },
     /// A TLS handshake finished, with the proxy or with the server.
-    tls: struct { host: []const u8, proxy: bool, took: Io.Duration },
+    tls: struct { host: []const u8, proxy: bool, took: Duration },
     /// The request's head and body were written.
     sent: struct { method: []const u8, url: []const u8 },
     /// The response's head arrived, `wait` after the request was written.
-    head: struct { status: u16, wait: Io.Duration },
+    head: struct { status: u16, wait: Duration },
     /// A challenge is being answered and the request sent again: 401 from
     /// the server, 407 from the proxy.
     challenged: struct { status: u16 },
@@ -51,7 +52,7 @@ pub const Event = union(enum) {
     /// The request is being sent again after `delay`, attempt `attempt`
     /// (2 for the first retry): for a failed connection, `error_name` says
     /// why; for a status, `status` says which.
-    retry: struct { attempt: u8, delay: Io.Duration, status: ?u16, error_name: ?[]const u8 },
+    retry: struct { attempt: u8, delay: Duration, status: ?u16, error_name: ?[]const u8 },
 };
 
 test "an observer is handed each event" {
@@ -70,7 +71,7 @@ test "an observer is handed each event" {
     };
     var count: Count = .{};
     const o: Observer = .{ .context = &count, .eventFn = Count.on };
-    o.emit(.{ .head = .{ .status = 200, .wait = .zero } });
-    o.emit(.{ .tunnel = .{ .took = .zero } });
+    o.emit(.{ .head = .{ .status = 200, .wait = .fromRaw(0) } });
+    o.emit(.{ .tunnel = .{ .took = .fromRaw(0) } });
     try std.testing.expectEqual(@as(u32, 1), count.n);
 }

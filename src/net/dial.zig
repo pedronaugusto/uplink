@@ -20,6 +20,8 @@ const Io = std.Io;
 const IpAddress = Io.net.IpAddress;
 const sys = @import("sys.zig");
 const Resolver = @import("Resolver.zig");
+const span = @import("../span.zig");
+const Duration = span.Duration;
 
 const max_addresses = reactor.net.max_addresses;
 
@@ -29,14 +31,14 @@ pub const Options = struct {
     nodelay: bool = true,
     /// Turn TCP keepalive on, probing a connection idle this long; null
     /// leaves the system's setting, which is off.
-    keepalive: ?Io.Duration = null,
+    keepalive: ?Duration = null,
     /// The name's lookup and every attempt, together.
-    timeout: ?Io.Duration = null,
+    timeout: ?Duration = null,
     /// What looks names up.
     resolver: Resolver = .system,
     /// How long an attempt runs alone before the next address is tried
     /// beside it: RFC 8305's recommended Connection Attempt Delay.
-    attempt_delay: Io.Duration = .fromMilliseconds(250),
+    attempt_delay: Duration = .literal("250ms"),
 };
 
 /// A connected stream, and what it took.
@@ -45,7 +47,7 @@ pub const Dialed = struct {
     /// False when a timeout was asked for and no task could keep it.
     timeout_enforced: bool = true,
     /// How long the name's lookup took; zero for an address.
-    lookup: Io.Duration = .zero,
+    lookup: Duration = .fromRaw(0),
     /// How many addresses the name had.
     addresses: u8 = 1,
 };
@@ -79,12 +81,12 @@ pub fn dial(io: Io, host: []const u8, port: u16, options: Options) DialError!Dia
         error.TimedOut => error.TimedOut,
         error.Canceled => error.Canceled,
     };
-    const lookup: Io.Duration = if (literal) .zero else started.durationTo(Io.Clock.awake.now(io));
+    const lookup: Duration = if (literal) .fromRaw(0) else span.of(started.durationTo(Io.Clock.awake.now(io)));
     // The lookup took its share of the one limit; the attempts end at what
     // is left.
-    const deadline: Io.Timeout = if (options.timeout) |t| .{ .deadline = .{ .raw = started.addDuration(t), .clock = .awake } } else .none;
+    const deadline: Io.Timeout = if (options.timeout) |t| .{ .deadline = .{ .raw = started.addDuration(span.toIo(t)), .clock = .awake } } else .none;
     var ordered: [max_addresses]IpAddress = undefined;
-    const connected = try connectAny(io, interleave(addresses, &ordered), options.attempt_delay, deadline);
+    const connected = try connectAny(io, interleave(addresses, &ordered), span.toIo(options.attempt_delay), deadline);
     sys.tune(io, connected.stream.socket.handle, .{ .nodelay = options.nodelay, .keepalive = options.keepalive });
     return .{
         .stream = connected.stream,
@@ -116,7 +118,7 @@ pub fn dialUnix(io: Io, path: []const u8, options: Options) DialError!Dialed {
         d.timeout_enforced = false;
         return d;
     };
-    race.concurrent(.expired, Io.sleep, .{ io, limit, .awake }) catch {
+    race.concurrent(.expired, Io.sleep, .{ io, span.toIo(limit), .awake }) catch {
         // The attempt runs already; wait for it, unbounded.
         while (race.cancel()) |late| switch (late) {
             .connected => |result| {
@@ -283,7 +285,7 @@ test "a dial with no task to spare tries a name's addresses one after another" {
     var serial: Serial = .init(io, 0);
     const port = listener.socket.address.getPort();
     // An address connects; the connection completes in the backlog.
-    const by_address = try dial(serial.io(), "127.0.0.1", port, .{ .timeout = .fromSeconds(5) });
+    const by_address = try dial(serial.io(), "127.0.0.1", port, .{ .timeout = .literal("5s") });
     by_address.stream.close(io);
     try testing.expect(!by_address.timeout_enforced);
     // A name is looked up on a target that can do it without a task, and
@@ -312,7 +314,7 @@ test "a connection expires at its controlled connect deadline and cancels the at
     var hanging: Hanging = .init(clock.io(), 0);
     const Run = struct {
         fn run(io: Io, out: *DialError!Dialed) void {
-            out.* = dial(io, "127.0.0.1", 1, .{ .timeout = .fromMilliseconds(200) });
+            out.* = dial(io, "127.0.0.1", 1, .{ .timeout = .literal("200ms") });
         }
     };
     var result: DialError!Dialed = undefined;
@@ -359,7 +361,7 @@ const Silent = struct {
     const L = shakedown.Layer(u8, .{ .netLookup = lookup, .netConnectIp = connect });
 
     fn run(io: Io, out: *DialError!Dialed) void {
-        out.* = dial(io, "silent.example", 80, .{ .timeout = .fromMilliseconds(200), .attempt_delay = .fromMilliseconds(50) });
+        out.* = dial(io, "silent.example", 80, .{ .timeout = .literal("200ms"), .attempt_delay = .literal("50ms") });
     }
 };
 
@@ -402,7 +404,7 @@ test "a dial with a timeout is bounded, on a runtime by the kernel with no fallb
     var listener = try (try IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
     defer listener.deinit(io);
     const before = reactor.fallbacks();
-    const dialed = try dial(io, "127.0.0.1", listener.socket.address.getPort(), .{ .timeout = .fromSeconds(5) });
+    const dialed = try dial(io, "127.0.0.1", listener.socket.address.getPort(), .{ .timeout = .literal("5s") });
     dialed.stream.close(io);
     try testing.expect(dialed.timeout_enforced);
     if (test_io.evented) try testing.expectEqual(before, reactor.fallbacks());
@@ -464,7 +466,7 @@ const Eyeballs = struct {
 
     const L = shakedown.Layer(u8, .{ .netLookup = lookup, .netConnectIp = connect });
 
-    fn run(io: Io, delay: Io.Duration, out: *DialError!Dialed) void {
+    fn run(io: Io, delay: Duration, out: *DialError!Dialed) void {
         out.* = dial(io, "stuck.example", 8080, .{ .attempt_delay = delay });
     }
 };
@@ -483,7 +485,7 @@ test "a black-holed first address costs one attempt delay, and a refused one non
         Eyeballs.abandoned.store(false, .release);
         Eyeballs.refuse_first = refuse;
         Eyeballs.first_ran = .unset;
-        const delay: Io.Duration = if (refuse) .fromSeconds(30) else .fromMilliseconds(100);
+        const delay: Duration = if (refuse) .literal("30s") else .literal("100ms");
         var result: DialError!Dialed = undefined;
         var task = io.concurrent(Eyeballs.run, .{ layer.io(), delay, &result }) catch return error.SkipZigTest;
         defer task.cancel(io);
@@ -508,7 +510,7 @@ test "a black-holed first address costs one attempt delay, and a refused one non
             // that never moved.
             try testing.expectEqual(@as(i96, 0), gap);
         } else {
-            try testing.expectEqual(@as(i96, delay.nanoseconds), gap);
+            try testing.expectEqual(@as(i96, delay.raw()), gap);
             try testing.expect(Eyeballs.abandoned.load(.acquire));
         }
     }
@@ -527,7 +529,7 @@ test "a Unix socket is connected by its path, and a missing one named" {
     const address = try Io.net.UnixAddress.init(path);
     var server = address.listen(io, .{}) catch return error.SkipZigTest;
     defer server.deinit(io);
-    const d = try dialUnix(io, path, .{ .timeout = .fromSeconds(5) });
+    const d = try dialUnix(io, path, .{ .timeout = .literal("5s") });
     d.stream.close(io);
     var missing_buf: [Io.Dir.max_path_bytes]u8 = undefined;
     const missing = try std.mem.print(&missing_buf, "{s}/none.sock", .{dir});

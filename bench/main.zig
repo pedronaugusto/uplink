@@ -114,7 +114,8 @@ pub fn main(init: std.process.Init) !void {
             // here, on the home thread, as a program's would.
             const runtime = try init.gpa.create(reactor.Runtime);
             defer init.gpa.destroy(runtime);
-            try runtime.init(init.gpa, .{ .environ = init.minimal.environ, .workers = selected.workers });
+            // No stall reports: a benchmark keeps its processors busy on purpose.
+            try runtime.init(init.gpa, .{ .environ = init.minimal.environ, .workers = selected.workers, .report_after = null });
             defer runtime.deinit();
             try runtime.start();
             try measure(init.gpa, runtime.io(), &output.interface, selected.bench, metadata);

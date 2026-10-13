@@ -25,8 +25,13 @@ const Header = std.http.Header;
 /// The largest head and the most fields one may have.
 pub const Limits = struct {
     /// The head's bytes, its blank line included.
-    max_head: u32 = 64 << 10,
+    max_head: aegis.units.Bytes(u32) = .literal("64KiB"),
     max_fields: u16 = 100,
+
+    /// Whether `len` bytes of a head with no end yet reach `max_head`.
+    pub fn headFull(l: Limits, len: usize) bool {
+        return aegis.units.Bytes(usize).fromRaw(len).compare(l.max_head.convert(usize)) != .lt;
+    }
 };
 
 /// Which of RFC 9112's allowances a parse takes.
@@ -133,9 +138,9 @@ pub fn parseRequest(bytes: []u8, fields: []Field, limits: Limits) ParseError!?Pa
 }
 
 fn headEnd(bytes: []const u8, limits: Limits) ParseError!?usize {
-    const window = bytes[0..@min(bytes.len, limits.max_head)];
+    const window = bytes[0..@min(bytes.len, limits.max_head.raw())];
     if (findHeadEnd(window, 0)) |end| return end;
-    if (bytes.len >= limits.max_head) return error.HeadTooLarge;
+    if (limits.headFull(bytes.len)) return error.HeadTooLarge;
     return null;
 }
 
@@ -634,6 +639,15 @@ pub fn writeField(w: *Io.Writer, h: Header) Io.Writer.Error!void {
     try w.writeAll("\r\n");
 }
 
+/// Write a response's status line, its line end included: always
+/// `HTTP/1.1`, the highest version of the protocol a server speaks, and the
+/// status's reason phrase, or none for a code without one.
+pub fn writeStatusLine(w: *Io.Writer, status: Status) Io.Writer.Error!void {
+    try w.print("HTTP/1.1 {d} ", .{@backingInt(status)});
+    if (status.phrase()) |reason| try w.writeAll(reason);
+    try w.writeAll("\r\n");
+}
+
 /// A body written in chunks onto `out`: each drain of the buffer is one
 /// chunk, and `end` writes the last one.
 pub const ChunkedWriter = struct {
@@ -721,7 +735,7 @@ test "a head not yet whole is asked for more, and one past the limit is refused"
     var partial = "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n".*;
     try testing.expectEqual(null, try parseResponse(&partial, &fields, .{}));
     var long = ("HTTP/1.1 200 OK\r\nX: " ++ repeat("a", 100)).*;
-    try testing.expectError(error.HeadTooLarge, parseResponse(&long, &fields, .{ .max_head = 64 }));
+    try testing.expectError(error.HeadTooLarge, parseResponse(&long, &fields, .{ .max_head = .fromRaw(64) }));
     var many = ("HTTP/1.1 200 OK\r\n" ++ repeat("A: b\r\n", 9) ++ "\r\n").*;
     try testing.expectError(error.TooManyFields, parseResponse(&many, &fields, .{}));
     try testing.expectError(error.TooManyFields, parseResponse(&many, &fields, .{ .max_fields = 3 }));
@@ -1021,7 +1035,7 @@ test "fuzz: any response head is parsed or refused by name, and a parsed one hol
             var buf: [512]u8 = undefined;
             const bytes = inputs.draw(case, &buf, &seeds, 32);
             var fields: [16]Field = undefined;
-            const parsed = (parseResponse(bytes, &fields, .{ .max_head = 400, .max_fields = 16 }) catch return) orelse return;
+            const parsed = (parseResponse(bytes, &fields, .{ .max_head = .fromRaw(400), .max_fields = 16 }) catch return) orelse return;
             try testing.expect(parsed.len <= bytes.len);
             var it = parsed.head.headers.iterator();
             while (it.next()) |f| {
@@ -1056,4 +1070,12 @@ test "fuzz: a chunked body fed in any pieces decodes as it does whole" {
             } else |err| try testing.expectError(err, piece_result);
         }
     }.one, .{});
+}
+
+test "a status line names the status and its reason" {
+    var buf: [64]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+    try writeStatusLine(&w, .not_found);
+    try writeStatusLine(&w, @fromBackingInt(@intCast(299)));
+    try testing.expectEqualStrings("HTTP/1.1 404 Not Found\r\nHTTP/1.1 299 \r\n", w.buffered());
 }

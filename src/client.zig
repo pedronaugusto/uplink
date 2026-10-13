@@ -10,8 +10,6 @@ pub const Response = @import("client/Response.zig");
 pub const Outgoing = @import("client/Outgoing.zig");
 /// A connection a response handed over: after a 101, or a `CONNECT`.
 pub const Upgraded = @import("client/Upgraded.zig");
-/// A response body as its framing delimits it.
-pub const Body = @import("client/Body.zig");
 /// Redirects followed, and failures and statuses tried again.
 pub const policy = @import("client/policy.zig");
 /// A cookie store, and the Netscape cookie file.
@@ -27,7 +25,6 @@ test {
     _ = Response;
     _ = Outgoing;
     _ = Upgraded;
-    _ = Body;
     _ = policy;
     _ = CookieJar;
     _ = Credentials;

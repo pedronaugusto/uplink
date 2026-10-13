@@ -31,7 +31,7 @@ fn agree(input: []const u8) !void {
     const arena = arena_state.allocator();
     const ours_bytes = try arena.dupe(u8, input);
     var field_buf: [16]fields.Field = undefined;
-    const ours = h1.parseResponse(ours_bytes, &field_buf, .{ .max_head = 4096, .max_fields = 16 });
+    const ours = h1.parseResponse(ours_bytes, &field_buf, .{ .max_head = .literal("4KiB"), .max_fields = 16 });
     const theirs = reference.parse(arena, input, 16);
     if (theirs) |head| {
         const parsed = (ours catch |err| {

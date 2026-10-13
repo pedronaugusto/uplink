@@ -36,7 +36,7 @@ pub fn main(init: std.process.Init) !void {
     var jar: uplink.CookieJar = .init(gpa, .{});
     defer jar.deinit(io);
     var client: uplink.Client = .init(gpa, .{
-        .timeouts = .{ .connect = .fromSeconds(10), .activity = .fromSeconds(30) },
+        .timeouts = .{ .connect = .literal("10s"), .activity = .literal("30s") },
         .cookies = &jar,
         .user_agent = "example/1.0",
     });

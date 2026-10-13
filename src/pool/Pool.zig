@@ -20,6 +20,7 @@ const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const awake = @import("../transport/awake.zig");
+const Duration = @import("../span.zig").Duration;
 const Connection = @import("../transport/Connection.zig");
 const Route = @import("../transport/Context.zig").Route;
 
@@ -55,7 +56,7 @@ pub const Options = struct {
     max_per_route: ?u16 = null,
     /// A connection idle longer is closed instead of used; null keeps it
     /// until the server closes it.
-    idle_timeout: ?Io.Duration = .fromSeconds(90),
+    idle_timeout: ?Duration = .literal("90s"),
     /// The most of an unread body a finished response reads to keep its
     /// connection, within the activity timeout; past it, the connection is
     /// closed.
@@ -66,9 +67,9 @@ pub const Options = struct {
 pub const Kind = union(enum) {
     h1: *Connection,
 
-    pub fn route(k: Kind) Route {
+    pub fn route(k: Kind) *const Route {
         return switch (k) {
-            .h1 => |c| c.route,
+            .h1 => |c| &c.route,
         };
     }
 };
@@ -82,7 +83,6 @@ const Idle = struct {
 /// A limited route: its connections open, and its waiters.
 const RouteState = struct {
     route: Route,
-    host: [Io.net.HostName.max_len]u8,
     open: u32 = 0,
     waiters: std.DoublyLinkedList = .{},
 };
@@ -141,7 +141,7 @@ pub const AcquireError = error{
 /// A connection for `route`: the idle one last kept, else room for a new
 /// one, waiting for either while the route is full, until `deadline` on
 /// the awake clock. `waited` is set when it had to wait.
-pub fn acquire(p: *Pool, io: Io, route: Route, deadline: ?Io.Timestamp, waited: *bool) AcquireError!Acquired {
+pub fn acquire(p: *Pool, io: Io, route: *const Route, deadline: ?Io.Timestamp, waited: *bool) AcquireError!Acquired {
     waited.* = false;
     var w: Waiter = .{};
     const state = enlist: {
@@ -182,7 +182,7 @@ pub fn acquire(p: *Pool, io: Io, route: Route, deadline: ?Io.Timestamp, waited: 
 }
 
 /// The idle connection last kept for `route`, under the lock.
-fn takeLocked(p: *Pool, io: Io, s: *State, route: Route) ?Acquired {
+fn takeLocked(p: *Pool, io: Io, s: *State, route: *const Route) ?Acquired {
     var i = s.len;
     while (i > 0) {
         i -= 1;
@@ -204,17 +204,15 @@ fn expiredAt(p: *Pool, entry: Idle, now: awake.Instant) bool {
     const since = entry.since orelse return false;
     // A span too long to hold is far past any timeout, if it is forward.
     const idle = since.durationTo(now) catch |err| return err == error.Overflow;
-    return std.math.order(idle.raw(), limit.nanoseconds) != .lt;
+    return std.math.order(idle.raw(), limit.raw()) != .lt;
 }
 
 /// The state of a limited route, made when it is first asked for.
-fn stateOf(p: *Pool, s: *State, route: Route) Allocator.Error!*RouteState {
+fn stateOf(p: *Pool, s: *State, route: *const Route) Allocator.Error!*RouteState {
     for (s.routes.items) |r| if (r.route.eql(route)) return r;
     const r = try p.gpa.create(RouteState);
     errdefer p.gpa.destroy(r);
-    r.* = .{ .route = route, .host = undefined };
-    @memcpy(r.host[0..route.host.len], route.host);
-    r.route.host = r.host[0..route.host.len];
+    r.* = .{ .route = route.* };
     try s.routes.append(p.gpa, r);
     return r;
 }
@@ -279,17 +277,13 @@ pub fn keep(p: *Pool, io: Io, k: Kind) Kept {
 }
 
 /// Close `k` and give its room on its route to the first exchange waiting
-/// for the route. Its route is read before it is freed: the route's host
-/// is the connection's own bytes.
+/// for the route, whose copy is taken before the connection is freed.
 pub fn close(p: *Pool, io: Io, k: Kind) void {
     switch (k) {
         .h1 => |conn| {
-            var host: [Io.net.HostName.max_len]u8 = undefined;
-            var route = conn.route;
-            @memcpy(host[0..route.host.len], route.host);
-            route.host = host[0..route.host.len];
+            const route = conn.route;
             conn.close(io);
-            p.closed(io, route);
+            p.closed(io, &route);
         },
     }
 }
@@ -297,7 +291,7 @@ pub fn close(p: *Pool, io: Io, k: Kind) void {
 /// A connection of `route` was closed, or one the pool made room for could
 /// not be opened: its room goes to the first exchange waiting for the
 /// route.
-pub fn closed(p: *Pool, io: Io, route: Route) void {
+pub fn closed(p: *Pool, io: Io, route: *const Route) void {
     if (p.options.max_per_route == null) return;
     var held = p.state.acquireUncancelable(io);
     defer held.deinit(io);
@@ -315,7 +309,7 @@ pub fn closed(p: *Pool, io: Io, route: Route) void {
     p.forget(s, limited);
 }
 
-fn findState(s: *State, route: Route) ?*RouteState {
+fn findState(s: *State, route: *const Route) ?*RouteState {
     for (s.routes.items) |r| if (r.route.eql(route)) return r;
     return null;
 }
@@ -358,11 +352,11 @@ test "the last kept is taken first, a route keeps its cap, and the pool its own"
     defer pool.deinit(io);
     var conns: [5]Connection = undefined;
     const routes = [_]Route{
-        .{ .secure = false, .host = "a", .port = 80 },
-        .{ .secure = false, .host = "a", .port = 80 },
-        .{ .secure = false, .host = "A", .port = 80 },
-        .{ .secure = true, .host = "b", .port = 443 },
-        .{ .secure = false, .host = "c", .port = 80 },
+        try Route.init(false, "a", 80, null),
+        try Route.init(false, "a", 80, null),
+        try Route.init(false, "A", 80, null),
+        try Route.init(true, "b", 443, null),
+        try Route.init(false, "c", 80, null),
     };
     for (&conns, routes) |*c, r| c.route = r;
     try testing.expectEqual(null, pool.keep(io, .{ .h1 = &conns[0] }).evicted);
@@ -373,8 +367,8 @@ test "the last kept is taken first, a route keeps its cap, and the pool its own"
     // The pool is full: its oldest of all goes.
     try testing.expectEqual(&conns[1], pool.keep(io, .{ .h1 = &conns[4] }).evicted.?.h1);
     var waited = false;
-    try testing.expectEqual(&conns[2], (try pool.acquire(io, routes[0], null, &waited)).idle.h1);
-    try testing.expectEqual(Acquired.open, try pool.acquire(io, routes[0], null, &waited));
+    try testing.expectEqual(&conns[2], (try pool.acquire(io, &routes[0], null, &waited)).idle.h1);
+    try testing.expectEqual(Acquired.open, try pool.acquire(io, &routes[0], null, &waited));
     try testing.expectEqual(@as(u32, 2), pool.count());
     while (pool.drain(io)) |_| {}
     try testing.expectEqual(@as(u32, 0), pool.count());
@@ -384,19 +378,19 @@ test "a pool that keeps nothing hands every connection back" {
     const io = test_io.io();
     var pool: Pool = .init(testing.allocator, .{ .max_idle = 0 });
     defer pool.deinit(io);
-    var conn = connWith(.{ .secure = false, .host = "a", .port = 80 });
+    var conn = connWith(try Route.init(false, "a", 80, null));
     try testing.expectEqual(&conn, pool.keep(io, .{ .h1 = &conn }).evicted.?.h1);
 }
 
 test "a connection idle past its time is handed out to be closed, not used" {
     var clock: shakedown.Clock = .init(test_io.io(), .{});
     const io = clock.io();
-    var pool: Pool = .init(testing.allocator, .{ .idle_timeout = .fromSeconds(90) });
+    var pool: Pool = .init(testing.allocator, .{ .idle_timeout = .literal("90s") });
     defer pool.deinit(io);
-    const route: Route = .{ .secure = false, .host = "a", .port = 80 };
+    const route: Route = try .init(false, "a", 80, null);
     var a = connWith(route);
-    var b = connWith(.{ .secure = false, .host = "b", .port = 80 });
-    var c = connWith(.{ .secure = false, .host = "c", .port = 80 });
+    var b = connWith(try Route.init(false, "b", 80, null));
+    var c = connWith(try Route.init(false, "c", 80, null));
     try testing.expectEqual(Kept{}, pool.keep(io, .{ .h1 = &a }));
     clock.advance(.fromSeconds(60));
     try testing.expectEqual(Kept{}, pool.keep(io, .{ .h1 = &b }));
@@ -405,21 +399,21 @@ test "a connection idle past its time is handed out to be closed, not used" {
     try testing.expectEqual(&a, pool.keep(io, .{ .h1 = &c }).expired.?.h1);
     clock.advance(.fromSeconds(60));
     var waited = false;
-    try testing.expectEqual(&b, (try pool.acquire(io, b.route, null, &waited)).expired.h1);
-    try testing.expectEqual(&c, (try pool.acquire(io, c.route, null, &waited)).idle.h1);
+    try testing.expectEqual(&b, (try pool.acquire(io, &b.route, null, &waited)).expired.h1);
+    try testing.expectEqual(&c, (try pool.acquire(io, &c.route, null, &waited)).idle.h1);
 }
 
 test "a full route makes exchanges wait in order, for a kept connection or for room" {
     const io = test_io.io();
     var pool: Pool = .init(testing.allocator, .{ .max_per_route = 1 });
     defer pool.deinit(io);
-    const route: Route = .{ .secure = false, .host = "a", .port = 80 };
+    const route: Route = try .init(false, "a", 80, null);
     var waited = false;
-    try testing.expectEqual(Acquired.open, try pool.acquire(io, route, null, &waited));
+    try testing.expectEqual(Acquired.open, try pool.acquire(io, &route, null, &waited));
     try testing.expect(!waited);
     const Wait = struct {
         fn run(pl: *Pool, r: Route, out: *AcquireError!Acquired, flag: *bool) void {
-            out.* = pl.acquire(test_io.io(), r, null, flag);
+            out.* = pl.acquire(test_io.io(), &r, null, flag);
         }
     };
     var first: AcquireError!Acquired = undefined;
@@ -429,19 +423,19 @@ test "a full route makes exchanges wait in order, for a kept connection or for r
     var group: Io.Group = .init;
     defer group.cancel(io);
     group.concurrent(io, Wait.run, .{ &pool, route, &first, &first_waited }) catch return error.SkipZigTest;
-    try waitForWaiters(&pool, route, 1);
+    try waitForWaiters(&pool, &route, 1);
     group.concurrent(io, Wait.run, .{ &pool, route, &second, &second_waited }) catch return error.SkipZigTest;
-    try waitForWaiters(&pool, route, 2);
+    try waitForWaiters(&pool, &route, 2);
     // The connection comes back: the first waiter has it. Then it closes:
     // the second gets room for a new one.
     var conn = connWith(route);
     try testing.expectEqual(Kept{}, pool.keep(io, .{ .h1 = &conn }));
-    pool.closed(io, route);
+    pool.closed(io, &route);
     try group.await(io);
     try testing.expectEqual(&conn, (try first).idle.h1);
     try testing.expectEqual(Acquired.open, try second);
     try testing.expect(first_waited and second_waited);
-    pool.closed(io, route);
+    pool.closed(io, &route);
     try testing.expectEqual(@as(usize, 0), routeCount(&pool));
 }
 
@@ -450,13 +444,13 @@ test "a wait for a full route ends at its deadline and leaves nothing behind" {
     const io = clock.io();
     var pool: Pool = .init(testing.allocator, .{ .max_per_route = 1 });
     defer pool.deinit(io);
-    const route: Route = .{ .secure = false, .host = "a", .port = 80 };
+    const route: Route = try .init(false, "a", 80, null);
     var waited = false;
-    try testing.expectEqual(Acquired.open, try pool.acquire(io, route, null, &waited));
+    try testing.expectEqual(Acquired.open, try pool.acquire(io, &route, null, &waited));
     const Wait = struct {
         fn run(pl: *Pool, wio: Io, r: Route, deadline: Io.Timestamp, out: *AcquireError!Acquired) void {
             var w = false;
-            out.* = pl.acquire(wio, r, deadline, &w);
+            out.* = pl.acquire(wio, &r, deadline, &w);
         }
     };
     var result: AcquireError!Acquired = undefined;
@@ -467,7 +461,7 @@ test "a wait for a full route ends at its deadline and leaves nothing behind" {
     clock.advance(.fromSeconds(5));
     task.await(test_io.io());
     try testing.expectError(error.TimedOut, result);
-    pool.closed(io, route);
+    pool.closed(io, &route);
     try testing.expectEqual(@as(usize, 0), routeCount(&pool));
 }
 
@@ -479,7 +473,7 @@ fn routeCount(p: *Pool) usize {
 }
 
 /// Wait, briefly, until `n` exchanges wait for `route`.
-fn waitForWaiters(p: *Pool, route: Route, n: usize) !void {
+fn waitForWaiters(p: *Pool, route: *const Route, n: usize) !void {
     for (0..2000) |_| {
         var held = p.state.acquireUncancelable(test_io.io());
         const have = if (findState(held.value(), route)) |state| state.waiters.len() else 0;

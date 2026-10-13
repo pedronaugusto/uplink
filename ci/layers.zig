@@ -24,6 +24,9 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "wire", .patterns = &.{
         "src/wire.zig",
     } },
+    .{ .name = "span", .patterns = &.{
+        "src/span.zig",
+    } },
     .{ .name = "tls", .patterns = &.{
         "src/tls.zig",
     } },
@@ -41,12 +44,20 @@ pub const layers: []const gantry.rules.Layer = &.{
     } },
     .{ .name = "transport clock", .patterns = &.{
         "src/transport/awake.zig",
+        "src/transport/Timed.zig",
     } },
     .{ .name = "transport values", .patterns = &.{
         "src/transport/Proxy.zig",
         "src/transport/Diagnostics.zig",
         "src/transport/BufferPool.zig",
         "src/transport/Observer.zig",
+        "src/transport/Body.zig",
+        "src/transport/Head.zig",
+    } },
+    .{ .name = "coding", .patterns = &.{
+        "src/coding/ZstdBuffer.zig",
+        "src/coding/Decoder.zig",
+        "src/coding.zig",
     } },
     .{ .name = "transport shared", .patterns = &.{
         "src/transport/ProxyAuth.zig",
@@ -68,7 +79,6 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/client/policy.zig",
         "src/client/Credentials.zig",
         "src/client/Prepare.zig",
-        "src/client/Body.zig",
     } },
     .{ .name = "client request", .patterns = &.{
         "src/client/Request.zig",
@@ -106,6 +116,7 @@ pub const references: []const gantry.rules.ReferenceRule = &.{
         "aegis",
         "builtin",
         "cloak",
+        "warp",
         "reactor",
         "shakedown",
         "std",

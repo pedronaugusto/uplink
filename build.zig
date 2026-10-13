@@ -16,7 +16,8 @@ pub fn build(b: *std.Build) void {
     // and cloak, the family's TLS, whose system trust links the platform's
     // own libraries on macOS and Windows.
     //
-    // reactor and cloak are fetched lazily, and only for the client. The one
+    // reactor, cloak and warp (the codings) are fetched lazily, and only for
+    // the client. The one
     // build option, `client`, is true unless a project says otherwise: a
     // project that builds an HTTP client writes nothing extra, and one that
     // only reads and writes HTTP messages sets `.client = false`, fetches no
@@ -27,7 +28,8 @@ pub fn build(b: *std.Build) void {
     const aegis = b.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis");
     const reactor: ?*std.Build.Module = if (with_client) if (b.dependencyLazy("reactor", .{ .target = target, .optimize = optimize })) |package| package.module("reactor") else |_| null else null;
     const cloak: ?*std.Build.Module = if (with_client) if (b.dependencyLazy("cloak", .{ .target = target, .optimize = optimize })) |package| package.module("cloak") else |_| null else null;
-    _ = uplinkModules(b, target, optimize, aegis, with_client, reactor, cloak);
+    const warp: ?*std.Build.Module = if (with_client) if (b.dependencyLazy("warp", .{ .target = target, .optimize = optimize })) |package| package.module("warp") else |_| null else null;
+    _ = uplinkModules(b, target, optimize, aegis, with_client, .{ .reactor = reactor, .cloak = cloak, .warp = warp });
 }
 
 /// uplink's development: its tests, example, checks and benchmarks, under
@@ -40,11 +42,13 @@ pub fn dev(b: *std.Build, tools: type) void {
     const p = package.builder;
     const aegis_package = p.dependency("aegis", .{ .target = target, .optimize = optimize });
     const aegis = aegis_package.module("aegis");
-    // reactor and cloak are lazy: their error ends this configure pass until they are fetched.
+    // reactor, cloak and warp are lazy: their error ends this configure pass until they are fetched.
     const reactor_package = p.dependencyLazy("reactor", .{ .target = target, .optimize = optimize }) catch return;
     const cloak_package = p.dependencyLazy("cloak", .{ .target = target, .optimize = optimize }) catch return;
+    const warp_package = p.dependencyLazy("warp", .{ .target = target, .optimize = optimize }) catch return;
     const reactor = reactor_package.module("reactor");
     const cloak = cloak_package.module("cloak");
+    const warp = warp_package.module("warp");
     const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
 
     const module = package.module("uplink");
@@ -53,6 +57,7 @@ pub fn dev(b: *std.Build, tools: type) void {
         .{ .name = "aegis", .module = aegis },
         .{ .name = "reactor", .module = reactor },
         .{ .name = "cloak", .module = cloak },
+        .{ .name = "warp", .module = warp },
         .{ .name = "uplink.wire", .module = wire },
     };
 
@@ -150,9 +155,11 @@ pub fn dev(b: *std.Build, tools: type) void {
             .optimize = optimize,
         },
     });
-    // A project that depends on uplink by path, with only aegis,
-    // reactor and cloak to fetch: the build a client's user gets.
-    preflight.addConsumerCheck(b, p, .{ .package = "uplink", .program = p.path("ci/consumer.zig"), .modules = &.{ "uplink", "uplink.wire" }, .packages = &.{ aegis_package, reactor_package, cloak_package } });
+    // A project that depends on uplink by path, with only aegis, reactor
+    // (and the shuttle it switches tasks with), cloak and warp to fetch:
+    // the build a client's user gets.
+    const shuttle_package = reactor_package.builder.dependency("shuttle", .{ .target = target, .optimize = optimize });
+    preflight.addConsumerCheck(b, p, .{ .package = "uplink", .program = p.path("ci/consumer.zig"), .modules = &.{ "uplink", "uplink.wire" }, .packages = &.{ aegis_package, reactor_package, shuttle_package, cloak_package, warp_package } });
     addWireConsumerCheck(b, p, aegis_package);
     addColdConsumerCheck(b, p);
 }
@@ -165,10 +172,12 @@ fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.l
     const p = package.builder;
     const reactor = p.dependency("reactor", .{ .target = target, .optimize = optimize }).module("reactor");
     const cloak = p.dependency("cloak", .{ .target = target, .optimize = optimize }).module("cloak");
+    const warp = p.dependency("warp", .{ .target = target, .optimize = optimize }).module("warp");
     return b.allocator.dupe(std.Build.Module.Import, &.{
         .{ .name = "uplink", .module = package.module("uplink") },
         .{ .name = "reactor", .module = reactor },
         .{ .name = "cloak", .module = cloak },
+        .{ .name = "warp", .module = warp },
     }) catch @panic("OOM");
 }
 
@@ -180,9 +189,16 @@ const Modules = struct {
     root: ?*std.Build.Module,
 };
 
+/// The lazy packages `uplink` imports, each null until it is fetched.
+const Lazy = struct {
+    reactor: ?*std.Build.Module,
+    cloak: ?*std.Build.Module,
+    warp: ?*std.Build.Module,
+};
+
 /// The modules, one set of source files per module: `uplink` imports `uplink.wire`
 /// rather than its files, so a type is one declaration whichever a user names.
-fn uplinkModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, aegis: *std.Build.Module, client: bool, reactor: ?*std.Build.Module, cloak: ?*std.Build.Module) Modules {
+fn uplinkModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, aegis: *std.Build.Module, client: bool, lazy: Lazy) Modules {
     const wire_options: std.Build.Module.CreateOptions = .{
         .root_source_file = b.path("src/wire.zig"),
         .target = target,
@@ -204,8 +220,9 @@ fn uplinkModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         },
     };
     const root = b.addModule("uplink", root_options);
-    if (reactor) |module| root.addImport("reactor", module);
-    if (cloak) |module| root.addImport("cloak", module);
+    if (lazy.reactor) |module| root.addImport("reactor", module);
+    if (lazy.cloak) |module| root.addImport("cloak", module);
+    if (lazy.warp) |module| root.addImport("warp", module);
     return .{ .wire = wire, .root = root };
 }
 

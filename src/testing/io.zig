@@ -35,6 +35,11 @@ fn start() void {
         .workers = 3,
         .environ = std.testing.environ,
         .offload = .{ .owned = .{ .sync = 2, .lookup = 2, .wait = 4, .general = 2 } },
+        // No stall reports: a Debug build's handshake or compression holds
+        // its processor past the default 10 ms on a loaded machine, and
+        // the report is the scheduler's latency, not something of
+        // uplink's a test proves.
+        .report_after = null,
     }) catch |err| std.debug.panic("the evented test runtime: {t}", .{err});
     runtime.start() catch |err| std.debug.panic("the evented test runtime: {t}", .{err});
     started.store(true, .release);

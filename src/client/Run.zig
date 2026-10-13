@@ -14,6 +14,8 @@
 
 const std = @import("std");
 const Io = std.Io;
+const span = @import("../span.zig");
+const Duration = span.Duration;
 const wire = @import("uplink.wire");
 const h1 = wire.h1;
 const fields = wire.fields;
@@ -166,7 +168,7 @@ pub fn route(run: *Run, io: Io) Error!Context.Route {
         error.InvalidProxy => error.InvalidProxy,
         error.OutOfMemory => error.OutOfMemory,
     };
-    return .{ .secure = run.url.secure, .host = run.url.host, .port = run.url.port, .proxy = proxy };
+    return Context.Route.init(run.url.secure, run.url.host, run.url.port, proxy) catch error.InvalidUrl;
 }
 
 /// Whether requests to the current URL go to an HTTP proxy whole, as
@@ -189,7 +191,7 @@ pub fn acquire(run: *Run, io: Io, r: Context.Route) Error!Lease {
         if (c.pool.options.max_per_route != null) if (d) |x| {
             x.stage = .wait;
         };
-        const got = c.pool.acquire(io, r, run.deadline, &waited) catch |err| return switch (err) {
+        const got = c.pool.acquire(io, &r, run.deadline, &waited) catch |err| return switch (err) {
             error.TimedOut => {
                 if (d) |x| x.timeout = .deadline;
                 return error.TimedOut;
@@ -214,12 +216,12 @@ pub fn acquire(run: *Run, io: Io, r: Context.Route) Error!Lease {
                     continue;
                 }
                 _ = c.context.counters.in_use.fetchAdd(1, .monotonic);
-                if (c.context.observer) |o| o.emit(.{ .reused = .{ .host = r.host, .port = r.port } });
+                if (c.context.observer) |o| o.emit(.{ .reused = .{ .host = r.host(), .port = r.port } });
                 return .{ .conn = conn, .reused = true };
             },
             .open => {
                 const conn = Connection.open(&c.context, io, r, .{ .diagnostics = d, .deadline = run.deadline }) catch |err| {
-                    c.pool.closed(io, r);
+                    c.pool.closed(io, &r);
                     return switch (err) {
                         error.InvalidHostName => error.InvalidUrl,
                         else => |e| e,
@@ -298,7 +300,7 @@ fn exchange(run: *Run, io: Io, conn: *Connection, r: Context.Route) Error!Respon
 /// else the server's final answer, sent before the body, which then is
 /// never sent and the connection never reused.
 pub fn awaitContinue(run: *Run, io: Io, conn: *Connection) Error!?Response {
-    if (!try conn.readable(io, run.shared.options.expect_continue_timeout)) return null;
+    if (!try conn.readable(io, span.toIo(run.shared.options.expect_continue_timeout))) return null;
     var interim = try run.receive(io, conn, true);
     if (interim.status == .@"continue") {
         interim.releaseHead(io);
@@ -325,7 +327,7 @@ pub fn receive(run: *Run, io: Io, conn: *Connection, want_continue: bool) Error!
         .progress = &run.progress,
         .want_continue = want_continue,
     });
-    if (c.context.observer) |o| o.emit(.{ .head = .{ .status = @backingInt(response.status), .wait = run.sent_at.?.durationTo(Io.Clock.awake.now(io)) } });
+    if (c.context.observer) |o| o.emit(.{ .head = .{ .status = @backingInt(response.status), .wait = span.of(run.sent_at.?.durationTo(Io.Clock.awake.now(io))) } });
     return response;
 }
 
@@ -500,7 +502,7 @@ const Next = union(enum) {
     /// Another attempt, at once.
     again,
     /// Another attempt, after a wait, for a status the retries cover.
-    wait: struct { duration: Io.Duration, status: u16 },
+    wait: struct { duration: Duration, status: u16 },
 };
 
 /// Decide what follows `response`, which stays the caller's to release.
@@ -666,7 +668,7 @@ fn retryStatus(run: *Run, io: Io, response: *Response) Error!Next {
     if (!run.method.idempotent() and !policy.notActedOn(response.status)) return .done;
     var wait = r.backoff(run.tries + 1, random(io));
     if (response.headers.getKnown(.@"retry-after")) |value| if (policy.retryAfter(value, Io.Clock.real.now(io).toSeconds())) |asked| {
-        if (asked.nanoseconds > r.max_wait.nanoseconds) return .done;
+        if (asked.compare(r.max_wait) == .gt) return .done;
         wait = asked;
     };
     if (!run.withinDeadline(io, wait)) return .done;
@@ -688,17 +690,17 @@ fn retryFailure(run: *Run, io: Io, err: Error) Error!bool {
     return true;
 }
 
-fn withinDeadline(run: *const Run, io: Io, wait: Io.Duration) bool {
+fn withinDeadline(run: *const Run, io: Io, wait: Duration) bool {
     const d = run.deadline orelse return true;
-    return Io.Clock.awake.now(io).addDuration(wait).nanoseconds < d.nanoseconds;
+    return Io.Clock.awake.now(io).addDuration(span.toIo(wait)).nanoseconds < d.nanoseconds;
 }
 
 /// Wait before the next try, counting it.
-fn pause(run: *Run, io: Io, wait: Io.Duration, status: ?u16, error_name: ?[]const u8) Error!void {
+fn pause(run: *Run, io: Io, wait: Duration, status: ?u16, error_name: ?[]const u8) Error!void {
     run.tries += 1;
     if (run.diagnostics()) |d| d.retries +|= 1;
     if (run.shared.context.observer) |o| o.emit(.{ .retry = .{ .attempt = run.tries, .delay = wait, .status = status, .error_name = error_name } });
-    if (wait.nanoseconds > 0) io.sleep(wait, .awake) catch return error.Canceled;
+    if (wait.compare(.fromRaw(0)) == .gt) io.sleep(span.toIo(wait), .awake) catch return error.Canceled;
 }
 
 fn random(io: Io) u64 {
