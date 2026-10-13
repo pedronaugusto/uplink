@@ -523,3 +523,47 @@ test "broken blocks are refused, and a block past its buffer is too large" {
     try huffmanEncode(&w, "www.example.com");
     try testing.expectEqualSlices(u8, &fromHex("f1e3c2e5f23a6ba0ab90f4ff"), w.buffered());
 }
+
+test "fuzz: any block decodes or is refused, and what the encoder writes decodes back" {
+    const shakedown = @import("shakedown");
+    const inputs = @import("../testing/inputs.zig");
+    const seeds = comptime [_][]const u8{ &fromHex("828684418cf1e3c2e5f23a6ba0ab90f4ff"), &fromHex("400a637573746f6d2d6b65790d637573746f6d2d686561646572"), &fromHex("3fe11f82") };
+    try shakedown.check(testing.allocator, {}, struct {
+        fn one(_: void, case: *shakedown.Case) anyerror!void {
+            const s = case.source;
+            var buf: [512]u8 = undefined;
+            const block = inputs.draw(case, &buf, &seeds, 64);
+            var db: [Table.bytesFor(256)]u8 = undefined;
+            var de: [Table.entriesFor(256)]Table.Entry = undefined;
+            var d: Decoder = .init(.init(&db, &de, 256));
+            var out: [1024]u8 = undefined;
+            var fields: [32]Field = undefined;
+            // Twice: a block that changed the table is read against it.
+            // glint-ignore: Z026 -- refusing the block is a right answer; the property is that nothing breaks
+            for (0..2) |_| _ = d.decode(block, &out, &fields) catch {};
+            var eb: [Table.bytesFor(256)]u8 = undefined;
+            var ee: [Table.entriesFor(256)]Table.Entry = undefined;
+            var e: Encoder = .init(.init(&eb, &ee, 256));
+            var d2: Decoder = .init(.init(&db, &de, 256));
+            const names = [_][]const u8{ ":path", "accept", "x-a", "cookie", "authorization", "content-type" };
+            var text: [8][24]u8 = undefined;
+            var sent: [8]Field = undefined;
+            const count = gen.intRange(s, usize, 0, sent.len);
+            for (sent[0..count], text[0..count]) |*f, *t| {
+                const len = gen.intRange(s, usize, 0, t.len);
+                for (t[0..len]) |*b| b.* = gen.int(s, u8);
+                f.* = .{ .name = gen.oneOf(s, []const u8, &names), .value = t[0..len], .never_index = gen.boolean(s) };
+            }
+            var wire_buf: [1024]u8 = undefined;
+            var w: Io.Writer = .fixed(&wire_buf);
+            try e.encode(&w, sent[0..count]);
+            const got = try d2.decode(w.buffered(), &out, &fields);
+            try testing.expectEqual(count, got.len);
+            for (sent[0..count], got) |a, b| {
+                try testing.expectEqualStrings(a.name, b.name);
+                try testing.expectEqualSlices(u8, a.value, b.value);
+            }
+        }
+        const gen = shakedown.gen;
+    }.one, .{});
+}

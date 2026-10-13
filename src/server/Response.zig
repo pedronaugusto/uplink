@@ -254,7 +254,7 @@ pub fn end(r: *Response, io: Io) Error!void {
 fn endH2(r: *Response, st: *Session.Stream) Error!void {
     if (r.trailer_len != 0) {
         var list: [max_h2_fields]hpack.Field = undefined;
-        const n = try appendLines(&list, 0, r.trailer_buffer[0..r.trailer_len]);
+        const n = wire.h2.message.appendLines(&list, 0, r.trailer_buffer[0..r.trailer_len]) catch return error.HeadTooLarge;
         st.writeHeaders(r.socket.io, list[0..n], true) catch return r.fail();
         return;
     }
@@ -509,7 +509,7 @@ fn sendHeadH2(r: *Response, st: *Session.Stream, want: Framing, coded: ?Encoder.
         list[n] = .{ .name = "vary", .value = "accept-encoding" };
         n += 1;
     }
-    n = try appendLines(&list, n, r.fields_buffer[0..r.fields_len]);
+    n = wire.h2.message.appendLines(&list, n, r.fields_buffer[0..r.fields_len]) catch return error.HeadTooLarge;
     const end_stream = r.framing == .none or r.head_only or (r.framing == .length and r.declared.? == 0);
     st.writeHeaders(r.socket.io, list[0..n], end_stream) catch return r.fail();
     r.state = .streaming;
@@ -521,28 +521,6 @@ const max_h2_fields = 128;
 /// Fields written as `Name: value` lines, their names made lower case in
 /// place, after `n` in `list`; a connection's own fields left out, which
 /// HTTP/2 forbids (RFC 9113 §8.2.2).
-fn appendLines(list: *[max_h2_fields]hpack.Field, n_in: usize, lines: []u8) Error!usize {
-    var n = n_in;
-    var at: usize = 0;
-    while (at < lines.len) {
-        const line_end = std.mem.findPos(u8, lines, at, "\r\n").?;
-        const line = lines[at..line_end];
-        at = line_end + 2;
-        const colon = std.mem.findScalar(u8, line, ':').?;
-        const name = line[0..colon];
-        for (name) |*ch| ch.* = std.ascii.toLower(ch.*);
-        const connection_own = [_][]const u8{ "connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade" };
-        const skip = for (connection_own) |own| {
-            if (std.mem.eql(u8, name, own)) break true;
-        } else false;
-        if (skip) continue;
-        if (n == list.len) return error.HeadTooLarge;
-        list[n] = .{ .name = name, .value = line[colon + 2 ..] };
-        n += 1;
-    }
-    return n;
-}
-
 fn startEncoder(r: *Response, c: Encoder.Coding) Error!void {
     const io = r.socket.io;
     r.framed_buffer = try r.socket.context.buffers.acquire(io, .small);

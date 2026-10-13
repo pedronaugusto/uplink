@@ -164,6 +164,18 @@ pub const Route = struct {
     port: u16,
     /// The proxy between, and the answer it is given.
     proxy: ?*Proxies.Slot = null,
+    /// Which HTTP the connection may speak.
+    protocol: Protocol = .http1,
+
+    /// Which HTTP a route's connections speak.
+    pub const Protocol = enum {
+        /// HTTP/1.1 alone.
+        http1,
+        /// HTTP/2 when TLS agrees it by ALPN, else HTTP/1.1.
+        negotiate,
+        /// HTTP/2 over plain TCP, by prior knowledge.
+        h2_prior_knowledge,
+    };
 
     /// A host name's bytes, held by value.
     pub const Host = aegis.bounded.Array(u8, Io.net.HostName.max_len);
@@ -180,7 +192,7 @@ pub const Route = struct {
     }
 
     pub fn eql(a: *const Route, b: *const Route) bool {
-        return a.secure == b.secure and a.port == b.port and a.proxy == b.proxy and std.ascii.eqlIgnoreCase(a.host(), b.host());
+        return a.secure == b.secure and a.port == b.port and a.proxy == b.proxy and a.protocol == b.protocol and std.ascii.eqlIgnoreCase(a.host(), b.host());
     }
 };
 

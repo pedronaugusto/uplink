@@ -727,7 +727,7 @@ fn curl(gpa: std.mem.Allocator, args: []const []const u8) !?[]u8 {
     return result.stdout;
 }
 
-test "curl speaks HTTP/2 to the server, by prior knowledge and over TLS" {
+test "curl speaks HTTP/2 to the server by prior knowledge, and HTTP/1.1 beside it" {
     const gpa = testing.allocator;
     const running = try Running.start(gpa, .{ .h2c = .alongside_http1 }, .of(echoVersion));
     defer running.stop();
@@ -748,4 +748,132 @@ fn echoVersion(io: Io, request: *Request, response: *Response) anyerror!void {
     defer testing.allocator.free(body);
     var buf: [256]u8 = undefined;
     try response.send(io, try std.mem.print(&buf, "{t} {s} {s} {s}", .{ request.version, request.method.name, request.path, body }));
+}
+
+fn h2Echo(io: Io, request: *Request, response: *Response) anyerror!void {
+    const body = try request.collect(testing.allocator, io, .limited(16 << 20));
+    defer testing.allocator.free(body);
+    if (std.mem.eql(u8, request.path, "/echo")) return response.send(io, body);
+    if (std.mem.eql(u8, request.path, "/trailers")) {
+        const w = try response.writer(io);
+        try w.writeAll(body);
+        try response.trailer("X-Seen", request.headers.get("x-sent") orelse "none");
+        return response.end(io);
+    }
+    var buf: [256]u8 = undefined;
+    try response.send(io, try std.mem.print(&buf, "{t} {s} {s} {d}", .{ request.version, request.method.name, request.path, body.len }));
+}
+
+fn h2Client(gpa: std.mem.Allocator) Client {
+    return .init(gpa, .{ .http2 = .prior_knowledge });
+}
+
+test "the client speaks HTTP/2 by prior knowledge, its requests over one connection" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const running = try Running.start(gpa, .{ .h2c = .alongside_http1 }, .of(h2Echo));
+    defer running.stop();
+    var client = h2Client(gpa);
+    defer client.deinit(io);
+    var buf: [64]u8 = undefined;
+    for (0..5) |_| {
+        var response = try client.send(io, .{ .url = running.url(&buf, "/x?q=1") });
+        defer response.deinit(io);
+        try testing.expectEqual(std.http.Status.ok, response.status);
+        try testing.expectEqual(.h2, response.version);
+        const body = try response.collect(gpa, io, .limited(1 << 20));
+        defer gpa.free(body);
+        try testing.expectEqualStrings("h2 GET /x 0", body);
+    }
+    {
+        var response = try client.send(io, .{ .url = running.url(&buf, "/post"), .method = .POST, .body = .{ .bytes = "twelve bytes" } });
+        defer response.deinit(io);
+        const body = try response.collect(gpa, io, .limited(1 << 20));
+        defer gpa.free(body);
+        try testing.expectEqualStrings("h2 POST /post 12", body);
+    }
+    {
+        var response = try client.send(io, .{ .url = running.url(&buf, "/head"), .method = .HEAD });
+        defer response.deinit(io);
+        try testing.expectEqual(std.http.Status.ok, response.status);
+        const body = try response.collect(gpa, io, .limited(1 << 20));
+        defer gpa.free(body);
+        try testing.expectEqual(0, body.len);
+    }
+    try testing.expectEqual(@as(u64, 1), client.stats().connections_opened);
+    try testing.expectEqual(@as(u64, 7), running.server.stats().requests);
+}
+
+test "bodies past every window go both ways over HTTP/2, and trailers come after" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const running = try Running.start(gpa, .{ .h2c = .alongside_http1 }, .of(h2Echo));
+    defer running.stop();
+    var client = h2Client(gpa);
+    defer client.deinit(io);
+    var buf: [64]u8 = undefined;
+    const big = try gpa.alloc(u8, 3 << 20);
+    defer gpa.free(big);
+    for (big, 0..) |*b, i| b.* = @truncate(i *% 7);
+    {
+        var response = try client.send(io, .{ .url = running.url(&buf, "/echo"), .method = .POST, .body = .{ .bytes = big } });
+        defer response.deinit(io);
+        const body = try response.collect(gpa, io, .limited(16 << 20));
+        defer gpa.free(body);
+        try testing.expectEqualSlices(u8, big, body);
+    }
+    {
+        var source: Io.Reader = .fixed(big[0 .. 1 << 20]);
+        var response = try client.send(io, .{ .url = running.url(&buf, "/trailers"), .method = .PUT, .headers = &.{.{ .name = "X-Sent", .value = "yes" }}, .body = .{ .reader = .{ .reader = &source, .length = null } } });
+        defer response.deinit(io);
+        const body = try response.collect(gpa, io, .limited(16 << 20));
+        defer gpa.free(body);
+        try testing.expectEqualSlices(u8, big[0 .. 1 << 20], body);
+        try testing.expectEqualStrings("yes", response.trailers().?.get("x-seen").?);
+    }
+    {
+        var out = try client.begin(io, .{ .url = running.url(&buf, "/echo"), .method = .POST, .body = .{ .streamed = .{ .length = 5000 } }, .expect_continue = true });
+        defer out.deinit(io);
+        try out.writer().splatByteAll('z', 5000);
+        var response = try out.finish(io);
+        defer response.deinit(io);
+        const body = try response.collect(gpa, io, .limited(1 << 20));
+        defer gpa.free(body);
+        try testing.expectEqual(5000, body.len);
+    }
+    try testing.expectEqual(@as(u64, 1), client.stats().connections_opened);
+}
+
+test "requests at once share one HTTP/2 connection" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const running = try Running.start(gpa, .{ .h2c = .alongside_http1 }, .of(h2Echo));
+    defer running.stop();
+    var client = h2Client(gpa);
+    defer client.deinit(io);
+    var buf: [64]u8 = undefined;
+    const url = running.url(&buf, "/echo");
+    // The first opens the connection the rest share.
+    {
+        var response = try client.send(io, .{ .url = url });
+        response.deinit(io);
+    }
+    const One = struct {
+        fn run(c: *Client, u: []const u8, n: usize, ok: *std.atomic.Value(u32)) Io.Cancelable!void {
+            const tio = test_io.io();
+            var payload: [20000]u8 = undefined;
+            @memset(&payload, @truncate(n));
+            var response = c.send(tio, .{ .url = u, .method = .POST, .body = .{ .bytes = &payload } }) catch return;
+            defer response.deinit(tio);
+            const body = response.collect(testing.allocator, tio, .limited(1 << 20)) catch return;
+            defer testing.allocator.free(body);
+            if (std.mem.eql(u8, body, &payload)) _ = ok.fetchAdd(1, .monotonic);
+        }
+    };
+    var ok: std.atomic.Value(u32) = .init(0);
+    var group: Io.Group = .init;
+    for (0..16) |i| group.concurrent(io, One.run, .{ &client, url, i, &ok }) catch return error.SkipZigTest;
+    try group.await(io);
+    try testing.expectEqual(@as(u32, 16), ok.load(.monotonic));
+    try testing.expectEqual(@as(u64, 1), client.stats().connections_opened);
 }

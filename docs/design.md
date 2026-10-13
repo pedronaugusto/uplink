@@ -373,6 +373,53 @@ the lock, and say so where they are declared.
   redirects, the subtree redirect, the 405 with `Allow` and the 404 for any
   table with `find`, `run` and `notFound`.
 
+### WebSocket
+
+- **Above both, known to neither.** `ws` imports the client and the server;
+  they hand over an upgraded stream (`Response.upgrade`, `Response.hijack`)
+  and know nothing of WebSocket. The codec (`wire.ws`) is sans-I/O.
+- **A message is a stream.** The reader yields a message's payload as it
+  arrives across its frames, answering control frames between them, so a
+  message of any size costs its reader's buffer, and the limits are checked
+  as bytes come, never after.
+- **No task watches.** A keepalive is the reader's: a wait for a frame with
+  `ping_interval` asks the stream whether anything came, without a deadline
+  that would end it, pings, and closes after a second silence.
+- **A server keeps no compressor between messages by default**
+  (`no_context_takeover`): a kept DEFLATE state costs its memory per
+  connection.
+
+### HTTP/2
+
+- **The protocol is sans-I/O.** `wire.h2.Connection` holds the settings,
+  streams, windows and HPACK tables in memory its caller gives, takes whole
+  frames, answers what the protocol answers by itself onto a writer, and
+  returns events. The server's driver is one reading task and a task per
+  stream; nothing in the codec knows which.
+- **A stream's data waits in a buffer no larger than its window.** The
+  window is given back as the handler reads, so a slow handler slows its own
+  stream and no other.
+- **Every limit is a test of the attack it stops.** Streams at once,
+  header-block bytes across CONTINUATION frames, the decoded header list,
+  resets, SETTINGS, PINGs and empty frames per window of frames.
+- **One lock, one condition.** Frames are written under the session's lock,
+  the protocol state behind it; a stream waiting for its window or its data
+  waits on one condition the reading task broadcasts.
+- **The client has no reading task.** A connection shared by requests that
+  each run on their caller's task is read by whichever of them waits: it
+  takes a token, reads one frame with the lock let go, hands the frame to the
+  protocol state under the lock, and gives the token back, waking the rest.
+  A frame is read only once the socket has something, waited for without a
+  deadline that would end the socket, so a request that gives up gives up its
+  turn and nothing else. A connection costs no task while it sits idle.
+- **One way to say what HTTP/2 refuses.** `wire.h2.message` checks request,
+  response and trailer blocks and turns HTTP/1.1 field lines into fields,
+  dropping those of a connection's own; the server and the client both use
+  it.
+- **HTTP/2 over TLS waits for cloak.** A connection reads in one task while
+  others write; cloak's `tls.Session` is single-duplex until its next change,
+  so TLS agrees HTTP/1.1 by ALPN until then (`tls.h2_over_tls`).
+
 ### TLS
 
 - **TLS is cloak's, and uplink owns only its HTTP side.** The engine, the
@@ -427,9 +474,8 @@ point. The shape is in the README; what the design depends on is:
 
 ## Left out, and why
 
-- **HTTP/2 and WebSocket** are not in the package yet, and **a TLS engine of
-  uplink's own** never will be. The pool's `Kind`, `Version` and the `Session` layer assume
-  neither HTTP/1.1 alone nor one TLS client.
+- **A TLS engine of uplink's own** never will be: the `Session` layer
+  assumes no one TLS engine.
 - **HTTP/3** belongs to a QUIC package of its own: QUIC is a transport, as large
   as this package, with users that have no HTTP.
 - **NTLM, Negotiate and SOCKS5 GSSAPI** need the system's SSPI or GSSAPI. **PAC

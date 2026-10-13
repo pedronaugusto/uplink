@@ -367,6 +367,14 @@ pub fn unbind(conn: *Connection) void {
     conn.deadline = null;
 }
 
+/// Whether the connection speaks HTTP/2: TLS to the target agreed `h2`,
+/// or the route goes by prior knowledge.
+pub fn speaksH2(conn: *const Connection) bool {
+    if (conn.route.protocol == .h2_prior_knowledge) return true;
+    if (!conn.session_on[1]) return false;
+    return std.mem.eql(u8, conn.sessions[1].info().alpn, "h2");
+}
+
 /// Whether the connection may carry another exchange: no operation failed
 /// and no deadline fired.
 pub fn reusable(conn: *const Connection) bool {
@@ -643,6 +651,7 @@ fn startTls(conn: *Connection, slot: usize, host: []const u8) OpenError!void {
         .trust = if (trust) |snapshot| .{ .snapshot = snapshot } else .none,
         .auth = if (slot == 0) conn.route.proxy.?.proxy.tls.client_auth else ctx.tls.client_auth,
         .key_log = if (ctx.tls.key_log) |sink| tls.keyLog(sink) else null,
+        .alpn = if (slot == 1 and conn.route.protocol == .negotiate) tls.client_protocols else tls.client_protocols_h1,
         // HTTP says where a body ends, so an end without close_notify is
         // not a truncation it cannot see.
         .eof = .allow,

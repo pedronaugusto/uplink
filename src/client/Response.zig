@@ -20,6 +20,7 @@ const coding = wire.coding;
 const Method = wire.Method;
 const Version = wire.Version;
 const Connection = @import("../transport/Connection.zig");
+const H2 = @import("../transport/H2.zig");
 const Context = @import("../transport/Context.zig");
 const Diagnostics = @import("../transport/Diagnostics.zig");
 const Pool = @import("../pool/Pool.zig");
@@ -40,10 +41,13 @@ headers: fields.Headers,
 /// followed.
 url: []const u8 = "",
 
-/// Private: what the response came over.
+/// Private: what the response came over: a connection of its own, or a
+/// stream of a shared HTTP/2 one.
 ctx: *Context,
 pool: *Pool,
 conn: ?*Connection,
+h2: ?*H2 = null,
+stream: ?*H2.Stream = null,
 /// Private: the head, its fields and the body reader's buffer.
 head_buffer: []u8,
 body_buffer: []u8,
@@ -116,10 +120,11 @@ pub fn readerBuffered(r: *Response, io: Io, buffer: []u8) *Io.Reader {
 
 fn open(r: *Response, io: Io, buffer: ?[]u8) *Io.Reader {
     if (r.conn) |c| c.io = io;
+    if (r.stream) |st| st.read_io = io;
     r.body.trailer_io = io;
     if (!r.started) {
         r.started = true;
-        r.body.in = if (r.conn) |c| c.reader() else Io.Reader.ending;
+        r.body.in = if (r.conn) |c| c.reader() else if (r.stream) |st| st.reader(io) else Io.Reader.ending;
         r.body.trailer_pool = &r.ctx.buffers;
         if (r.decoder) |*d| {
             r.decoded = d.start(&r.body.interface, &r.ctx.zstd);
@@ -141,6 +146,11 @@ pub fn decodingFailure(r: *const Response) ?Decoder.Error {
 /// or null when it had none or the body is not read to its end.
 pub fn trailers(r: *Response) ?fields.Headers {
     if (r.trailer_fields) |t| return t;
+    if (r.stream) |st| {
+        if (!r.body.complete()) return null;
+        r.trailer_fields = .init(st.trailers orelse return null);
+        return r.trailer_fields;
+    }
     const bytes = r.body.trailerBytes() orelse return null;
     // `bytes` starts the pool buffer, which is aligned past a Field's need.
     const end = std.mem.alignForward(usize, bytes.len, @alignOf(fields.Field));
@@ -188,9 +198,19 @@ pub fn failure(r: *const Response) ReadError {
         .incomplete => error.BodyIncomplete,
         .malformed => error.HttpProtocolError,
         .too_large => unreachable, // unreachable: the client caps no body
-        .read_failed => if (r.conn) |c| c.readError() else error.ConnectionFailed,
+        .read_failed => if (r.conn) |c| c.readError() else if (r.stream) |st| streamError(st) else error.ConnectionFailed,
         // The body read fine: the decoder refused it.
         .reading, .done => error.BadContentEncoding,
+    };
+}
+
+fn streamError(st: *const H2.Stream) ReadError {
+    return switch (st.read_failure orelse return error.ConnectionFailed) {
+        error.TimedOut => error.TimedOut,
+        error.Canceled => error.Canceled,
+        error.TlsFailed => error.TlsFailed,
+        error.ClientCertificateRejected => error.ClientCertificateRejected,
+        error.ConnectionFailed, error.Refused, error.OutOfMemory => error.ConnectionFailed,
     };
 }
 
@@ -204,6 +224,11 @@ pub fn deinit(r: *Response, io: Io) void {
         if (r.keep_alive and !r.body.complete() and c.reusable()) r.drain(io);
         const reusable = r.keep_alive and r.body.complete() and c.reusable() and c.reader().bufferedLen() == 0;
         release(io, r.ctx, r.pool, c, reusable);
+    }
+    if (r.stream) |st| {
+        const h = r.h2.?;
+        h.finish(io, st);
+        releaseShared(io, r.ctx, r.pool, h);
     }
     if (r.decoder) |*d| d.deinit(io, r.ctx.gpa, &r.ctx.buffers, &r.ctx.zstd);
     if (r.body.trailer.len != 0) r.ctx.buffers.release(io, r.body.trailer);
@@ -252,6 +277,50 @@ pub fn release(io: Io, ctx: *Context, pool: *Pool, conn: *Connection, reusable: 
     conn.park(io);
     const kept = pool.keep(io, .{ .h1 = conn });
     for ([_]?Pool.Kind{ kept.evicted, kept.expired }) |out| if (out) |k| pool.close(io, k);
+}
+
+/// Give back an exchange's share of an HTTP/2 connection, its stream
+/// finished.
+pub fn releaseShared(io: Io, ctx: *Context, pool: *Pool, h: *H2) void {
+    _ = ctx.counters.in_use.fetchSub(1, .monotonic);
+    pool.unshare(io, h);
+}
+
+/// What `fromStream` needs besides the stream.
+pub const StreamOptions = struct {
+    method: Method,
+    decompress: bool,
+    /// The exchange's deadline, which the body's reads keep.
+    deadline: ?Io.Timestamp,
+};
+
+/// The response whose head came on `st`, which it then holds; its body is
+/// the stream's data.
+pub fn fromStream(io: Io, ctx: *Context, pool: *Pool, h: *H2, st: *H2.Stream, options: StreamOptions) Allocator.Error!Response {
+    const buffer = try ctx.buffers.acquire(io, .small);
+    errdefer ctx.buffers.release(io, buffer);
+    const status: std.http.Status = @fromBackingInt(st.status.?);
+    const code = st.status.?;
+    const bodiless = options.method.bodiless() or code == 204 or code == 304;
+    st.read_deadline = options.deadline;
+    var response: Response = .{
+        .status = status,
+        .version = .h2,
+        .reason = "",
+        .headers = .init(st.fields),
+        .ctx = ctx,
+        .pool = pool,
+        .conn = null,
+        .h2 = h,
+        .stream = st,
+        .head_buffer = buffer,
+        .body_buffer = buffer,
+        // The stream ends the exchange; the connection goes on regardless.
+        .keep_alive = true,
+        .body = .init(Io.Reader.ending, if (bodiless) .none else .until_close, buffer),
+    };
+    if (options.decompress) try response.planDecoding(io);
+    return response;
 }
 
 /// Errors from `receive`.

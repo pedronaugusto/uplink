@@ -410,3 +410,31 @@ test "a cache that cannot allocate still answers" {
     try testing.expectEqual(@as(usize, 2), (try cache.resolver().lookup(test_io.io(), "a.example", 80, null, &out)).len);
     try testing.expectEqual(@as(u32, 2), counting.calls);
 }
+
+test "fuzz: any entry is read or refused, and one read has its host and addresses" {
+    const seeds = [_][]const u8{ "example.com:443:127.0.0.1", "+a:*:[::1],10.0.0.1", "h:80: 1.2.3.4 ,", "x:99999:1.1.1.1" };
+    try shakedown.check(std.testing.allocator, {}, struct {
+        fn one(_: void, case: *shakedown.Case) anyerror!void {
+            const gen = shakedown.gen;
+            const s = case.source;
+            // A known entry with a few bytes changed, or bytes from the
+            // entry's own alphabet.
+            var buf: [96]u8 = undefined;
+            var len: usize = 0;
+            if (gen.boolean(s)) {
+                const seed = gen.oneOf(s, []const u8, &seeds);
+                @memcpy(buf[0..seed.len], seed);
+                len = seed.len;
+                for (0..gen.intRange(s, u8, 0, 4)) |_| buf[gen.intRange(s, usize, 0, len - 1)] = gen.oneOf(s, u8, "a:.,[]*+ 19f");
+            } else {
+                while (len < buf.len and s.more(24)) : (len += 1) buf[len] = gen.oneOf(s, u8, "a:.,[]*+ 019f");
+            }
+            const text = buf[0..len];
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const entry = Static.parseEntry(arena.allocator(), text) catch return;
+            try std.testing.expect(entry.host.len != 0);
+            try std.testing.expect(std.mem.findScalar(u8, entry.host, ':') == null);
+        }
+    }.one, .{});
+}

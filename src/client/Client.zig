@@ -90,21 +90,31 @@ pub fn begin(c: *Client, io: Io, request: Request) SendError!Outgoing {
     run.body = .{ .streamed = .{ .length = length } };
     const r = try run.route(io);
     const lease = try run.acquire(io, r);
-    errdefer Response.release(io, &s.context, &s.pool, lease.conn, false);
+    errdefer run.releaseFailed(io, lease);
     const buffer = try s.context.buffers.acquire(io, .record);
     errdefer s.context.buffers.release(io, buffer);
     try run.prepareAttempt(io);
     if (request.diagnostics) |d| d.stage = .write;
     run.sent = true;
     const expect = request.expect_continue and (length orelse 1) != 0;
-    run.writeHead(io, lease.conn, r, if (length) |n| .{ .length = n } else .chunked, expect) catch
-        return lease.conn.writeError();
     if (lease.reused) _ = s.context.counters.reused.fetchAdd(1, .monotonic);
-    if (expect) {
-        lease.conn.flush() catch return lease.conn.writeError();
-        if (try run.awaitContinue(io, lease.conn)) |refused| return .refused(run, refused, buffer);
+    switch (lease.kind) {
+        .h1 => |conn| {
+            run.writeHead(io, conn, r, if (length) |n| .{ .length = n } else .chunked, expect) catch
+                return conn.writeError();
+            if (expect) {
+                conn.flush() catch return conn.writeError();
+                if (try run.awaitContinue(io, conn)) |refused| return .refused(run, refused, buffer);
+            }
+            return .init(run, conn, buffer, length);
+        },
+        .h2 => |h| {
+            const st = run.openStream(io, h, length, length == 0, expect) catch |err| return Run.noRefusal(err);
+            errdefer h.finish(io, st);
+            if (expect) if (run.awaitContinueH2(io, h, st) catch |err| return Run.noRefusal(err)) |refused| return .refused(run, refused, buffer);
+            return .initStream(run, io, h, st, buffer, length);
+        },
     }
-    return .init(run, lease.conn, buffer, length);
 }
 
 /// What a client has done, read without a lock.

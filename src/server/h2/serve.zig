@@ -158,8 +158,16 @@ fn handle(session: *Session, shared: *Session.Shared, event: h2.Connection.Event
         .headers => |hd| {
             if (Session.find(shared, hd.stream)) |st| {
                 // Trailers: kept for the request, which ends with them.
-                st.trailer_buffer = session.context.buffers.acquire(session.socket.io, BufferPool.Class.fitting(fieldBytes(hd.fields)) orelse .large) catch return null;
-                st.trailers = copyFields(st.trailer_buffer, hd.fields, false) catch null;
+                st.trailer_buffer = session.context.buffers.acquire(session.socket.io, BufferPool.Class.fitting(h2.message.copySize(hd.fields)) orelse .large) catch return null;
+                const kept = h2.message.copy(st.trailer_buffer, hd.fields) catch null;
+                if (kept == null or !h2.message.checkTrailers(kept.?)) {
+                    // A malformed trailer section is the stream's error (RFC 9113 §8.1.1).
+                    // glint-ignore: Z026 -- the reset is the answer; a failed write ends the connection at its next read
+                    shared.conn.reset(session.socket.writer(), st.id, .protocol_error) catch {};
+                    st.reset_code = .protocol_error;
+                    return null;
+                }
+                st.trailers = kept;
                 st.recv_end = true;
                 return null;
             }
@@ -188,54 +196,22 @@ fn handle(session: *Session, shared: *Session.Shared, event: h2.Connection.Event
     return null;
 }
 
-fn fieldBytes(fields: []const hpack.Field) usize {
-    var n: usize = fields.len * @sizeOf(Field) + @alignOf(Field);
-    for (fields) |f| n += f.name.len + f.value.len;
-    return n;
-}
-
-/// Copy `fields` into `buffer`: the strings first, then the fields; the
-/// pseudo-fields left out unless `pseudo`.
-fn copyFields(buffer: []u8, fields: []const hpack.Field, pseudo: bool) error{NoSpaceLeft}![]Field {
-    var count: usize = 0;
-    var bytes: usize = 0;
-    for (fields) |f| {
-        if (!pseudo and f.name.len != 0 and f.name[0] == ':') continue;
-        count += 1;
-        bytes += f.name.len + f.value.len;
-    }
-    const fields_at = std.mem.alignForward(usize, bytes, @alignOf(Field));
-    if (fields_at + count * @sizeOf(Field) > buffer.len) return error.NoSpaceLeft;
-    const out: [*]Field = @ptrCast(@alignCast(buffer.ptr + fields_at)); // safe: pool buffers are 64-aligned and `fields_at` is aligned for a Field, inside the buffer
-    var at: usize = 0;
-    var i: usize = 0;
-    for (fields) |f| {
-        if (!pseudo and f.name.len != 0 and f.name[0] == ':') continue;
-        @memcpy(buffer[at..][0..f.name.len], f.name);
-        @memcpy(buffer[at + f.name.len ..][0..f.value.len], f.value);
-        out[i] = .{ .name = buffer[at..][0..f.name.len], .value = buffer[at + f.name.len ..][0..f.value.len] };
-        at += f.name.len + f.value.len;
-        i += 1;
-    }
-    return out[0..count];
-}
-
 /// A new request's stream: its fields kept, its state made.
 fn startStream(session: *Session, shared: *Session.Shared, id: u31, fields: []const hpack.Field, end_stream: bool) error{OutOfMemory}!?*Stream {
     const gpa = session.context.gpa;
     const pool = &session.context.buffers;
     const io = session.socket.io;
-    const class = BufferPool.Class.fitting(fieldBytes(fields) + 1024) orelse {
+    const class = BufferPool.Class.fitting(h2.message.copySize(fields) + 1024) orelse {
         // glint-ignore: Z026 -- a head too large to keep is refused; the connection goes on
         shared.conn.reset(session.socket.writer(), id, .refused_stream) catch {};
         return null;
     };
     const buffer = try pool.acquire(io, class);
     errdefer pool.release(io, buffer);
-    const kept = copyFields(buffer, fields, true) catch unreachable; // unreachable: the class fits the fields
+    const kept = h2.message.copy(buffer, fields) catch unreachable; // unreachable: the class fits the fields
     // A malformed request is a stream error at once (RFC 9113 §8.1.1), and a
     // declared length is checked against the data as it comes.
-    const head = checkHead(kept) orelse {
+    const head = h2.message.checkRequest(kept) orelse {
         pool.release(io, buffer);
         // glint-ignore: Z026 -- the reset is the answer; a failed write ends the connection at its next read
         shared.conn.reset(session.socket.writer(), id, .protocol_error) catch {};
@@ -250,67 +226,12 @@ fn startStream(session: *Session, shared: *Session.Shared, id: u31, fields: []co
     return st;
 }
 
-/// The request on `st`, checked as RFC 9113 §8.3 asks: its pseudo-fields
-/// first, each once, those a request needs; names in lower case; no field
-/// of a connection's own; `te` only `trailers`. Null for a malformed one.
-const Head = struct {
-    method: Method,
-    path: []const u8,
-    authority: ?[]const u8,
-    scheme: ?[]const u8,
-    protocol: ?[]const u8,
-    fields: []const Field,
-    content_length: ?u64,
-};
-
-fn checkHead(fields: []const Field) ?Head {
-    var h: Head = .{ .method = undefined, .path = "", .authority = null, .scheme = null, .protocol = null, .fields = &.{}, .content_length = null };
-    var method: ?[]const u8 = null;
-    var path: ?[]const u8 = null;
-    var regular_from: ?usize = null;
-    for (fields, 0..) |f, i| {
-        for (f.name) |ch| if (ch >= 'A' and ch <= 'Z') return null;
-        if (f.name.len != 0 and f.name[0] == ':') {
-            if (regular_from != null) return null;
-            const slot: *?[]const u8 = if (std.mem.eql(u8, f.name, ":method")) &method else if (std.mem.eql(u8, f.name, ":path")) &path else if (std.mem.eql(u8, f.name, ":authority")) &h.authority else if (std.mem.eql(u8, f.name, ":scheme")) &h.scheme else if (std.mem.eql(u8, f.name, ":protocol")) &h.protocol else return null;
-            if (slot.* != null) return null;
-            slot.* = f.value;
-            continue;
-        }
-        if (regular_from == null) regular_from = i;
-        if (!wire.fields.isToken(f.name)) return null;
-        const forbidden = [_][]const u8{ "connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade" };
-        for (forbidden) |name| if (std.mem.eql(u8, f.name, name)) return null;
-        if (std.mem.eql(u8, f.name, "te") and !std.mem.eql(u8, f.value, "trailers")) return null;
-        if (wire.fields.hasControl(f.value) or (f.value.len != 0 and (f.value[0] == ' ' or f.value[f.value.len - 1] == ' '))) return null;
-        if (std.mem.eql(u8, f.name, "content-length")) {
-            const n = wire.h1.parseLength(f.value) orelse return null;
-            if (h.content_length) |was| if (was != n) return null;
-            h.content_length = n;
-        }
-    }
-    const m = method orelse return null;
-    if (!wire.fields.isToken(m)) return null;
-    h.method = .{ .name = m };
-    if (h.method.eql(.CONNECT) and h.protocol == null) {
-        // CONNECT: an authority, no scheme or path.
-        if (h.authority == null or h.scheme != null or path != null) return null;
-        h.path = "";
-    } else {
-        h.path = path orelse return null;
-        if (h.path.len == 0 or h.scheme == null) return null;
-        if (h.protocol != null and !h.method.eql(.CONNECT)) return null;
-    }
-    h.fields = fields[regular_from orelse fields.len ..];
-    return h;
-}
-
 /// Answer the request on `st` with the handler, then forget the stream.
 fn answer(session: *Session, handler: Handler, st: *Stream) void {
     const context = session.context;
     const io = session.socket.io;
     defer finish(session, st);
-    const head = checkHead(st.fields).?; // `startStream` refused a malformed head
+    const head = h2.message.checkRequest(st.fields).?; // `startStream` refused a malformed head
     const target_text = if (head.method.eql(.CONNECT) and head.protocol == null) head.authority.? else head.path;
     const target = Request.Target.parse(head.method, target_text) catch return st.reset(io, .protocol_error);
     var request: Request = .{

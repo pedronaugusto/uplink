@@ -16,8 +16,11 @@ pub const Settings = frame.Settings;
 pub const writeFrame = frame.writeFrame;
 /// One connection's protocol state.
 pub const Connection = @import("h2/Connection.zig");
+/// Messages as fields: blocks checked, built from lines, kept.
+pub const message = @import("h2/message.zig");
 
 test {
     _ = frame;
     _ = Connection;
+    _ = message;
 }

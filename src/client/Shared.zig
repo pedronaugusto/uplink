@@ -65,6 +65,21 @@ pub const Options = struct {
     expect_continue_timeout: Duration = .literal("1s"),
     /// The largest response head, and the most fields in one.
     limits: h1.Limits = .{},
+    /// Whether requests go in HTTP/2, many at once over one connection
+    /// per route. A `CONNECT`, a request with `Upgrade` and one sent whole
+    /// to an HTTP proxy go in HTTP/1.1 regardless.
+    http2: Http2 = .negotiate,
+};
+
+/// When a client speaks HTTP/2.
+pub const Http2 = enum {
+    /// Never: HTTP/1.1 alone.
+    off,
+    /// Over TLS, when the server agrees it by ALPN; HTTP/1.1 otherwise.
+    negotiate,
+    /// As `negotiate` over TLS, and over plain TCP without asking (RFC
+    /// 9113 §3.3), to a server known to speak it.
+    prior_knowledge,
 };
 
 /// Why a request failed.

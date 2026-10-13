@@ -28,6 +28,7 @@ pub const layers: []const gantry.rules.Layer = &.{
     } },
     .{ .name = "wire connections", .patterns = &.{
         "src/wire/h2/Connection.zig",
+        "src/wire/h2/message.zig",
         "src/wire/h2.zig",
     } },
     .{ .name = "wire", .patterns = &.{
@@ -77,6 +78,9 @@ pub const layers: []const gantry.rules.Layer = &.{
     } },
     .{ .name = "transport connection", .patterns = &.{
         "src/transport/Connection.zig",
+    } },
+    .{ .name = "transport multiplexed", .patterns = &.{
+        "src/transport/H2.zig",
     } },
     .{ .name = "transport", .patterns = &.{
         "src/transport.zig",

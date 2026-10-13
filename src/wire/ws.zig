@@ -388,3 +388,22 @@ test "permessage-deflate parameters are read and refused as RFC 7692 says" {
     try (Deflate{ .server_no_context_takeover = true, .client_max_window_bits = 12 }).write(&w);
     try testing.expectEqualStrings("permessage-deflate; server_no_context_takeover; client_max_window_bits=12", w.buffered());
 }
+
+test "fuzz: a head is read the same from any longer input, and from no shorter one" {
+    const shakedown = @import("shakedown");
+    const inputs = @import("../testing/inputs.zig");
+    const seeds = [_][]const u8{ "\x81\x05hello", "\x82\xfe\x01\x00abcd", "\x02\xff\x00\x00\x00\x00\x00\x01\x00\x00", "\x88\x80\x01\x02\x03\x04" };
+    try shakedown.check(testing.allocator, {}, struct {
+        fn one(_: void, case: *shakedown.Case) anyerror!void {
+            var buf: [64]u8 = undefined;
+            const bytes = inputs.draw(case, &buf, &seeds, 16);
+            const whole = parseHeader(bytes) catch return;
+            const header, const size = whole orelse return;
+            try testing.expect(size <= bytes.len and size <= 14);
+            const again, const size2 = (try parseHeader(bytes[0..size])).?;
+            try testing.expectEqual(header, again);
+            try testing.expectEqual(size, size2);
+            for (0..size) |k| try testing.expectEqual(null, try parseHeader(bytes[0..k]));
+        }
+    }.one, .{});
+}

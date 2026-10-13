@@ -22,7 +22,11 @@ const fields = wire.fields;
 const url_mod = wire.url;
 const auth = wire.auth;
 const Method = wire.Method;
+const hpack = wire.hpack;
+const h2_message = wire.h2.message;
 const Connection = @import("../transport/Connection.zig");
+const H2 = @import("../transport/H2.zig");
+const Pool = @import("../pool/Pool.zig");
 const Context = @import("../transport/Context.zig");
 const Diagnostics = @import("../transport/Diagnostics.zig");
 const BufferPool = @import("../transport/BufferPool.zig");
@@ -168,7 +172,19 @@ pub fn route(run: *Run, io: Io) Error!Context.Route {
         error.InvalidProxy => error.InvalidProxy,
         error.OutOfMemory => error.OutOfMemory,
     };
-    return Context.Route.init(run.url.secure, run.url.host, run.url.port, proxy) catch error.InvalidUrl;
+    var r = Context.Route.init(run.url.secure, run.url.host, run.url.port, proxy) catch return error.InvalidUrl;
+    r.protocol = run.protocolFor(r);
+    return r;
+}
+
+/// Which HTTP the request may go in: HTTP/2 as the client allows it, but
+/// HTTP/1.1 for what only it carries — a `CONNECT`, an `Upgrade`, a
+/// request sent whole to an HTTP proxy.
+fn protocolFor(run: *const Run, r: Context.Route) Context.Route.Protocol {
+    const choice = run.shared.options.http2;
+    if (choice == .off or run.method.eql(.CONNECT) or named(run.request.headers, "upgrade") or absoluteForm(r)) return .http1;
+    if (r.secure) return .negotiate;
+    return if (choice == .prior_knowledge) .h2_prior_knowledge else .http1;
 }
 
 /// Whether requests to the current URL go to an HTTP proxy whole, as
@@ -178,8 +194,19 @@ fn absoluteForm(r: Context.Route) bool {
     return !r.secure and !slot.proxy.kind.socks();
 }
 
-/// A connection for an attempt.
-pub const Lease = struct { conn: *Connection, reused: bool };
+/// A connection for an attempt: one of its own over HTTP/1.1, or a share
+/// of an HTTP/2 one.
+pub const Lease = struct { kind: Pool.Kind, reused: bool };
+
+/// Give back a lease whose exchange failed: an HTTP/1.1 connection is
+/// closed, a share of an HTTP/2 one returned.
+pub fn releaseFailed(run: *Run, io: Io, lease: Lease) void {
+    const c = run.shared;
+    switch (lease.kind) {
+        .h1 => |conn| Response.release(io, &c.context, &c.pool, conn, false),
+        .h2 => |h| Response.releaseShared(io, &c.context, &c.pool, h),
+    }
+}
 
 /// A kept connection to `r` that still looks alive, or a new one, waiting
 /// for one while the route is at its limit.
@@ -201,7 +228,13 @@ pub fn acquire(run: *Run, io: Io, r: Context.Route) Error!Lease {
         };
         switch (got) {
             .expired => |k| c.pool.close(io, k),
+            .shared => |h| {
+                _ = c.context.counters.in_use.fetchAdd(1, .monotonic);
+                if (c.context.observer) |o| o.emit(.{ .reused = .{ .host = r.host(), .port = r.port } });
+                return .{ .kind = .{ .h2 = h }, .reused = true };
+            },
             .idle => |k| {
+                // Only HTTP/1.1 connections are kept idle.
                 const conn = k.h1;
                 conn.unpark(io, d, run.deadline) catch {
                     c.pool.close(io, .{ .h1 = conn });
@@ -217,7 +250,7 @@ pub fn acquire(run: *Run, io: Io, r: Context.Route) Error!Lease {
                 }
                 _ = c.context.counters.in_use.fetchAdd(1, .monotonic);
                 if (c.context.observer) |o| o.emit(.{ .reused = .{ .host = r.host(), .port = r.port } });
-                return .{ .conn = conn, .reused = true };
+                return .{ .kind = .{ .h1 = conn }, .reused = true };
             },
             .open => {
                 const conn = Connection.open(&c.context, io, r, .{ .diagnostics = d, .deadline = run.deadline }) catch |err| {
@@ -228,26 +261,60 @@ pub fn acquire(run: *Run, io: Io, r: Context.Route) Error!Lease {
                     };
                 };
                 _ = c.context.counters.in_use.fetchAdd(1, .monotonic);
-                return .{ .conn = conn, .reused = false };
+                if (!conn.speaksH2()) return .{ .kind = .{ .h1 = conn }, .reused = false };
+                return .{ .kind = .{ .h2 = try run.multiplex(io, conn) }, .reused = false };
             },
         }
     }
 }
 
+/// Speak HTTP/2 on `conn`, just opened, and share it with the route's
+/// other exchanges.
+fn multiplex(run: *Run, io: Io, conn: *Connection) Error!*H2 {
+    const c = run.shared;
+    const h = H2.create(&c.context, io, conn) catch |err| {
+        _ = c.context.counters.in_use.fetchSub(1, .monotonic);
+        c.pool.close(io, .{ .h1 = conn });
+        return err;
+    };
+    h.users.store(1, .monotonic);
+    c.pool.share(io, h) catch {
+        _ = c.context.counters.in_use.fetchSub(1, .monotonic);
+        h.users.store(0, .monotonic);
+        c.pool.close(io, .{ .h2 = h });
+        return error.OutOfMemory;
+    };
+    return h;
+}
+
 /// One attempt: a connection, the request on it, the response's head. A
 /// kept connection that fails before a byte of the response comes back is
-/// replaced once, when the request can go again.
+/// replaced once, when the request can go again; a request an HTTP/2
+/// server refused unprocessed goes again on another connection.
 fn attempt(run: *Run, io: Io) Error!Response {
     const c = run.shared;
     const r = try run.route(io);
     var resent = false;
+    var refusals: u8 = 0;
     while (true) {
         run.sent = false;
         run.progress = false;
         run.releaseEntry(io);
         const lease = try run.acquire(io, r);
-        const response = run.exchange(io, lease.conn, r) catch |err| {
-            Response.release(io, &c.context, &c.pool, lease.conn, false);
+        const result = switch (lease.kind) {
+            .h1 => |conn| run.exchange(io, conn, r),
+            .h2 => |h| run.exchangeH2(io, h),
+        };
+        const response = result catch |failure| {
+            run.releaseFailed(io, lease);
+            const err = switch (failure) {
+                error.Refused => {
+                    refusals += 1;
+                    if (refusals < max_refusals) continue;
+                    return error.ConnectionFailed;
+                },
+                else => |e| e,
+            };
             const replayable = switch (run.body) {
                 .none => true,
                 .bytes => run.method.idempotent(),
@@ -263,6 +330,10 @@ fn attempt(run: *Run, io: Io) Error!Response {
         return response;
     }
 }
+
+/// Requests an HTTP/2 server refuses unprocessed are sent again, on
+/// another connection, this many times in all.
+const max_refusals = 3;
 
 /// Write the request on `conn` and read its response's head.
 fn exchange(run: *Run, io: Io, conn: *Connection, r: Context.Route) Error!Response {
@@ -293,6 +364,147 @@ fn exchange(run: *Run, io: Io, conn: *Connection, r: Context.Route) Error!Respon
     }
     conn.flush() catch return conn.writeError();
     return run.receive(io, conn, false);
+}
+
+/// Errors from an exchange over HTTP/2: `Refused` when the server took
+/// none of it, and it may go again.
+pub const H2Error = Error || error{Refused};
+
+/// The exchange as a stream of `h`: the head as fields, the body as data,
+/// the response's head read.
+fn exchangeH2(run: *Run, io: Io, h: *H2) H2Error!Response {
+    const length: ?u64 = switch (run.body) {
+        .none => if (run.method.eql(.POST) or run.method.eql(.PUT) or run.method.eql(.PATCH)) 0 else null,
+        .bytes => |b| b.len,
+        .reader => |rd| rd.length,
+        .streamed => unreachable, // unreachable: a body the caller writes goes through `begin`
+    };
+    const has_body = switch (run.body) {
+        .none => false,
+        .bytes => |b| b.len != 0,
+        .reader => |rd| rd.length != 0,
+        .streamed => unreachable, // unreachable: as above
+    };
+    const expect = run.request.expect_continue and has_body;
+    try run.prepareAttempt(io);
+    if (run.diagnostics()) |d| d.stage = .write;
+    run.sent = true;
+    const st = try run.openStream(io, h, length, !has_body, expect);
+    errdefer h.finish(io, st);
+    if (expect) if (try run.awaitContinueH2(io, h, st)) |refused| return refused;
+    switch (run.body) {
+        .none, .streamed => {},
+        .bytes => |b| if (b.len != 0) try run.sendH2(io, h, st, b, true),
+        .reader => |rd| if (has_body) try run.sendReaderH2(io, h, st, rd.reader, rd.length),
+    }
+    return run.receiveH2(io, h, st);
+}
+
+/// Open the request's stream on `h`: its head as HTTP/2 fields, the
+/// pseudo-fields first, then the fields HTTP/1.1 would write, less those
+/// of a connection's own; `end_stream` when no body follows.
+pub fn openStream(run: *Run, io: Io, h: *H2, length: ?u64, end_stream: bool, expect: bool) H2Error!*H2.Stream {
+    const c = run.shared;
+    const buffer = try c.context.buffers.acquire(io, .large);
+    defer c.context.buffers.release(io, buffer);
+    var w: Io.Writer = .fixed(buffer);
+    var list: [max_fields]hpack.Field = undefined;
+    const r = h.conn.route;
+    run.url.writeAuthority(&w, false) catch return error.InvalidHeader;
+    const authority_end = w.end;
+    run.url.writeTarget(&w) catch return error.InvalidHeader;
+    const target = buffer[authority_end..w.end];
+    list[0] = .{ .name = ":method", .value = run.method.name };
+    list[1] = .{ .name = ":scheme", .value = if (r.secure) "https" else "http" };
+    list[2] = .{ .name = ":authority", .value = buffer[0..authority_end] };
+    list[3] = .{ .name = ":path", .value = if (target.len == 0) "/" else target };
+    const lines_start = w.end;
+    const framing: h1.Framing = if (length) |n| .{ .length = n } else .none;
+    run.writeFields(io, &w, r, false, framing, expect) catch return error.InvalidHeader;
+    const n = h2_message.appendLines(&list, 4, buffer[lines_start..w.end]) catch return error.InvalidHeader;
+    for (list[4..n]) |*f| f.never_index = isCredential(f.name);
+    return h.open(io, list[0..n], end_stream, run.method.eql(.HEAD)) catch |err| run.h2Failure(io, err);
+}
+
+/// A run's error where nothing can go again: a refusal is a failed
+/// connection, as a body the caller streamed cannot be sent twice.
+pub fn noRefusal(err: H2Error) Error {
+    return switch (err) {
+        error.Refused => error.ConnectionFailed,
+        else => |e| e,
+    };
+}
+
+/// The most fields a request sends over HTTP/2.
+const max_fields = 256;
+
+/// What a stream's failure means for the run.
+pub fn h2Failure(run: *Run, io: Io, err: H2.Error) H2Error {
+    return switch (err) {
+        error.TimedOut => {
+            if (run.diagnostics()) |d| d.timeout = if (run.deadline) |t| (if (Io.Clock.awake.now(io).nanoseconds >= t.nanoseconds) .deadline else .activity) else .activity;
+            return error.TimedOut;
+        },
+        error.Refused => error.Refused,
+        error.ConnectionFailed => error.ConnectionFailed,
+        error.TlsFailed => error.TlsFailed,
+        error.ClientCertificateRejected => error.ClientCertificateRejected,
+        error.Canceled => error.Canceled,
+        error.OutOfMemory => error.OutOfMemory,
+    };
+}
+
+/// Send `bytes` of the body on `st`.
+pub fn sendH2(run: *Run, io: Io, h: *H2, st: *H2.Stream, bytes: []const u8, end_stream: bool) H2Error!void {
+    h.send(io, st, bytes, end_stream, run.deadline) catch |err| return run.h2Failure(io, err);
+}
+
+/// A body from a reader, as data: exactly `length` bytes, or to its end.
+fn sendReaderH2(run: *Run, io: Io, h: *H2, st: *H2.Stream, source: *Io.Reader, length: ?u64) H2Error!void {
+    const buffer = try run.shared.context.buffers.acquire(io, .record);
+    defer run.shared.context.buffers.release(io, buffer);
+    var left = length;
+    while (true) {
+        const want: usize = if (left) |n| @min(n, buffer.len) else buffer.len;
+        if (want == 0) return run.sendH2(io, h, st, "", true);
+        const got = source.readSliceShort(buffer[0..want]) catch return error.BodyReadFailed;
+        if (got == 0) {
+            if (left != null) return error.BodyIncomplete;
+            return run.sendH2(io, h, st, "", true);
+        }
+        if (left) |*n| n.* -= got;
+        try run.sendH2(io, h, st, buffer[0..got], false);
+    }
+}
+
+/// After a head that asked `Expect: 100-continue` on `st`: null to send
+/// the body — an interim head came, or nothing in time; else the server's
+/// final answer, and the body is never sent.
+pub fn awaitContinueH2(run: *Run, io: Io, h: *H2, st: *H2.Stream) H2Error!?Response {
+    const until = Io.Clock.awake.now(io).addDuration(span.toIo(run.shared.options.expect_continue_timeout));
+    h.awaitInterim(io, st, until) catch |err| return run.h2Failure(io, err);
+    if (st.status == null) return null;
+    return try run.receiveH2(io, h, st);
+}
+
+/// Read the response's head on `st`, which the response then holds.
+pub fn receiveH2(run: *Run, io: Io, h: *H2, st: *H2.Stream) H2Error!Response {
+    const c = run.shared;
+    if (c.context.observer) |o| {
+        o.emit(.{ .sent = .{ .method = run.method.name, .url = run.url_text } });
+        run.sent_at = Io.Clock.awake.now(io);
+    }
+    if (run.diagnostics()) |d| d.stage = .head;
+    h.awaitHead(io, st, run.deadline) catch |err| return run.h2Failure(io, err);
+    run.progress = true;
+    const response = try Response.fromStream(io, &c.context, &c.pool, h, st, .{
+        .method = run.method,
+        .decompress = c.options.decompress,
+        .deadline = run.deadline,
+    });
+    if (run.diagnostics()) |d| d.stage = .body;
+    if (c.context.observer) |o| o.emit(.{ .head = .{ .status = @backingInt(response.status), .wait = span.of(run.sent_at.?.durationTo(Io.Clock.awake.now(io))) } });
+    return response;
 }
 
 /// After a head that asked `Expect: 100-continue`: wait for the server's
@@ -377,7 +589,6 @@ fn writeReader(run: *Run, io: Io, conn: *Connection, source: *Io.Reader, length:
 /// Write the request line and fields, everything checked by `init` or as
 /// it is added, into the connection's writer.
 pub fn writeHead(run: *Run, io: Io, conn: *Connection, r: Context.Route, framing: h1.Framing, expect: bool) Io.Writer.Error!void {
-    const c = run.shared;
     const w = conn.writer();
     const url = run.url;
     try w.writeAll(run.method.name);
@@ -394,7 +605,16 @@ pub fn writeHead(run: *Run, io: Io, conn: *Connection, r: Context.Route, framing
     try w.writeAll(" HTTP/1.1\r\nHost: ");
     try url.writeAuthority(w, false);
     try w.writeAll("\r\n");
-    if (conn.absolute_form) {
+    try run.writeFields(io, w, r, conn.absolute_form, framing, expect);
+    try w.writeAll("\r\n");
+}
+
+/// The request's fields after `Host`, each a line, as HTTP/1.1 writes them
+/// and HTTP/2 takes them in.
+fn writeFields(run: *Run, io: Io, w: *Io.Writer, r: Context.Route, absolute_form: bool, framing: h1.Framing, expect: bool) Io.Writer.Error!void {
+    const c = run.shared;
+    const url = run.url;
+    if (absolute_form) {
         // Answered for with the path as the Digest target.
         const path = if (url.target.len != 0 and url.target[0] == '/') url.target else "/";
         const slot = r.proxy.?;
@@ -419,7 +639,6 @@ pub fn writeHead(run: *Run, io: Io, conn: *Connection, r: Context.Route, framing
         .length => |n| try w.print("Content-Length: {d}\r\n", .{n}),
         .chunked => try w.writeAll("Transfer-Encoding: chunked\r\n"),
     }
-    try w.writeAll("\r\n");
 }
 
 /// `Authorization`, from the request's own credentials while they apply,

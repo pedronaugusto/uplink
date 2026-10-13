@@ -740,3 +740,38 @@ test "a frame on stream 0 that belongs to a stream, a lone CONTINUATION, and a f
     try testing.expectError(error.ConnectionError, s3.receive(&out, .{ .len = 8, .type = .ping, .flags = 0, .stream = 0 }, &p));
     try testing.expectEqual(ErrorCode.enhance_your_calm, s3.closed_with);
 }
+
+test "fuzz: any frames after the preface are taken or end the connection, and nothing more" {
+    const shakedown = @import("shakedown");
+    const inputs = @import("../../testing/inputs.zig");
+    const seeds = [_][]const u8{
+        "\x00\x00\x06\x04\x00\x00\x00\x00\x00\x00\x03\x00\x00\x00\x64",
+        "\x00\x00\x05\x01\x05\x00\x00\x00\x01\x82\x86\x84\x41\x80",
+        "\x00\x00\x04\x00\x01\x00\x00\x00\x01body\x00\x00\x08\x06\x00\x00\x00\x00\x00\x01\x02\x03\x04\x05\x06\x07\x08",
+        "\x00\x00\x04\x08\x00\x00\x00\x00\x00\x00\x00\x10\x00\x00\x00\x04\x03\x00\x00\x00\x01\x00\x00\x00\x08",
+    };
+    try shakedown.check(testing.allocator, {}, struct {
+        fn one(_: void, case: *shakedown.Case) anyerror!void {
+            var buf: [512]u8 = undefined;
+            const bytes = inputs.draw(case, &buf, &seeds, 96);
+            var m: TestMemory = .{};
+            var server: Connection = .init(.server, .{ .max_concurrent_streams = 4 }, .{ .max_concurrent_streams = 4 }, m.memory());
+            var out_buf: [16 << 10]u8 = undefined;
+            var out: Io.Writer = .fixed(&out_buf);
+            var at: usize = 0;
+            while (at + h2.head_len <= bytes.len) {
+                const h = Head.parse(bytes[at..][0..h2.head_len]);
+                const end = @min(bytes.len, at + h2.head_len + h.len);
+                const payload = bytes[at + h2.head_len .. end];
+                at = end;
+                out.end = 0;
+                const event = server.receive(&out, h, payload) catch break;
+                // What a stream's reader would take, given back.
+                if (event) |e| switch (e) {
+                    .data => |d| server.giveBack(&out, d.stream, d.bytes.len) catch break,
+                    else => {},
+                };
+            }
+        }
+    }.one, .{});
+}

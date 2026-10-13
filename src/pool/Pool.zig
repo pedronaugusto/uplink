@@ -22,6 +22,7 @@ const Io = std.Io;
 const awake = @import("../transport/awake.zig");
 const Duration = @import("../span.zig").Duration;
 const Connection = @import("../transport/Connection.zig");
+const H2 = @import("../transport/H2.zig");
 const Route = @import("../transport/Context.zig").Route;
 
 const Pool = @This();
@@ -43,6 +44,8 @@ const State = struct {
     len: usize = 0,
     /// The limited routes; empty unless `max_per_route` is set.
     routes: std.ArrayList(*RouteState) = .empty,
+    /// HTTP/2 connections, shared by every exchange on their route.
+    multiplexed: std.ArrayList(*H2) = .empty,
 };
 
 /// How many connections are kept, and opened.
@@ -63,13 +66,16 @@ pub const Options = struct {
     drain_limit: aegis.units.Bytes(u32) = .fromRaw(64 << 10),
 };
 
-/// A connection of whichever protocol it speaks; HTTP/1.1 is the only one.
+/// A connection of whichever protocol it speaks: HTTP/1.1, held by one
+/// exchange at a time, or HTTP/2, shared.
 pub const Kind = union(enum) {
     h1: *Connection,
+    h2: *H2,
 
     pub fn route(k: Kind) *const Route {
         return switch (k) {
             .h1 => |c| &c.route,
+            .h2 => |h| &h.conn.route,
         };
     }
 };
@@ -113,6 +119,8 @@ pub fn deinit(p: *Pool, io: Io) void {
         p.gpa.destroy(r);
     }
     s.routes.deinit(p.gpa);
+    aegis.assert.pre(s.multiplexed.items.len == 0, "every shared connection was drained");
+    s.multiplexed.deinit(p.gpa);
     p.gpa.free(s.idle);
     held.deinit(io);
     p.* = undefined;
@@ -128,6 +136,9 @@ pub const Acquired = union(enum) {
     /// Room for a new connection, which the caller opens; when it cannot,
     /// it tells `closed` with the route.
     open,
+    /// An HTTP/2 connection with room for another stream, shared: the
+    /// caller gives its use back with `unshare`.
+    shared: *H2,
 };
 
 /// Errors from `acquire`.
@@ -148,6 +159,11 @@ pub fn acquire(p: *Pool, io: Io, route: *const Route, deadline: ?Io.Timestamp, w
         var held = p.state.acquireUncancelable(io);
         defer held.deinit(io);
         const s = held.value();
+        for (s.multiplexed.items) |h| {
+            if (!h.conn.route.eql(route) or !h.canOpen(io)) continue;
+            _ = h.users.fetchAdd(1, .monotonic);
+            return .{ .shared = h };
+        }
         if (p.takeLocked(io, s, route)) |found| return found;
         const max = p.options.max_per_route orelse return .open;
         const state = try p.stateOf(s, route);
@@ -276,6 +292,32 @@ pub fn keep(p: *Pool, io: Io, k: Kind) Kept {
     return kept;
 }
 
+/// Share `h`, just opened by an exchange that uses it, with every exchange
+/// on its route.
+pub fn share(p: *Pool, io: Io, h: *H2) Allocator.Error!void {
+    var held = p.state.acquireUncancelable(io);
+    defer held.deinit(io);
+    try held.value().multiplexed.append(p.gpa, h);
+}
+
+/// An exchange is done with `h`: kept for the next while it can carry one,
+/// closed by the last user once it cannot.
+pub fn unshare(p: *Pool, io: Io, h: *H2) void {
+    const close_it = blk: {
+        var held = p.state.acquireUncancelable(io);
+        defer held.deinit(io);
+        const s = held.value();
+        const last = h.users.fetchSub(1, .acq_rel) == 1;
+        if (!last or h.usable(io)) break :blk false;
+        for (s.multiplexed.items, 0..) |x, i| if (x == h) {
+            _ = s.multiplexed.swapRemove(i);
+            break;
+        };
+        break :blk true;
+    };
+    if (close_it) p.close(io, .{ .h2 = h });
+}
+
 /// Close `k` and give its room on its route to the first exchange waiting
 /// for the route, whose copy is taken before the connection is freed.
 pub fn close(p: *Pool, io: Io, k: Kind) void {
@@ -283,6 +325,11 @@ pub fn close(p: *Pool, io: Io, k: Kind) void {
         .h1 => |conn| {
             const route = conn.route;
             conn.close(io);
+            p.closed(io, &route);
+        },
+        .h2 => |h| {
+            const route = h.conn.route;
+            h.close(io);
             p.closed(io, &route);
         },
     }
@@ -327,6 +374,7 @@ pub fn drain(p: *Pool, io: Io) ?Kind {
     var held = p.state.acquireUncancelable(io);
     defer held.deinit(io);
     const s = held.value();
+    if (s.multiplexed.pop()) |h| return .{ .h2 = h };
     if (s.len == 0) return null;
     return p.removeAt(s, s.len - 1).kind;
 }

@@ -6,12 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Notes
+
+- HTTP/2 goes over plain TCP alone for now: over TLS both ends agree HTTP/1.1 by ALPN until cloak's `tls.Session` reads and writes from two tasks at once, which an HTTP/2 connection does.
+
 ### Added
 
 - `Server`: an HTTP/1.1 server on any `std.Io`, evented on reactor's runtime. Requests are read strictly (bare LF, folded fields, request smuggling, `Host`, limits), pipelined requests answered in order, every wait bounded (head, idle, activity, handshake), `100 Continue` sent when the body is first read, TLS terminated by cloak with client certificates, request bodies decoded and responses compressed through warp, `Response.hijack` after a 101, trailers both ways, a connection limit, an observer, and a graceful `shutdown`.
 - `server.Router`: Go 1.22's patterns and precedence on a tree of segments, conflicts refused at `add`, 405 with `Allow`, clean-path and subtree redirects, captures unescaped; `server.Routes`: the same at compile time, conflicts a compile error and captures a struct.
 - `server.Files`: a directory served with `Content-Type`, `ETag` and `Last-Modified`, conditional requests, byte ranges one or several, and index files.
-- `wire.range` (`Range` and `Content-Range`), `wire.multipart.Reader` (parts read as they arrive), `wire.coding.negotiate` (`Accept-Encoding`), `wire.h1.writeStatusLine`, `wire.fields.ListIterator.contains`.
+- `ws`: WebSocket (RFC 6455) on the client (`ws.connect`, through the `Client`'s proxies, TLS, cookies and credentials) and the server (`ws.accept`): subprotocols, messages streamed across fragments with pings, pongs and closes answered between them, text checked as UTF-8 as it arrives, limits, keepalive pings with no task, and permessage-deflate (RFC 7692) through warp with or without context takeover.
+- HTTP/2 on the server (RFC 9113): by ALPN over TLS, or by prior knowledge over plain TCP (`Options.h2c`), each stream answered by the handler on a task of its own through the same `Request` and `Response`, flow control both ways, HPACK, and the limits against Rapid Reset, CONTINUATION floods, the HPACK bomb and SETTINGS, PING and empty-frame floods. `wire.h2` holds the frames and a sans-I/O connection, `wire.hpack` HPACK with its Huffman code decoded four bits at a time.
+- HTTP/2 on the client: `Options.http2` (`.negotiate` by default, `.prior_knowledge` for plain TCP, `.off`). Requests to one route share one connection, each a stream; no task reads on its own, a request waiting for its answer reads the frames for all of them in turn, and no request's deadline ends the connection the others share. A request the server refused unprocessed goes again on another connection. `CONNECT`, an `Upgrade` and a request sent whole to an HTTP proxy go in HTTP/1.1. `wire.h2.message` checks request, response and trailer blocks for both ends.
+- Fuzz properties for HPACK blocks, HTTP/2 frame sequences, WebSocket frame heads and `--resolve` entries.
+- `wire.range` (`Range` and `Content-Range`), `wire.ws` (frames, masking, keys, close codes, incremental UTF-8, extension parameters), `wire.multipart.Reader` (parts read as they arrive), `wire.coding.negotiate` (`Accept-Encoding`), `wire.h1.writeStatusLine`, `wire.fields.ListIterator.contains`.
 
 ## [0.3.0] - 2026-10-13
 

@@ -12,7 +12,7 @@ Eyeballs, and decodes gzip, deflate and zstd bodies with
 server reads requests strictly, pipelined ones in order, keeps every wait to a
 timeout, terminates TLS, compresses responses, serves files with their
 validators and ranges, and routes by Go 1.22's patterns at run time or at
-compile time. Both run on any `std.Io` and evented on
+compile time. Both speak WebSocket and HTTP/2. Both run on any `std.Io` and evented on
 [reactor](https://github.com/pedronaugusto/reactor)'s runtime, and allocate
 nothing per request once warm. The codecs it is built from, HTTP/1.1 heads and
 chunked bodies, header fields, dates, cookies, authentication challenges,
@@ -271,6 +271,43 @@ and a match allocates nothing. `server.Routes` takes the patterns at compile
 time: a conflict is a compile error, and each handler takes its captures as
 a struct, so `captures.id` exists or the program does not build.
 
+**WebSocket.** `ws.accept` answers a server's request and `ws.connect` opens
+one through a `Client`, with subprotocols and permessage-deflate negotiated.
+A `ws.Conn` reads messages as streams of their own across fragments,
+answering pings and closes between them, checks text as UTF-8 as it
+arrives and fails at the frame that breaks it (1007), refuses what RFC
+6455 forbids (1002) and what passes its limits (1009), and writes messages
+whole or in pieces. One task reads and one writes. A keepalive ping needs
+no task: a reader that waits `ping_interval` sends one, and closes after
+twice that. Compression is warp's; a server keeps no compressor between
+messages by default.
+
+**HTTP/2.** The server speaks HTTP/2 by ALPN over TLS, and over plain TCP by
+prior knowledge when `Options.h2c` says so. Its frames, HPACK and the
+protocol state are sans-I/O in `wire.h2` and `wire.hpack`; the connection's
+one reading task feeds them, and each stream's handler runs on a task of its
+own through the same `Request` and `Response` as HTTP/1.1. Flow control
+goes both ways, a stream's received data waits in a buffer no larger than
+the window it was given, and a peer is held to limits on streams, header
+blocks across CONTINUATION frames (VU#421644), decoded header lists (the
+HPACK bomb), resets per window (Rapid Reset, CVE-2023-44487) and SETTINGS,
+PING and empty-frame floods. h2spec passes every case it runs, strict mode
+included.
+
+The client speaks HTTP/2 when `Options.http2` allows it: by ALPN over TLS,
+and over plain TCP by prior knowledge when it says `.prior_knowledge`.
+Requests to one route share one connection, each a stream of its own. No
+task reads on its own: a request waiting for its head or its data reads the
+next frame for whichever stream it carries, and the others wait their turn,
+so a request's deadline ends its own wait and never the connection. A
+request the server refused before it processed it goes again on another
+connection. `CONNECT`, a request with `Upgrade` and one sent whole to an
+HTTP proxy go in HTTP/1.1.
+
+Over TLS, both ends agree HTTP/1.1 for now. An HTTP/2 connection reads in
+one task while others write, and cloak's `tls.Session` takes that only after
+its full-duplex change; until then HTTP/2 goes over plain TCP alone.
+
 **Files.** `server.Files` serves a directory: `Content-Type` by extension,
 `Last-Modified` and a strong `ETag`, the conditional requests of RFC 9110 in
 their order, one byte range or several as `multipart/byteranges` (a request
@@ -286,8 +323,9 @@ environment itself.
 
 ## Scope
 
-- HTTP/1.1 only. HTTP/2 and WebSocket come next; there is no TLS engine of
-  uplink's own (TLS is cloak's), and HTTP/3 belongs to a QUIC package of its own.
+- HTTP/2 over TLS waits for cloak's full-duplex `tls.Session`. No server
+  push, which browsers dropped. There is no TLS engine of uplink's own (TLS is
+  cloak's), and HTTP/3 belongs to a QUIC package of its own.
 - No middleware framework, sessions, templating, JSON binding or reverse
   proxy: a handler is a function, and the rest is a program's own.
 - A file is sent through the response's writer, read and written with the

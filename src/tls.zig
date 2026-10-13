@@ -47,9 +47,20 @@ pub const ServerOptions = struct {
     key_log: ?*Io.Writer = null,
 };
 
+/// Whether HTTP/2 is agreed over TLS. An HTTP/2 connection reads in one
+/// task while others write; a cloak `tls.Session` reads and writes from
+/// one task at a time until its full-duplex change, so until then HTTP/2
+/// goes over plain TCP alone, and TLS agrees HTTP/1.1.
+pub const h2_over_tls = false;
+
+/// The protocols a client offers by ALPN when it may speak HTTP/2, its
+/// preference first; and when it speaks HTTP/1.1 alone.
+pub const client_protocols: []const []const u8 = if (h2_over_tls) &.{ "h2", "http/1.1" } else client_protocols_h1;
+pub const client_protocols_h1: []const []const u8 = &.{"http/1.1"};
+
 /// The protocols a server offers by ALPN, its preference first: HTTP/2,
 /// then HTTP/1.1.
-pub const server_protocols: []const []const u8 = &.{ "h2", "http/1.1" };
+pub const server_protocols: []const []const u8 = if (h2_over_tls) &.{ "h2", "http/1.1" } else server_protocols_h1;
 /// The same, for a server that speaks HTTP/1.1 only.
 pub const server_protocols_h1: []const []const u8 = &.{"http/1.1"};
 
