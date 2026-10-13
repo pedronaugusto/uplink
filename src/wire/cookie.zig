@@ -1,8 +1,9 @@
 //! Cookies on the wire (RFC 6265bis): a `Set-Cookie` value read into its
-//! name, value and attributes, the lenient date its `Expires` carries, and
-//! the domain and path rules a cookie store decides with. Storage, expiry
-//! and the `Cookie` field a request sends are a store's; this is the
-//! grammar it is built from.
+//! name, value and attributes, the lenient date its `Expires` carries, the
+//! domain and path rules a cookie store decides with, and the pairs of a
+//! `Cookie` field as a server reads them. Storage, expiry and the `Cookie`
+//! field a request sends are a store's; this is the grammar it is built
+//! from.
 //!
 //! A `Set-Cookie` is read the way RFC 6265bis §5.6 tells a user agent to
 //! read it, which is more forgiving than the syntax a server must write: an
@@ -12,6 +13,32 @@
 const std = @import("std");
 const aegis = @import("aegis");
 const date = @import("date.zig");
+
+/// The pairs of a `Cookie` field, as a server reads them (RFC 6265bis
+/// §5.7.4 written, read leniently): split at `;`, each trimmed, its name
+/// before the first `=`; a pair with no `=` is a value with an empty name,
+/// and an empty pair is skipped. Slices point into the field.
+pub const Pairs = struct {
+    rest: []const u8,
+
+    pub const Pair = struct { name: []const u8, value: []const u8 };
+
+    pub fn init(field: []const u8) Pairs {
+        return .{ .rest = field };
+    }
+
+    pub fn next(p: *Pairs) ?Pair {
+        while (p.rest.len != 0) {
+            const semi = std.mem.findScalar(u8, p.rest, ';') orelse p.rest.len;
+            const pair = std.mem.trim(u8, p.rest[0..semi], " \t");
+            p.rest = if (semi == p.rest.len) "" else p.rest[semi + 1 ..];
+            if (pair.len == 0) continue;
+            const eq = std.mem.findScalar(u8, pair, '=') orelse return .{ .name = "", .value = pair };
+            return .{ .name = std.mem.trim(u8, pair[0..eq], " \t"), .value = std.mem.trim(u8, pair[eq + 1 ..], " \t") };
+        }
+        return null;
+    }
+};
 
 /// One `Set-Cookie` value, read. Every slice points into the text.
 pub const SetCookie = struct {
@@ -332,4 +359,15 @@ test "fuzz: any Set-Cookie value is read or ignored, and a read one keeps its li
             _ = parseDate(text);
         }
     }.one, .{});
+}
+
+test "a Cookie field's pairs are read as a server reads them" {
+    var it: Pairs = .init(" a=1;b = two ;; flag; c=x=y;");
+    const want = [_]Pairs.Pair{ .{ .name = "a", .value = "1" }, .{ .name = "b", .value = "two" }, .{ .name = "", .value = "flag" }, .{ .name = "c", .value = "x=y" } };
+    for (want) |w| {
+        const got = it.next().?;
+        try std.testing.expectEqualStrings(w.name, got.name);
+        try std.testing.expectEqualStrings(w.value, got.value);
+    }
+    try std.testing.expectEqual(null, it.next());
 }

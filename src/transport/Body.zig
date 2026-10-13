@@ -70,6 +70,14 @@ pub fn init(in: *Io.Reader, framing: h1.Framing, buffer: []u8) Body {
     };
 }
 
+/// A request's body, read as a server reads one: its chunk framing
+/// strictly, CRLF line ends and extensions as RFC 9112 writes them.
+pub fn initStrict(in: *Io.Reader, framing: h1.Framing, buffer: []u8) Body {
+    var b: Body = .init(in, framing, buffer);
+    b.chunked.lenience = .request;
+    return b;
+}
+
 /// Whether the whole body has been read, its own buffer included: what the
 /// connection needs to carry another exchange.
 pub fn complete(b: *const Body) bool {

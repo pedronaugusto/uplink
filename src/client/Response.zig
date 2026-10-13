@@ -400,7 +400,7 @@ const Received = struct {
 /// Read one head from `conn` into a pooled buffer and parse it there.
 fn receiveHead(io: Io, ctx: *Context, conn: *Connection, options: ReceiveOptions) ReceiveError!Received {
     var head = Head.gather(io, &ctx.buffers, conn.reader(), options.limits, options.progress) catch |err| return switch (err) {
-        error.HeadTooLarge => error.HttpProtocolError,
+        error.HeadTooLarge, error.StartLineTooLong, error.NoStartLine => error.HttpProtocolError,
         error.EndOfStream => if (conn.failure == .none) error.ConnectionFailed else conn.readError(),
         error.ReadFailed => conn.readError(),
         error.OutOfMemory => error.OutOfMemory,

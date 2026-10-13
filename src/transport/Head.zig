@@ -29,8 +29,13 @@ pub const min_body_buffer = 1024;
 
 /// Why no head was gathered.
 pub const Error = error{
-    /// No blank line within `Limits.max_head`.
+    /// No blank line within `Limits.max_head`, the start line ended.
     HeadTooLarge,
+    /// The start line alone is past `Limits.max_head`: a target too long,
+    /// after its method.
+    StartLineTooLong,
+    /// Past `Limits.max_head` with no space in it: no start line at all.
+    NoStartLine,
     /// The connection ended before the head did; `progress` says whether
     /// any of it came.
     EndOfStream,
@@ -56,7 +61,7 @@ pub fn gather(io: Io, pool: *BufferPool, r: *Io.Reader, limits: h1.Limits, progr
             r.toss(end);
             return head;
         }
-        if (limits.headFull(buffered.len)) return error.HeadTooLarge;
+        if (limits.headFull(buffered.len)) return oversize(window);
         if (buffered.len == r.buffer.len) return gatherLong(io, pool, r, limits);
         scan = buffered.len -| 3;
         r.fillMore() catch |err| return switch (err) {
@@ -64,6 +69,14 @@ pub fn gather(io: Io, pool: *BufferPool, r: *Io.Reader, limits: h1.Limits, progr
             error.ReadFailed => error.ReadFailed,
         };
     }
+}
+
+/// Which part of a head that passed its limit, `start` its start, was too
+/// long.
+fn oversize(start: []const u8) Error {
+    if (std.mem.findScalar(u8, start, '\n') != null) return error.HeadTooLarge;
+    if (std.mem.findScalar(u8, start, ' ') != null) return error.StartLineTooLong;
+    return error.NoStartLine;
 }
 
 /// A head longer than the connection's buffer: gathered piece by piece into
@@ -83,7 +96,7 @@ fn gatherLong(io: Io, pool: *BufferPool, r: *Io.Reader, limits: h1.Limits) Error
         }
         r.toss(take);
         len += take;
-        if (len == cap) return error.HeadTooLarge;
+        if (len == cap) return oversize(buffer[0..len]);
         r.fillMore() catch |err| return switch (err) {
             error.EndOfStream => error.EndOfStream,
             error.ReadFailed => error.ReadFailed,

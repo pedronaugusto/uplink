@@ -270,7 +270,7 @@ fn answer(session: *Session, handler: Handler, st: *Stream) void {
         if (response.headSent()) return st.reset(io, .internal_error);
         response.reset(io);
         response.stream = st;
-        response.status = .internal_server_error;
+        response.status = request.bodyFault() orelse .internal_server_error;
         // glint-ignore: Z026 -- a 500 that cannot be written leaves the stream reset below
         response.send(io, "") catch {};
         return;

@@ -186,6 +186,31 @@ pub fn failure(r: *const Request) ReadError {
     };
 }
 
+/// The value of the cookie `name` the request carries, from its first
+/// `Cookie` field that has it; null when none does.
+pub fn cookie(r: *const Request, name: []const u8) ?[]const u8 {
+    for (r.headers.fields) |f| {
+        if (!std.ascii.eqlIgnoreCase(f.name, "cookie")) continue;
+        var pairs: wire.cookie.Pairs = .init(f.value);
+        while (pairs.next()) |p| if (std.mem.eql(u8, p.name, name)) return p.value;
+    }
+    return null;
+}
+
+/// The status a request is answered with when its handler failed on a
+/// body that was the client's fault: 400 for framing or a coding that
+/// does not parse, 413 for a body past `Options.max_body`; null when the
+/// body was not at fault.
+pub fn bodyFault(r: *const Request) ?std.http.Status {
+    if (r.stream == null) switch (r.body.state) {
+        .malformed => return .bad_request,
+        .too_large => return .payload_too_large,
+        .incomplete, .read_failed, .reading, .done => {},
+    };
+    if (r.decodingFailure() != null) return .bad_request;
+    return null;
+}
+
 /// Why a coded body did not decode, after a read failed with
 /// `BadContentEncoding`.
 pub fn decodingFailure(r: *const Request) ?Decoder.Error {

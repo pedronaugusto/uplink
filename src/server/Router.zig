@@ -334,7 +334,14 @@ pub fn notFound(r: *const Router, io: Io, request: *Request, response: *Response
 /// with `Allow`, and one nothing matches is the table's `notFound`.
 pub fn dispatch(table: anytype, io: Io, request: *Request, response: *Response) anyerror!void {
     const path = request.path;
-    if (request.method.eql(.CONNECT) or path.len == 0) return table.notFound(io, request, response);
+    if (path.len == 0) {
+        // `OPTIONS *` asks about the server, which answers for itself.
+        if (request.method.eql(.OPTIONS)) return plain(io, response, .ok, "");
+        // A `CONNECT` to a host and port names no resource a pattern can:
+        // no method is allowed there (RFC 9110 §15.5.6, an empty `Allow`).
+        try response.header("Allow", "");
+        return plain(io, response, .method_not_allowed, "method not allowed\n");
+    }
     if (!validEscapes(path)) return plain(io, response, .bad_request, "bad request\n");
     if (!isClean(path)) {
         const buffer = try request.scratchBuffer(io, path.len + 1);

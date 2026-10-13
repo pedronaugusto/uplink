@@ -100,6 +100,8 @@ fn serveOne(c: *Connection) bool {
     var progress = false;
     var head = Head.gather(io, &s.buffers, c.socket.reader(), options.limits, &progress) catch |err| return switch (err) {
         error.HeadTooLarge => c.refuse(.request_header_fields_too_large, "head too large"),
+        error.StartLineTooLong => c.refuse(.uri_too_long, "target too long"),
+        error.NoStartLine => c.refuse(.bad_request, "no request line"),
         error.EndOfStream => false,
         error.ReadFailed => {
             if (c.socket.failure == .timed_out) c.socket.noteTimeout(.head);
@@ -148,7 +150,7 @@ fn serveOne(c: *Connection) bool {
         .remote = if (c.socket.stream.socket.address == .ip4 or c.socket.stream.socket.address == .ip6) c.socket.stream.socket.address else null,
         .secure = c.socket.secure,
         .socket = &c.socket,
-        .body = .init(c.socket.reader(), framing, head.bodyBuffer()),
+        .body = .initStrict(c.socket.reader(), framing, head.bodyBuffer()),
         .expects_continue = expects_continue,
     };
     defer request.release(io);
@@ -180,7 +182,7 @@ fn serveOne(c: *Connection) bool {
             return false;
         }
         response.reset(io);
-        response.status = .internal_server_error;
+        response.status = request.bodyFault() orelse .internal_server_error;
         response.closeAfter();
         // glint-ignore: Z026 -- the connection closes either way; a 500 that cannot be written changes nothing
         response.send(io, "") catch {};
@@ -227,11 +229,32 @@ fn countFields(headers: *const wire.fields.Headers, name: []const u8) usize {
 
 /// A `Host` value a server may take (RFC 9110 §7.2): a host and optional
 /// port, with nothing a path or a list would put there.
+/// Whether `value` is a `Host` as an http or https URI's authority has
+/// it: a host, never empty (RFC 9110 §4.2.1), an IP literal or a name of
+/// the characters a URI's host takes, and a port of digits. A comma, which
+/// a second host could hide behind, is refused too.
 fn validHost(value: []const u8) bool {
-    for (value) |ch| switch (ch) {
-        '/', '?', '#', '@', ' ', '\t', ',' => return false,
-        else => {},
-    };
+    var host = value;
+    var port: ?[]const u8 = null;
+    if (value.len != 0 and value[0] == '[') {
+        const close = std.mem.findScalar(u8, value, ']') orelse return false;
+        host = value[1..close];
+        if (host.len == 0) return false;
+        for (host) |ch| if (!(std.ascii.isHex(ch) or ch == ':' or ch == '.')) return false;
+        const rest = value[close + 1 ..];
+        if (rest.len != 0) {
+            if (rest[0] != ':') return false;
+            port = rest[1..];
+        }
+    } else {
+        if (std.mem.findScalar(u8, value, ':')) |colon| {
+            host = value[0..colon];
+            port = value[colon + 1 ..];
+        }
+        if (host.len == 0) return false;
+        for (host) |ch| if (!(std.ascii.isAlphanumeric(ch) or std.mem.findScalar(u8, "-._~%!$&'()*+;=", ch) != null)) return false;
+    }
+    if (port) |p| for (p) |ch| if (!std.ascii.isDigit(ch)) return false;
     return true;
 }
 

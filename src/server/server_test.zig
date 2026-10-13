@@ -181,6 +181,17 @@ test "smuggling patterns, bad heads and limits are refused, each closing its con
         .{ "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 2000\r\n\r\n", "HTTP/1.1 413 " },
         .{ "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 1\r\nExpect: 200-ok\r\n\r\nx", "HTTP/1.1 417 " },
         .{ "GET * HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 400 " },
+        .{ "GET / HTTP/1.1\r\nHost: \r\n\r\n", "HTTP/1.1 400 " },
+        .{ "GET / HTTP/1.1\r\nHost: a b\r\n\r\n", "HTTP/1.1 400 " },
+        .{ "GET / HTTP/1.1\r\nHost: x:8o\r\n\r\n", "HTTP/1.1 400 " },
+        .{ "GET /caf\xc3\xa9 HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 400 " },
+        .{ "GET /a#b HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 400 " },
+        .{ repeat("A", 1100) ++ " / HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 400 " },
+        .{ "GET /" ++ repeat("a", 1100) ++ " HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 414 " },
+        .{ "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n5;\r\nhello\r\n0\r\n\r\n", "HTTP/1.1 400 " },
+        .{ "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n5\nhello\r\n0\r\n\r\n", "HTTP/1.1 400 " },
+        .{ "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n0x5\r\nhello\r\n0\r\n\r\n", "HTTP/1.1 400 " },
+        .{ "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n" ++ repeat("f", 20) ++ "\r\n", "HTTP/1.1 400 " },
     };
     for (cases) |case| {
         const got = try running.raw(gpa, case[0]);
@@ -292,6 +303,8 @@ test "a router serves its patterns, redirects, and answers 405 and 404" {
         .{ "POST /files/../files HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n", "HTTP/1.1 308 Permanent Redirect\r\n" },
         .{ "GET /nothing HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 404 Not Found\r\n" },
         .{ "GET /files/%zz HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 400 Bad Request\r\n" },
+        .{ "OPTIONS * HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 200 OK\r\n" },
+        .{ "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n", "HTTP/1.1 405 Method Not Allowed\r\n" },
     };
     for (cases) |case| {
         var request: std.ArrayList(u8) = .empty;

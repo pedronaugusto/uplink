@@ -182,6 +182,9 @@ fn parseRequestLine(line: []const u8, head: *RequestHead) ParseError!void {
     head.method = Method.parse(line[0..sp1]) catch return error.InvalidStartLine;
     head.target = line[sp1 + 1 .. sp2];
     if (!isTarget(head.target)) return error.InvalidStartLine;
+    // A target is ASCII and has no fragment (RFC 9112 §3.2): a raw byte
+    // past 0x7f, or a `#`, is no request's.
+    for (head.target) |c| if (c >= 0x80 or c == '#') return error.InvalidStartLine;
     head.version = try parseVersion(line[sp2 + 1 ..]);
 }
 
@@ -387,6 +390,12 @@ pub const ChunkedDecoder = struct {
     count: u32 = 0,
     /// Trailer bytes so far.
     trailer_len: u32 = 0,
+    /// Where a strict read is inside a chunk extension.
+    ext: Extension = .name_start,
+
+    /// The grammar of a chunk extension, read strictly (RFC 9112 §7.1.1):
+    /// `*( BWS ";" BWS name [ BWS "=" BWS ( token / quoted-string ) ] )`.
+    const Extension = enum { name_start, name, after_name, value_start, token, quoted, escaped, quoted_end, after_value };
 
     /// The longest chunk extension skipped, and the most trailer bytes.
     pub const max_extension = 4 << 10;
@@ -469,17 +478,24 @@ pub const ChunkedDecoder = struct {
             .size_space => switch (c) {
                 ' ', '\t' => {},
                 ';' => d.enter(.extension),
-                '\r' => d.state = .size_lf,
+                // Whitespace after a size is the BWS before an extension.
+                '\r' => if (d.lenience == .response) {
+                    d.state = .size_lf;
+                } else return error.InvalidChunkSize,
                 '\n' => try d.lineFeedAfterSize(),
                 else => return error.InvalidChunkSize,
             },
             .extension => switch (c) {
-                '\r' => d.state = .size_lf,
+                '\r' => {
+                    if (d.lenience == .request) try d.extensionEnds();
+                    d.state = .size_lf;
+                },
                 '\n' => try d.lineFeedAfterSize(),
                 else => {
                     if ((c < 0x20 and c != '\t') or c == 0x7f) return error.InvalidChunkSize;
                     d.count += 1;
                     if (d.count > max_extension) return error.ChunkExtensionTooLong;
+                    if (d.lenience == .request) try d.extensionByte(c);
                 },
             },
             .size_lf => if (c == '\n') d.sizeDone() else return error.InvalidChunkSize,
@@ -538,6 +554,34 @@ pub const ChunkedDecoder = struct {
     fn enter(d: *ChunkedDecoder, state: State) void {
         d.state = state;
         d.count = 0;
+        d.ext = .name_start;
+    }
+
+    /// One byte of an extension, past the `;` that opened it, read
+    /// strictly.
+    fn extensionByte(d: *ChunkedDecoder, c: u8) Error!void {
+        const space = c == ' ' or c == '\t';
+        const tchar = fields_mod.isTokenChar(c);
+        d.ext = switch (d.ext) {
+            .name_start => if (space) .name_start else if (tchar) .name else return error.InvalidChunkSize,
+            .name => if (tchar) .name else if (space) .after_name else if (c == '=') .value_start else if (c == ';') .name_start else return error.InvalidChunkSize,
+            .after_name => if (space) .after_name else if (c == '=') .value_start else if (c == ';') .name_start else return error.InvalidChunkSize,
+            .value_start => if (space) .value_start else if (c == '"') .quoted else if (tchar) .token else return error.InvalidChunkSize,
+            .token => if (tchar) .token else if (space) .after_value else if (c == ';') .name_start else return error.InvalidChunkSize,
+            .quoted => if (c == '"') .quoted_end else if (c == '\\') .escaped else .quoted,
+            .escaped => .quoted,
+            .quoted_end => if (space) .after_value else if (c == ';') .name_start else return error.InvalidChunkSize,
+            .after_value => if (space) .after_value else if (c == ';') .name_start else return error.InvalidChunkSize,
+        };
+    }
+
+    /// A strict extension ends its line right after a name or a value:
+    /// whitespace is allowed only around `;` and `=`.
+    fn extensionEnds(d: *const ChunkedDecoder) Error!void {
+        switch (d.ext) {
+            .name, .token, .quoted_end => {},
+            .name_start, .after_name, .value_start, .quoted, .escaped, .after_value => return error.InvalidChunkSize,
+        }
     }
 
     fn lineFeedAfterSize(d: *ChunkedDecoder) Error!void {
@@ -945,9 +989,18 @@ test "chunk sizes are hex only and overflow is refused; data must end its line" 
     defer out.deinit(testing.allocator);
     var d: ChunkedDecoder = .{};
     try testing.expectError(error.ChunkExtensionTooLong, decodeAll(&d, &long_ext, &out, 64));
-    // Strict decoding, as a request's body is decoded, wants CRLF.
-    var strict: ChunkedDecoder = .{ .lenience = .request };
-    try testing.expectError(error.InvalidChunkSize, decodeAll(&strict, "1\na\r\n", &out, 4));
+    // Strict decoding, as a request's body is decoded, wants CRLF, and
+    // extensions as RFC 9112 writes them.
+    for ([_][]const u8{ "1\na\r\n", "5;\r\n", "5;a b\r\n", "5;a=\r\n", "5 \r\n", "5;a=b \r\n", "5;=b\r\n", "5;a=\"b\r\n", "5;a@b\r\n" }) |bad| {
+        var strict: ChunkedDecoder = .{ .lenience = .request };
+        try testing.expectError(error.InvalidChunkSize, decodeAll(&strict, bad, &out, 4));
+    }
+    for ([_][]const u8{ "1;a\r\nx\r\n0\r\n\r\n", "1 ; a = b ; c=\"d;\\\"e\"\r\nx\r\n0\r\n\r\n", "1;a;b=c\r\nx\r\n0\r\n\r\n" }) |good| {
+        out.clearRetainingCapacity();
+        var strict: ChunkedDecoder = .{ .lenience = .request };
+        _ = try decodeAll(&strict, good, &out, 4);
+        try testing.expectEqualStrings("x", out.items);
+    }
 }
 
 test "a request head is written with its framing, and nothing unchecked reaches the wire" {

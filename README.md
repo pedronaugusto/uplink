@@ -270,6 +270,10 @@ are matched with their escapes undone. Patterns live in a tree of segments,
 and a match allocates nothing. `server.Routes` takes the patterns at compile
 time: a conflict is a compile error, and each handler takes its captures as
 a struct, so `captures.id` exists or the program does not build.
+`OPTIONS *` is answered 200, and a `CONNECT` to a host and port 405. An
+extended `CONNECT` (a WebSocket over HTTP/2) is routed by its path as
+method `CONNECT`, so a WebSocket route that takes both versions is added
+without a method.
 
 **WebSocket.** `ws.accept` answers a server's request and `ws.connect` opens
 one through a `Client`, with subprotocols and permessage-deflate negotiated.
