@@ -105,6 +105,12 @@ pub fn dev(b: *std.Build, tools: type) void {
     test_step.dependOn(&wire_run.step);
     test_step.dependOn(&evented_run.step);
 
+    // The codecs alone, and the suite on `Io.Threaded` alone: the release
+    // tier fuzzes the codecs' properties and runs the threaded suite under
+    // ThreadSanitizer.
+    b.step("wire", "Run uplink.wire's tests alone").dependOn(&b.addRunArtifact(wire_tests).step);
+    b.step("unit", "Run the suite on Io.Threaded alone").dependOn(&b.addRunArtifact(tests).step);
+
     const check_step = b.step("check", "Compile the tests and the example without running them");
     check_step.dependOn(&tests.step);
     check_step.dependOn(&wire_tests.step);
@@ -145,6 +151,7 @@ pub fn dev(b: *std.Build, tools: type) void {
     preflight.addCi(b, p, .{
         .tests = test_step,
         .portable_tests = true,
+        .hardened = .{ .fuzz_step = "wire", .tsan_step = "unit" },
         // uplink's own measurements, in bench/: `bay bench` builds
         // them in ReleaseFast and runs them, and `bay test` runs
         // each once with `--smoke`.
