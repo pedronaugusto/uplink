@@ -38,7 +38,15 @@
     ]
   ],
   "glint": {
-    "rules": [{"id": "P001", "level": "gate"}, {"id": "P003", "level": "gate"}, 
+    "rules": [
+      {
+        "id": "P001",
+        "level": "gate"
+      },
+      {
+        "id": "P003",
+        "level": "gate"
+      },
       {
         "id": "A001",
         "level": "report"
@@ -49,7 +57,7 @@
       },
       {
         "id": "A003",
-        "level": "report"
+        "level": "gate"
       },
       {
         "id": "A004",
@@ -57,10 +65,14 @@
       },
       {
         "id": "A005",
-        "level": "report"
+        "level": "gate"
       },
       {
         "id": "Z026",
+        "level": "gate"
+      },
+      {
+        "id": "Z013",
         "level": "gate"
       }
     ]
