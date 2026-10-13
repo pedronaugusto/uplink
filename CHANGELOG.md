@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- `pool.Pool.Kind` has an `h2` arm and `Pool.Acquired` a `shared` one, for HTTP/2 connections; `client.Run.Lease` holds a `Pool.Kind`.
+- `transport.Head.Error` names a start line past `max_head` apart from a head past it: `StartLineTooLong` and `NoStartLine`.
+- `server.Router` answers `OPTIONS *` and a `CONNECT` to a host and port itself, and routes an extended `CONNECT` by its path, where all three were 404s.
+- `wire.Version.h2` is a version messages are exchanged in.
+
 ### Notes
 
 - HTTP/2 goes over plain TCP alone for now: over TLS both ends agree HTTP/1.1 by ALPN until cloak's `tls.Session` reads and writes from two tasks at once, which an HTTP/2 connection does.
