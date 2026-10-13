@@ -597,3 +597,115 @@ test "files are served with their validators, conditions and ranges" {
     defer gpa.free(posted);
     try testing.expect(std.mem.startsWith(u8, posted, "HTTP/1.1 405 "));
 }
+
+fn upgrading(io: Io, _: *Request, response: *Response) anyerror!void {
+    response.status = .switching_protocols;
+    try response.header("Connection", "Upgrade");
+    try response.header("Upgrade", "echo");
+    const taken = try response.hijack(io);
+    // Echo one line back.
+    const line = try taken.reader.takeDelimiterInclusive('\n');
+    try taken.writer.writeAll(line);
+    try taken.flush();
+}
+
+test "a handler takes the connection over after a 101, and speaks its own protocol" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const running = try Running.start(gpa, .{}, .of(upgrading));
+    defer running.stop();
+    var client: Client = .init(gpa, .{});
+    defer client.deinit(io);
+    var buf: [64]u8 = undefined;
+    var response = try client.send(io, .{ .url = running.url(&buf, "/"), .headers = &.{ .{ .name = "Connection", .value = "Upgrade" }, .{ .name = "Upgrade", .value = "echo" } } });
+    defer response.deinit(io);
+    try testing.expectEqual(std.http.Status.switching_protocols, response.status);
+    var upgraded = try response.upgrade(io);
+    defer upgraded.close(io);
+    try upgraded.writer(io).writeAll("ping\n");
+    try upgraded.flush(io);
+    const echoed = try upgraded.reader(io).takeDelimiterInclusive('\n');
+    try testing.expectEqualStrings("ping\n", echoed);
+}
+
+fn trailing(io: Io, request: *Request, response: *Response) anyerror!void {
+    const body = try request.collect(testing.allocator, io, .limited(1 << 20));
+    defer testing.allocator.free(body);
+    const t = request.trailers().?;
+    const w = try response.writer(io);
+    try w.writeAll(body);
+    try w.splatByteAll('.', 5000);
+    try response.trailer("X-Checksum", t.get("x-checksum").?);
+    try response.end(io);
+}
+
+test "trailers are read from a chunked request and written after a chunked response" {
+    const gpa = testing.allocator;
+    const running = try Running.start(gpa, .{}, .of(trailing));
+    defer running.stop();
+    const got = try running.raw(gpa, "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n4\r\nbody\r\n0\r\nX-Checksum: 42\r\n\r\n");
+    defer gpa.free(got);
+    try testing.expect(std.mem.find(u8, got, "Transfer-Encoding: chunked\r\n") != null);
+    try testing.expect(std.mem.endsWith(u8, got, "0\r\nX-Checksum: 42\r\n\r\n"));
+}
+
+const Seen = struct {
+    answered: std.atomic.Value(u32) = .init(0),
+    refused: std.atomic.Value(u32) = .init(0),
+
+    fn event(context: ?*anyopaque, e: Server.Observer.Event) void {
+        const seen: *Seen = @ptrCast(@alignCast(context.?)); // safe: the test passes its Seen
+        switch (e) {
+            .answered => |a| if (a.status == 200) {
+                _ = seen.answered.fetchAdd(1, .monotonic);
+            },
+            .refused => _ = seen.refused.fetchAdd(1, .monotonic),
+            else => {},
+        }
+    }
+};
+
+test "the observer is told each answer and each refusal" {
+    const gpa = testing.allocator;
+    var seen: Seen = .{};
+    const running = try Running.start(gpa, .{ .observer = .{ .context = &seen, .eventFn = Seen.event } }, .of(hello));
+    defer running.stop();
+    const ok = try running.raw(gpa, "GET / HTTP/1.1\r\nHost: x\r\n\r\nGET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    defer gpa.free(ok);
+    const bad = try running.raw(gpa, "GET / HTTP/1.1\r\n\r\n");
+    defer gpa.free(bad);
+    try testing.expectEqual(@as(u32, 2), seen.answered.load(.monotonic));
+    try testing.expectEqual(@as(u32, 1), seen.refused.load(.monotonic));
+}
+
+test "past max_connections a connection waits for one to end" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const running = try Running.start(gpa, .{ .max_connections = 1 }, .of(hello));
+    defer running.stop();
+    const first = try dialRaw(running);
+    var wbuf: [256]u8 = undefined;
+    var w = first.writer(io, &wbuf);
+    try w.interface.writeAll("GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    try w.interface.flush();
+    var rbuf: [512]u8 = undefined;
+    var r = first.reader(io, &rbuf);
+    _ = try r.interface.peekDelimiterInclusive('o');
+    // The first is open and kept: a second is accepted by the system only.
+    try testing.expectEqual(@as(u32, 1), running.server.stats().open);
+    const Second = struct {
+        fn run(rn: *Running, out: *[]u8) Io.Cancelable!void {
+            out.* = rn.raw(testing.allocator, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n") catch &.{};
+        }
+    };
+    var second_out: []u8 = &.{};
+    var second = io.concurrent(Second.run, .{ running, &second_out }) catch return error.SkipZigTest;
+    try io.sleep(.fromMilliseconds(100), .awake);
+    try testing.expectEqual(@as(u64, 1), running.server.stats().accepted);
+    first.close(io);
+    // glint-ignore: Z026 -- the task returns nothing the test checks
+    second.await(io) catch {};
+    defer gpa.free(second_out);
+    try testing.expect(std.mem.endsWith(u8, second_out, "hello"));
+    try testing.expectEqual(@as(u64, 2), running.server.stats().accepted);
+}

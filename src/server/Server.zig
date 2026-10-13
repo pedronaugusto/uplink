@@ -149,15 +149,14 @@ fn acceptLoop(s: *Server, io: Io, listener: *Io.net.Server, result: *ServeError!
             stream.close(io);
             return;
         }
-        s.tasks.concurrent(io, serveTask, .{ s, io, stream }) catch {
+        // Counted open before its task starts, so the next turn's wait for
+        // room sees it.
+        s.opened();
+        s.tasks.concurrent(io, serveOpened, .{ s, io, stream }) catch {
             // No task to spare: this connection is served here, to its end.
-            s.serveConnection(io, stream);
+            s.serveOpened(io, stream);
         };
     }
-}
-
-fn serveTask(s: *Server, io: Io, stream: Io.net.Stream) void {
-    s.serveConnection(io, stream);
 }
 
 /// Wait while `max` connections are open. A connection's end wakes it.
@@ -174,9 +173,19 @@ fn waitForRoom(s: *Server, io: Io, max: u32) Io.Cancelable!void {
 /// task: every request on it, until the client closes it, a timeout, an
 /// answer that closes it, or `shutdown`.
 pub fn serveConnection(s: *Server, io: Io, stream: Io.net.Stream) void {
+    s.opened();
+    s.serveOpened(io, stream);
+}
+
+fn opened(s: *Server) void {
     const k = &s.context.counters;
     _ = k.accepted.fetchAdd(1, .monotonic);
     _ = k.open.fetchAdd(1, .acq_rel);
+}
+
+/// Serve a connection already counted open, and count it closed.
+fn serveOpened(s: *Server, io: Io, stream: Io.net.Stream) void {
+    const k = &s.context.counters;
     defer {
         _ = k.open.fetchSub(1, .acq_rel);
         io.futexWake(u32, &k.open.raw, 1);
