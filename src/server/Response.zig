@@ -29,6 +29,8 @@ const BufferPool = @import("../transport/BufferPool.zig");
 const Encoder = @import("../coding/Encoder.zig");
 const Timed = @import("../transport/Timed.zig");
 const Socket = @import("Socket.zig");
+const Session = @import("h2/Session.zig");
+const hpack = wire.hpack;
 
 const Response = @This();
 
@@ -73,6 +75,8 @@ trailer_len: usize = 0,
 encoder: ?*Encoder = null,
 framed: Io.Writer = .{ .vtable = &.{ .drain = drainFramed }, .buffer = &.{} },
 framed_buffer: []u8 = &.{},
+/// Private: the HTTP/2 stream the response goes on, if it does.
+stream: ?*Session.Stream = null,
 /// Private: the body writer.
 interface: Io.Writer,
 
@@ -87,7 +91,14 @@ const State = enum {
     hijacked,
 };
 
-const Framing = enum { none, length, chunked, close };
+const Framing = enum {
+    none,
+    length,
+    chunked,
+    close,
+    /// HTTP/2's DATA frames, the length not said.
+    frames,
+};
 
 /// Why a field or a write was refused.
 pub const Error = error{
@@ -223,6 +234,11 @@ pub fn end(r: *Response, io: Io) Error!void {
         r.framed.flush() catch return r.fail();
     }
     if (r.declared != null and r.remaining != 0) return r.finishShort();
+    if (r.stream) |st| {
+        if (!st.ended) try r.endH2(st);
+        r.state = .ended;
+        return;
+    }
     if (r.framing == .chunked) {
         const w = r.out();
         w.writeAll("0\r\n") catch return r.fail();
@@ -230,7 +246,19 @@ pub fn end(r: *Response, io: Io) Error!void {
         w.writeAll("\r\n") catch return r.fail();
     }
     r.state = .ended;
-    r.socket.flush() catch return r.fail();
+    r.flushOut() catch return r.fail();
+}
+
+/// End an HTTP/2 response: its trailers, or an empty DATA, with
+/// END_STREAM.
+fn endH2(r: *Response, st: *Session.Stream) Error!void {
+    if (r.trailer_len != 0) {
+        var list: [max_h2_fields]hpack.Field = undefined;
+        const n = try appendLines(&list, 0, r.trailer_buffer[0..r.trailer_len]);
+        st.writeHeaders(r.socket.io, list[0..n], true) catch return r.fail();
+        return;
+    }
+    st.writeData(r.socket.io, "", true) catch return r.fail();
 }
 
 /// The client counts on a longer body: the connection ends short instead,
@@ -238,6 +266,10 @@ pub fn end(r: *Response, io: Io) Error!void {
 fn finishShort(r: *Response) Error {
     r.broken = true;
     r.state = .ended;
+    if (r.stream) |st| {
+        st.reset(r.socket.io, .internal_error);
+        return error.BodyIncomplete;
+    }
     // glint-ignore: Z026 -- the connection closes next; what went out goes out cut
     r.socket.flush() catch {};
     return error.BodyIncomplete;
@@ -261,19 +293,32 @@ fn sendWhole(r: *Response, body: []const u8) Error!void {
         if (coded.len >= body.len) break :compressed;
         r.declared = coded.len;
         try r.sendHead(.length, c);
-        if (!r.head_only) r.out().writeAll(coded) catch return r.fail();
         r.remaining = 0;
+        if (r.stream) |st| {
+            if (!st.ended) st.writeData(r.socket.io, coded, true) catch return r.fail();
+            r.state = .ended;
+            return;
+        }
+        if (!r.head_only) r.out().writeAll(coded) catch return r.fail();
         r.state = .ended;
-        r.socket.flush() catch return r.fail();
+        r.flushOut() catch return r.fail();
         return;
     }
     if (bodiless(r.status)) {
         if (body.len != 0) return error.BodyNotAllowed;
     } else r.declared = body.len;
     try r.sendHead(.length, null);
+    if (r.stream) |st| {
+        if (!st.ended and !r.head_only and body.len != 0) {
+            r.remaining = 0;
+            st.writeData(r.socket.io, body, true) catch return r.fail();
+        } else if (!st.ended) try r.endH2(st);
+        r.state = .ended;
+        return;
+    }
     try r.bodyBytes(&.{body}, 1);
     r.state = .ended;
-    r.socket.flush() catch return r.fail();
+    r.flushOut() catch return r.fail();
 }
 
 /// A connection taken over by the handler, after a `101` or a `2xx` to a
@@ -303,8 +348,10 @@ pub const Hijacked = struct {
 pub fn hijack(r: *Response, io: Io) Error!Hijacked {
     r.socket.io = io;
     if (r.state != .open) return error.HeadSent;
+    // On HTTP/2 a stream is not a connection to take over.
+    if (r.stream != null) return error.HeadSent;
     try r.sendHead(.none, null);
-    r.socket.flush() catch return r.fail();
+    r.flushOut() catch return r.fail();
     r.state = .hijacked;
     r.socket.hijacked = true;
     r.socket.phase = .hijacked;
@@ -318,6 +365,7 @@ pub fn headSent(r: *const Response) bool {
 
 /// Whether the connection can carry another exchange after this response.
 pub fn keepsConnection(r: *const Response) bool {
+    if (r.stream != null) return r.state == .ended and !r.broken;
     return r.state == .ended and !r.closing and !r.broken and r.framing != .close;
 }
 
@@ -345,6 +393,13 @@ pub fn reset(r: *Response, io: Io) void {
 
 fn out(r: *Response) *Io.Writer {
     return r.socket.writer();
+}
+
+/// Push what was written: the socket's buffer on HTTP/1.1; HTTP/2's
+/// frames go as they are written.
+fn flushOut(r: *Response) Io.Writer.Error!void {
+    if (r.stream != null) return;
+    return r.socket.flush();
 }
 
 fn fail(r: *Response) Error {
@@ -378,6 +433,7 @@ fn coding(r: *const Response, length: ?u64) ?Encoder.Coding {
 /// head alone. `coded` is the coding a whole body was put under.
 fn sendHead(r: *Response, want: Framing, coded: ?Encoder.Coding) Error!void {
     std.debug.assert(r.state == .open);
+    if (r.stream) |st| return r.sendHeadH2(st, want, coded);
     const code = @backingInt(r.status);
     // A body streamed under a coding is chunked, whatever its length.
     const streamed = if (want == .chunked) r.coding(r.declared) else null;
@@ -404,6 +460,7 @@ fn sendHead(r: *Response, want: Framing, coded: ?Encoder.Coding) Error!void {
         // has one.
         .none => if (code == 304 and want != .none) if (r.declared) |n| w.print("Content-Length: {d}\r\n", .{n}) catch return r.fail(),
         .close => {},
+        .frames => unreachable, // unreachable: HTTP/1.1's head never frames its body as HTTP/2 does
     }
     if (r.declared) |n| r.remaining = n;
     if (coded orelse streamed) |c| w.print("Content-Encoding: {s}\r\n", .{c.name()}) catch return r.fail();
@@ -412,6 +469,78 @@ fn sendHead(r: *Response, want: Framing, coded: ?Encoder.Coding) Error!void {
     w.writeAll(r.fields_buffer[0..r.fields_len]) catch return r.fail();
     w.writeAll("\r\n") catch return r.fail();
     r.state = .streaming;
+}
+
+/// The head as HTTP/2 HEADERS: the status and the fields with lower-case
+/// names, those of a connection's own left out; the stream ends with them
+/// when no body follows.
+fn sendHeadH2(r: *Response, st: *Session.Stream, want: Framing, coded: ?Encoder.Coding) Error!void {
+    const code = @backingInt(r.status);
+    const streamed = if (want == .chunked) r.coding(r.declared) else null;
+    r.framing = if (bodiless(r.status) or want == .none)
+        .none
+    else switch (want) {
+        .length => .length,
+        else => if (r.declared != null and streamed == null) .length else .frames,
+    };
+    if (streamed) |c| try r.startEncoder(c);
+    var list: [max_h2_fields]hpack.Field = undefined;
+    var n: usize = 0;
+    var status_buf: [3]u8 = undefined;
+    list[n] = .{ .name = ":status", .value = std.mem.print(&status_buf, "{d}", .{code}) catch unreachable }; // unreachable: a status is three digits
+    n += 1;
+    var date_buf: [wire.date.formatted_len]u8 = undefined;
+    if (!r.has_date) {
+        list[n] = .{ .name = "date", .value = wire.date.format(Io.Clock.real.now(r.socket.io).toSeconds(), &date_buf) };
+        n += 1;
+    }
+    var length_buf: [20]u8 = undefined;
+    const say_length = r.framing == .length or (code == 304 and r.declared != null);
+    if (say_length) {
+        list[n] = .{ .name = "content-length", .value = std.mem.print(&length_buf, "{d}", .{r.declared.?}) catch unreachable }; // unreachable: a u64 is at most 20 digits
+        n += 1;
+    }
+    if (r.declared) |d| r.remaining = d;
+    if (coded orelse streamed) |c| {
+        list[n] = .{ .name = "content-encoding", .value = c.name() };
+        n += 1;
+    }
+    if (r.compressible and !r.has_content_encoding) {
+        list[n] = .{ .name = "vary", .value = "accept-encoding" };
+        n += 1;
+    }
+    n = try appendLines(&list, n, r.fields_buffer[0..r.fields_len]);
+    const end_stream = r.framing == .none or r.head_only or (r.framing == .length and r.declared.? == 0);
+    st.writeHeaders(r.socket.io, list[0..n], end_stream) catch return r.fail();
+    r.state = .streaming;
+}
+
+/// The most fields an HTTP/2 head carries.
+const max_h2_fields = 128;
+
+/// Fields written as `Name: value` lines, their names made lower case in
+/// place, after `n` in `list`; a connection's own fields left out, which
+/// HTTP/2 forbids (RFC 9113 §8.2.2).
+fn appendLines(list: *[max_h2_fields]hpack.Field, n_in: usize, lines: []u8) Error!usize {
+    var n = n_in;
+    var at: usize = 0;
+    while (at < lines.len) {
+        const line_end = std.mem.findPos(u8, lines, at, "\r\n").?;
+        const line = lines[at..line_end];
+        at = line_end + 2;
+        const colon = std.mem.findScalar(u8, line, ':').?;
+        const name = line[0..colon];
+        for (name) |*ch| ch.* = std.ascii.toLower(ch.*);
+        const connection_own = [_][]const u8{ "connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade" };
+        const skip = for (connection_own) |own| {
+            if (std.mem.eql(u8, name, own)) break true;
+        } else false;
+        if (skip) continue;
+        if (n == list.len) return error.HeadTooLarge;
+        list[n] = .{ .name = name, .value = line[colon + 2 ..] };
+        n += 1;
+    }
+    return n;
 }
 
 fn startEncoder(r: *Response, c: Encoder.Coding) Error!void {
@@ -448,6 +577,12 @@ fn bodyBytes(r: *Response, data: []const []const u8, splat: usize) Error!void {
 
 /// Bytes onto the connection as the framing says.
 fn frame(r: *Response, data: []const []const u8, splat: usize, total: u64) Error!void {
+    if (r.stream) |st| {
+        const io = r.socket.io;
+        for (data[0 .. data.len - 1]) |d| st.writeData(io, d, false) catch return r.fail();
+        for (0..splat) |_| st.writeData(io, data[data.len - 1], false) catch return r.fail();
+        return;
+    }
     const w = r.out();
     if (r.framing == .chunked) w.print("{x}\r\n", .{total}) catch return r.fail();
     for (data[0 .. data.len - 1]) |d| w.writeAll(d) catch return r.fail();

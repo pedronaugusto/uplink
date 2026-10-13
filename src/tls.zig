@@ -47,8 +47,11 @@ pub const ServerOptions = struct {
     key_log: ?*Io.Writer = null,
 };
 
-/// The protocols a server offers by ALPN, its preference first.
-pub const server_protocols: []const []const u8 = &.{"http/1.1"};
+/// The protocols a server offers by ALPN, its preference first: HTTP/2,
+/// then HTTP/1.1.
+pub const server_protocols: []const []const u8 = &.{ "h2", "http/1.1" };
+/// The same, for a server that speaks HTTP/1.1 only.
+pub const server_protocols_h1: []const []const u8 = &.{"http/1.1"};
 
 /// The buffers a TLS session reads and writes through: one whole TLS record
 /// of ciphertext (16 KiB of plaintext, its header, type and tag), which is

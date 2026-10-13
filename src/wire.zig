@@ -28,6 +28,10 @@ pub const form = @import("wire/form.zig");
 pub const multipart = @import("wire/multipart.zig");
 /// Byte ranges: `Range` read, `Content-Range` written.
 pub const range = @import("wire/range.zig");
+/// HTTP/2's frames, settings and error codes.
+pub const h2 = @import("wire/h2.zig");
+/// HPACK, HTTP/2's header compression.
+pub const hpack = @import("wire/hpack.zig");
 /// The WebSocket protocol's frames, keys, close codes and extension.
 pub const ws = @import("wire/ws.zig");
 /// A request method: any token.
@@ -50,4 +54,6 @@ test {
     _ = multipart;
     _ = range;
     _ = ws;
+    _ = hpack;
+    _ = h2;
 }

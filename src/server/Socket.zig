@@ -49,6 +49,9 @@ pub const Phase = enum {
     answer,
     /// The handler took the connection over: it keeps its own time.
     hijacked,
+    /// HTTP/2 with streams open: a read waits as long as they take, each
+    /// write the activity timeout.
+    h2,
 };
 
 /// Why an operation failed.
@@ -86,6 +89,18 @@ pub fn startHead(c: *Socket, io: Io) void {
 pub fn startIdle(c: *Socket, io: Io) void {
     c.phase = .idle;
     c.until = if (c.context.options.timeouts.idle) |d| Io.Clock.awake.now(io).addDuration(span.toIo(d)) else null;
+}
+
+/// Serve HTTP/2 streams: reads wait as long as the streams take.
+pub fn startH2(c: *Socket) void {
+    c.phase = .h2;
+    c.until = null;
+}
+
+/// The protocol ALPN agreed, empty without TLS or without one.
+pub fn alpn(c: *const Socket) []const u8 {
+    if (!c.secure) return "";
+    return c.session.info().alpn;
 }
 
 /// Answer a request: each operation ends at the activity timeout.
@@ -143,7 +158,7 @@ pub fn handshake(c: *Socket, options: tls.ServerOptions) error{Failed}!void {
     var report: cloak.tls.Session.Diagnostics = .{};
     c.session.accept(s.gpa, io, &c.input.interface, &c.output.interface, .{
         .credentials = options.credentials,
-        .alpn = tls.server_protocols,
+        .alpn = if (s.options.http2) tls.server_protocols else tls.server_protocols_h1,
         .client_auth = options.client_certificate,
         .client_trust = if (options.client_trust) |t| .{ .snapshot = t } else .none,
         .key_log = if (options.key_log) |w| tls.keyLog(w) else null,
@@ -207,17 +222,18 @@ pub fn readError(c: *const Socket) ReadError {
 }
 
 /// The deadline of an operation starting now.
-fn deadline(c: *Socket) ?Io.Timestamp {
+fn deadline(c: *Socket, op: Io.Operation) ?Io.Timestamp {
     return switch (c.phase) {
         .handshake, .idle, .head => c.until,
         .hijacked => null,
+        .h2 => if (op == .net_read) null else if (c.context.options.timeouts.activity) |a| Io.Clock.awake.now(c.io).addDuration(span.toIo(a)) else null,
         .answer => if (c.context.options.timeouts.activity) |a| Io.Clock.awake.now(c.io).addDuration(span.toIo(a)) else null,
     };
 }
 
 /// One socket operation within the deadline of the wait at hand.
 fn perform(c: *Socket, op: Io.Operation) error{Failed}!Io.Operation.Result {
-    return c.timed.perform(c.io, c.context.keeper(), op, c.deadline()) catch |err| {
+    return c.timed.perform(c.io, c.context.keeper(), op, c.deadline(op)) catch |err| {
         c.note(switch (err) {
             error.TimedOut => .timed_out,
             error.Canceled => .canceled,

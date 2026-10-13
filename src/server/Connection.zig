@@ -18,6 +18,7 @@ const Socket = @import("Socket.zig");
 const Request = @import("Request.zig");
 const Response = @import("Response.zig");
 const Handler = @import("Handler.zig");
+const h2_serve = @import("h2.zig");
 
 const Connection = @This();
 
@@ -33,12 +34,32 @@ pub fn serve(context: *Context, handler: Handler, io: Io, stream: Io.net.Stream)
     const in_class: BufferPool.Class = if (context.options.tls != null) .record else .small;
     c.socket.input.interface.buffer = context.buffers.acquire(io, in_class) catch return;
     if (context.options.tls) |options| c.socket.handshake(options) catch return;
+    if (std.mem.eql(u8, c.socket.alpn(), "h2")) return h2_serve.serve(context, handler, &c.socket);
+    if (!c.socket.secure) switch (context.options.h2c) {
+        .off => {},
+        .only => return h2_serve.serve(context, handler, &c.socket),
+        .alongside_http1 => if (c.priorKnowledge()) return h2_serve.serve(context, handler, &c.socket),
+    };
     var first = true;
     while (true) {
         if (!c.awaitRequest(first)) return;
         first = false;
         if (!c.serveOne()) return;
     }
+}
+
+/// Whether the connection starts with HTTP/2's preface: the client knows
+/// the server speaks it.
+fn priorKnowledge(c: *Connection) bool {
+    c.socket.startHead(c.socket.io);
+    const r = c.socket.reader();
+    const want = wire.h2.preface;
+    while (r.bufferedLen() < want.len) {
+        const have = r.buffered();
+        if (!std.mem.startsWith(u8, want, have)) return false;
+        r.fillMore() catch return false;
+    }
+    return std.mem.startsWith(u8, r.buffered(), want);
 }
 
 /// Wait for the next request's first byte, or take one already buffered

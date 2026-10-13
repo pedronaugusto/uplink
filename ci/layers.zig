@@ -10,6 +10,9 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/wire/sse.zig",
         "src/wire/range.zig",
         "src/wire/ws.zig",
+        "src/wire/hpack/huffman_codes.zig",
+        "src/wire/hpack.zig",
+        "src/wire/h2/frame.zig",
     } },
     .{ .name = "wire codecs", .patterns = &.{
         "src/wire/Method.zig",
@@ -22,6 +25,10 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "wire messages", .patterns = &.{
         "src/wire/h1.zig",
         "src/wire/auth.zig",
+    } },
+    .{ .name = "wire connections", .patterns = &.{
+        "src/wire/h2/Connection.zig",
+        "src/wire/h2.zig",
     } },
     .{ .name = "wire", .patterns = &.{
         "src/wire.zig",
@@ -109,12 +116,19 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "server socket", .patterns = &.{
         "src/server/Socket.zig",
     } },
+    .{ .name = "server h2 session", .patterns = &.{
+        "src/server/h2/Session.zig",
+    } },
     .{ .name = "server exchange", .patterns = &.{
         "src/server/Request.zig",
         "src/server/Response.zig",
     } },
     .{ .name = "server handler", .patterns = &.{
         "src/server/Handler.zig",
+    } },
+    .{ .name = "server h2", .patterns = &.{
+        "src/server/h2/serve.zig",
+        "src/server/h2.zig",
     } },
     .{ .name = "server connection", .patterns = &.{
         "src/server/Connection.zig",

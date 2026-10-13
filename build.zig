@@ -142,6 +142,43 @@ pub fn dev(b: *std.Build, tools: type) void {
     test_step.dependOn(examples_step);
     check_step.dependOn(&example.step);
 
+    // Conformance: the protocols' own suites, driven by Zig programs that
+    // run the peers installed on the machine and read their reports. By
+    // hand, before a cut: CI compiles them only.
+    const autobahn = b.addExecutable(.{
+        .name = "autobahn",
+        .root_module = b.createModule(.{
+            .root_source_file = p.path("conformance/autobahn.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "uplink", .module = module },
+                .{ .name = "reactor", .module = reactor },
+            },
+        }),
+    });
+    const autobahn_run = b.addRunArtifact(autobahn);
+    autobahn_run.addPassthruArgs();
+    b.step("autobahn", "Autobahn|Testsuite against the WebSocket client or server: -- server|client <wstest> <workdir>").dependOn(&autobahn_run.step);
+    check_step.dependOn(&autobahn.step);
+
+    const h2spec = b.addExecutable(.{
+        .name = "h2spec",
+        .root_module = b.createModule(.{
+            .root_source_file = p.path("conformance/h2spec.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "uplink", .module = module },
+                .{ .name = "reactor", .module = reactor },
+            },
+        }),
+    });
+    const h2spec_run = b.addRunArtifact(h2spec);
+    h2spec_run.addPassthruArgs();
+    b.step("h2spec", "h2spec against the HTTP/2 server: -- <h2spec> <workdir>").dependOn(&h2spec_run.step);
+    check_step.dependOn(&h2spec.step);
+
     b.getInstallStep().dependOn(check_step);
 
     //=====================================================================

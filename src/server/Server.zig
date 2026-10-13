@@ -42,6 +42,8 @@ pub const Timeouts = Context.Timeouts;
 pub const Compression = Context.Compression;
 /// Every request as it is answered.
 pub const Observer = Context.Observer;
+/// How plain connections may speak HTTP/2.
+pub const H2c = Context.H2c;
 /// Which limit a connection ran past.
 pub const Timeout = Context.Timeout;
 

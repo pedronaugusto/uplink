@@ -709,3 +709,43 @@ test "past max_connections a connection waits for one to end" {
     try testing.expect(std.mem.endsWith(u8, second_out, "hello"));
     try testing.expectEqual(@as(u64, 2), running.server.stats().accepted);
 }
+
+/// `curl` with `args` against the running server; its output, or null
+/// without curl, which only a hosted runner must have.
+fn curl(gpa: std.mem.Allocator, args: []const []const u8) !?[]u8 {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.appendSlice(gpa, &.{ "curl", "-sS", "--max-time", "20" });
+    try argv.appendSlice(gpa, args);
+    const result = std.process.run(gpa, test_io.io(), .{ .argv = argv.items }) catch return null;
+    defer gpa.free(result.stderr);
+    if (result.term != .exited or result.term.exited != 0) {
+        std.debug.print("curl failed: {s}\n", .{result.stderr});
+        gpa.free(result.stdout);
+        return error.CurlFailed;
+    }
+    return result.stdout;
+}
+
+test "curl speaks HTTP/2 to the server, by prior knowledge and over TLS" {
+    const gpa = testing.allocator;
+    const running = try Running.start(gpa, .{ .h2c = .alongside_http1 }, .of(echoVersion));
+    defer running.stop();
+    var url_buf: [64]u8 = undefined;
+    const out = try curl(gpa, &.{ "--http2-prior-knowledge", "-d", "hello h2", running.url(&url_buf, "/x") }) orelse return error.SkipZigTest;
+    defer gpa.free(out);
+    try testing.expectEqualStrings("h2 POST /x hello h2", out);
+    const many = try curl(gpa, &.{ "--http2-prior-knowledge", running.url(&url_buf, "/a"), running.url(&url_buf, "/b") }) orelse return error.SkipZigTest;
+    defer gpa.free(many);
+    try testing.expect(std.mem.find(u8, many, "h2 GET /") != null);
+    const h1 = try curl(gpa, &.{running.url(&url_buf, "/plain")}) orelse return error.SkipZigTest;
+    defer gpa.free(h1);
+    try testing.expectEqualStrings("http1_1 GET /plain ", h1);
+}
+
+fn echoVersion(io: Io, request: *Request, response: *Response) anyerror!void {
+    const body = try request.collect(testing.allocator, io, .limited(1 << 20));
+    defer testing.allocator.free(body);
+    var buf: [256]u8 = undefined;
+    try response.send(io, try std.mem.print(&buf, "{t} {s} {s} {s}", .{ request.version, request.method.name, request.path, body }));
+}

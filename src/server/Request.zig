@@ -18,6 +18,7 @@ const Body = @import("../transport/Body.zig");
 const BufferPool = @import("../transport/BufferPool.zig");
 const Decoder = @import("../coding/Decoder.zig");
 const Socket = @import("Socket.zig");
+const Session = @import("h2/Session.zig");
 
 const Request = @This();
 
@@ -44,8 +45,10 @@ params: Params = .{},
 
 /// Private: the connection's I/O.
 socket: *Socket,
-/// Private: the body as its framing delimits it.
+/// Private: the body as its framing delimits it, on HTTP/1.1.
 body: Body,
+/// Private: the HTTP/2 stream the request came on, if it did.
+stream: ?*Session.Stream = null,
 /// Private: the body's codings undone, when the server decodes them.
 decoder: ?Decoder = null,
 decoded: ?*Io.Reader = null,
@@ -141,15 +144,19 @@ pub fn param(r: *const Request, name: []const u8) ?[]const u8 {
 /// waiting for it.
 pub fn reader(r: *Request, io: Io) *Io.Reader {
     r.socket.io = io;
+    const raw = if (r.stream) |st| st.reader(io) else &r.body.interface;
     if (!r.started) {
         r.started = true;
         if (r.expects_continue and !r.continued) {
             r.continued = true;
-            r.socket.sendContinue();
+            if (r.stream) |st| {
+                // glint-ignore: Z026 -- a client that cannot hear the 100 sends its body after its own wait, or the read that follows names the failure
+                st.writeHeaders(io, &.{.{ .name = ":status", .value = "100" }}, false) catch {};
+            } else r.socket.sendContinue();
         }
-        if (r.decoder) |*d| r.decoded = d.start(&r.body.interface, &r.socket.context.zstd);
+        if (r.decoder) |*d| r.decoded = d.start(raw, &r.socket.context.zstd);
     }
-    return r.decoded orelse &r.body.interface;
+    return r.decoded orelse raw;
 }
 
 /// The whole body, at most `limit` bytes, in `gpa`.
@@ -163,6 +170,10 @@ pub fn collect(r: *Request, gpa: Allocator, io: Io, limit: Io.Limit) CollectErro
 
 /// Why the last read of the body failed.
 pub fn failure(r: *const Request) ReadError {
+    if (r.stream) |st| return if (st.read_failure) |e| switch (e) {
+        error.StreamClosed => error.ConnectionFailed,
+        error.Canceled => error.Canceled,
+    } else error.BadContentEncoding;
     return switch (r.body.state) {
         .incomplete => error.BodyIncomplete,
         .malformed => error.HttpProtocolError,
@@ -183,6 +194,11 @@ pub fn decodingFailure(r: *const Request) ?Decoder.Error {
 /// or null when it had none or the body is not read to its end.
 pub fn trailers(r: *Request) ?fields.Headers {
     if (r.trailer_fields) |t| return t;
+    if (r.stream) |st| {
+        const t = st.trailers orelse return null;
+        r.trailer_fields = .init(t);
+        return r.trailer_fields;
+    }
     const bytes = r.body.trailerBytes() orelse return null;
     const end = std.mem.alignForward(usize, bytes.len, @alignOf(fields.Field));
     const field_ptr: [*]fields.Field = @ptrCast(@alignCast(r.body.trailer.ptr + end)); // safe: pool buffers are 64-aligned and `end` is aligned for a Field, with room for `trailer_fields` of them
@@ -193,6 +209,7 @@ pub fn trailers(r: *Request) ?fields.Headers {
 
 /// Whether the body was read to its end.
 pub fn bodyComplete(r: *const Request) bool {
+    if (r.stream) |st| return st.recv_end and st.recv_len == 0;
     return r.body.complete();
 }
 

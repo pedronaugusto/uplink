@@ -33,5 +33,6 @@ test {
     _ = @import("server/Connection.zig");
     _ = @import("server/Context.zig");
     _ = @import("server/Socket.zig");
+    _ = @import("server/h2.zig");
     _ = @import("server/server_test.zig");
 }

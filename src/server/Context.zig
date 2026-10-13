@@ -38,6 +38,17 @@ stopping: std.atomic.Value(bool) = .init(false),
 drained: Io.Event = .unset,
 counters: Counters = .{},
 
+/// How plain connections may speak HTTP/2.
+pub const H2c = enum {
+    off,
+    /// A connection that starts with HTTP/2's preface is HTTP/2, any other
+    /// HTTP/1.1.
+    alongside_http1,
+    /// Every plain connection is HTTP/2: one that does not start with the
+    /// preface gets a GOAWAY.
+    only,
+};
+
 /// How a server reads, limits and answers.
 pub const Options = struct {
     /// The largest request head, its blank line included, at most 64 KiB:
@@ -52,6 +63,12 @@ pub const Options = struct {
     max_connections: ?u32 = null,
     /// TLS on every connection; null serves plain HTTP.
     tls: ?tls.ServerOptions = null,
+    /// HTTP/2 to a client that asks for it by ALPN, over TLS.
+    http2: bool = true,
+    /// HTTP/2 over plain TCP, by prior knowledge (RFC 9113 §3.3): off by
+    /// default, as plain HTTP/2 is for clients that know the server, such
+    /// as a proxy in front of it.
+    h2c: H2c = .off,
     /// Decode a request body under gzip, deflate or zstd, as the client
     /// decodes a response's, its checksums verified; a body under any other
     /// coding is handed over as it came.
