@@ -22,7 +22,7 @@ const Io = std.Io;
 const wire = @import("uplink.wire");
 const Method = wire.Method;
 const Pattern = @import("Pattern.zig");
-const Server = @import("Server.zig");
+const Handler = @import("Handler.zig");
 const Request = @import("Request.zig");
 const Response = @import("Response.zig");
 
@@ -38,7 +38,7 @@ hosts: std.ArrayList(HostTree) = .empty,
 /// Private: every route, for the conflict check.
 routes: std.ArrayList(*const Route) = .empty,
 /// What a request no pattern matches is handed to; null answers 404.
-not_found: ?Server.Handler = null,
+not_found: ?Handler = null,
 /// After `add` refused a pattern as a conflict: the pattern it conflicts
 /// with.
 conflict: ?[]const u8 = null,
@@ -47,7 +47,7 @@ const HostTree = struct { host: []const u8, root: Node };
 
 const Route = struct {
     pattern: Pattern,
-    handler: Server.Handler,
+    handler: Handler,
 };
 
 const Node = struct {
@@ -99,7 +99,7 @@ pub const AddError = Pattern.Error || error{
 };
 
 /// Route requests `pattern` matches to `target`.
-pub fn add(r: *Router, pattern: []const u8, target: Server.Handler) AddError!void {
+pub fn add(r: *Router, pattern: []const u8, target: Handler) AddError!void {
     const a = r.arena.allocator();
     const text = try a.dupe(u8, pattern);
     const segments = try a.alloc(Pattern.Segment, Pattern.countSegments(text));
@@ -202,7 +202,8 @@ pub const Match = struct {
 /// sent, escapes in), or null; `allowed` gathers the methods of patterns
 /// that matched the path under another method.
 pub fn match(r: *const Router, method: Method, host: []const u8, path: []const u8, allowed: *Allowed) ?Match {
-    std.debug.assert(path.len != 0 and path[0] == '/');
+    std.debug.assert(path.len != 0);
+    std.debug.assert(path[0] == '/');
     const name = hostName(host);
     for (r.hosts.items) |*t| if (std.ascii.eqlIgnoreCase(t.host, name)) {
         var found: Match = undefined;
@@ -252,7 +253,7 @@ fn walk(node: *const Node, method: []const u8, rest: []const u8, slash: bool, fo
 }
 
 fn insertValue(found: *Match, value: []const u8) void {
-    std.mem.copyBackwards([]const u8, found.values[1 .. found.len + 1], found.values[0..found.len]);
+    @memmove(found.values[1 .. found.len + 1], found.values[0..found.len]);
     found.values[0] = value;
     found.len += 1;
 }
@@ -297,7 +298,7 @@ fn pickRest(routes: []const *const Route, method: []const u8, rest: []const u8, 
 }
 
 /// The router as the server's handler.
-pub fn handler(r: *Router) Server.Handler {
+pub fn handler(r: *Router) Handler {
     return .init(r, serve);
 }
 
@@ -441,7 +442,7 @@ fn matched(r: *const Router, method: Method, path: []const u8) ?[]const u8 {
 test "the most specific pattern wins, whatever the order they were added in" {
     var r: Router = .init(testing.allocator);
     defer r.deinit();
-    const h: Server.Handler = .of(nop);
+    const h: Handler = .of(nop);
     for ([_][]const u8{ "/", "/a/", "/a/b", "/a/{x}", "/a/{x}/c", "GET /a/b", "/static/{rest...}", "/{$}", "other.com/a/b", "/x/{y}/z/" }) |p| try r.add(p, h);
     try testing.expectEqualStrings("GET /a/b", matched(&r, .GET, "/a/b").?);
     try testing.expectEqualStrings("GET /a/b", matched(&r, .HEAD, "/a/b").?);
@@ -462,7 +463,7 @@ test "the most specific pattern wins, whatever the order they were added in" {
 test "conflicting patterns are refused, naming the one already there" {
     var r: Router = .init(testing.allocator);
     defer r.deinit();
-    const h: Server.Handler = .of(nop);
+    const h: Handler = .of(nop);
     try r.add("/a/{x}", h);
     try testing.expectError(error.Conflict, r.add("/a/{y}", h));
     try testing.expectEqualStrings("/a/{x}", r.conflict.?);
@@ -475,7 +476,7 @@ test "conflicting patterns are refused, naming the one already there" {
 test "a path under another method is gathered for Allow, and captures come back in order" {
     var r: Router = .init(testing.allocator);
     defer r.deinit();
-    const h: Server.Handler = .of(nop);
+    const h: Handler = .of(nop);
     try r.add("POST /items/{id}", h);
     try r.add("GET /items/{id}", h);
     try r.add("GET /users/{user}/repos/{repo...}", h);

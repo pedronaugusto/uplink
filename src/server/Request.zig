@@ -17,7 +17,7 @@ const Version = wire.Version;
 const Body = @import("../transport/Body.zig");
 const BufferPool = @import("../transport/BufferPool.zig");
 const Decoder = @import("../coding/Decoder.zig");
-const Connection = @import("Connection.zig");
+const Socket = @import("Socket.zig");
 
 const Request = @This();
 
@@ -42,8 +42,8 @@ secure: bool,
 /// What a router captured from the path, by name.
 params: Params = .{},
 
-/// Private: the connection.
-conn: *Connection,
+/// Private: the connection's I/O.
+socket: *Socket,
 /// Private: the body as its framing delimits it.
 body: Body,
 /// Private: the body's codings undone, when the server decodes them.
@@ -114,7 +114,7 @@ pub const CollectError = ReadError || error{ OutOfMemory, StreamTooLong };
 /// too, until the request is done).
 pub fn scratchBuffer(r: *Request, io: Io, len: usize) error{OutOfMemory}![]u8 {
     if (r.scratch.len >= len) return r.scratch;
-    const pool = &r.conn.server.buffers;
+    const pool = &r.socket.context.buffers;
     const class = BufferPool.Class.fitting(len) orelse return error.OutOfMemory;
     const buffer = try pool.acquire(io, class);
     if (r.scratch.len != 0) r.retired = r.scratch;
@@ -124,7 +124,7 @@ pub fn scratchBuffer(r: *Request, io: Io, len: usize) error{OutOfMemory}![]u8 {
 
 /// Give back the request's buffers.
 pub fn release(r: *Request, io: Io) void {
-    const pool = &r.conn.server.buffers;
+    const pool = &r.socket.context.buffers;
     for ([_][]u8{ r.scratch, r.retired }) |b| if (b.len != 0) pool.release(io, b);
     r.scratch = &.{};
     r.retired = &.{};
@@ -140,14 +140,14 @@ pub fn param(r: *const Request, name: []const u8) ?[]const u8 {
 /// over as it came. The first call sends `100 Continue` to a client
 /// waiting for it.
 pub fn reader(r: *Request, io: Io) *Io.Reader {
-    r.conn.io = io;
+    r.socket.io = io;
     if (!r.started) {
         r.started = true;
         if (r.expects_continue and !r.continued) {
             r.continued = true;
-            r.conn.sendContinue();
+            r.socket.sendContinue();
         }
-        if (r.decoder) |*d| r.decoded = d.start(&r.body.interface, &r.conn.server.zstd);
+        if (r.decoder) |*d| r.decoded = d.start(&r.body.interface, &r.socket.context.zstd);
     }
     return r.decoded orelse &r.body.interface;
 }
@@ -167,7 +167,7 @@ pub fn failure(r: *const Request) ReadError {
         .incomplete => error.BodyIncomplete,
         .malformed => error.HttpProtocolError,
         .too_large => error.BodyTooLarge,
-        .read_failed => r.conn.readError(),
+        .read_failed => r.socket.readError(),
         .reading, .done => error.BadContentEncoding,
     };
 }
@@ -176,7 +176,7 @@ pub fn failure(r: *const Request) ReadError {
 /// `BadContentEncoding`.
 pub fn decodingFailure(r: *const Request) ?Decoder.Error {
     const d = &(r.decoder orelse return null);
-    return d.failure(&r.conn.server.zstd);
+    return d.failure(&r.socket.context.zstd);
 }
 
 /// After the body's end: the fields of a chunked body's trailer section,

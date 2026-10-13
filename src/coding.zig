@@ -6,8 +6,11 @@
 pub const Decoder = @import("coding/Decoder.zig");
 /// The memory a zstd body is decoded in, and the cap on its window.
 pub const ZstdBuffer = @import("coding/ZstdBuffer.zig");
+/// A body put under a coding as it is written.
+pub const Encoder = @import("coding/Encoder.zig");
 
 test {
     _ = Decoder;
     _ = ZstdBuffer;
+    _ = Encoder;
 }

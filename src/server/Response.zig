@@ -10,17 +10,24 @@
 //! short closes the connection. A `HEAD` is answered with the head a `GET`
 //! would have, its body not sent.
 //!
+//! With compression on, a body of a type worth compressing, long enough,
+//! to a client that accepts a coding the server offers, goes out under that
+//! coding, through warp: whole with its compressed length when it fits the
+//! buffer (and only if compressing made it smaller), chunked as it is
+//! written otherwise, with `Vary: Accept-Encoding` either way.
+//!
 //! A response must not move once `writer` has been called.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const Status = std.http.Status;
 const wire = @import("uplink.wire");
 const h1 = wire.h1;
 const fields = wire.fields;
-const Header = std.http.Header;
 const BufferPool = @import("../transport/BufferPool.zig");
-const Connection = @import("Connection.zig");
+const Encoder = @import("../coding/Encoder.zig");
+const Socket = @import("Socket.zig");
 
 const Response = @This();
 
@@ -28,11 +35,13 @@ const Response = @This();
 status: Status = .ok,
 
 /// Private: the connection the response goes out on.
-conn: *Connection,
+socket: *Socket,
 /// Private: the request is a `HEAD`: the body is counted, not sent.
 head_only: bool,
 /// Private: the client speaks HTTP/1.0, which knows no chunks.
 http1_0: bool,
+/// Private: the request's `Accept-Encoding`.
+accept_encoding: ?[]const u8,
 /// Private: the fields as they will be written, each line whole.
 fields_buffer: []u8 = &.{},
 fields_len: usize = 0,
@@ -40,7 +49,7 @@ fields_len: usize = 0,
 body_buffer: []u8 = &.{},
 /// Private: where the response stands.
 state: State = .open,
-/// Private: the length the handler declared.
+/// Private: the length the handler declared, of the body as written.
 declared: ?u64 = null,
 /// Private: the framing the head chose.
 framing: Framing = .none,
@@ -48,13 +57,21 @@ framing: Framing = .none,
 remaining: u64 = 0,
 /// Private: the connection closes after this response.
 closing: bool = false,
-/// Private: the handler named a `Date` field of its own.
+/// Private: what the handler set that the server reads.
 has_date: bool = false,
+has_content_encoding: bool = false,
+/// Private: the `Content-Type` is one compression covers.
+compressible: bool = false,
 /// Private: a write failed; the connection is closed after.
 broken: bool = false,
 /// Private: the trailer's fields, for a chunked body.
 trailer_buffer: []u8 = &.{},
 trailer_len: usize = 0,
+/// Private: the encoder of a body sent under a coding, and the writer
+/// that frames what it writes.
+encoder: ?*Encoder = null,
+framed: Io.Writer = .{ .vtable = &.{ .drain = drainFramed }, .buffer = &.{} },
+framed_buffer: []u8 = &.{},
 /// Private: the body writer.
 interface: Io.Writer,
 
@@ -91,12 +108,13 @@ pub const Error = error{
     OutOfMemory,
 };
 
-/// A response to a request on `conn`.
-pub fn init(conn: *Connection, head_only: bool, http1_0: bool) Response {
+/// A response to a request on `socket`.
+pub fn init(socket: *Socket, head_only: bool, http1_0: bool, accept_encoding: ?[]const u8) Response {
     return .{
-        .conn = conn,
+        .socket = socket,
         .head_only = head_only,
         .http1_0 = http1_0,
+        .accept_encoding = accept_encoding,
         .interface = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
     };
 }
@@ -110,19 +128,25 @@ pub fn header(r: *Response, name: []const u8, value: []const u8) Error!void {
     h1.checkHeader(.{ .name = name, .value = value }) catch return error.InvalidHeader;
     if (std.ascii.eqlIgnoreCase(name, "content-length") or std.ascii.eqlIgnoreCase(name, "transfer-encoding")) return error.InvalidHeader;
     if (std.ascii.eqlIgnoreCase(name, "date")) r.has_date = true;
+    if (std.ascii.eqlIgnoreCase(name, "content-encoding")) r.has_content_encoding = true;
+    if (std.ascii.eqlIgnoreCase(name, "content-type")) r.compressible = if (r.socket.context.options.compression) |c| c.covers(value) else false;
     if (std.ascii.eqlIgnoreCase(name, "connection") and fields.ListIterator.contains(value, "close")) r.closing = true;
+    try r.appendField(&r.fields_buffer, &r.fields_len, name, value);
+}
+
+fn appendField(r: *Response, buffer: *[]u8, len: *usize, name: []const u8, value: []const u8) Error!void {
     const need = name.len + 2 + value.len + 2;
-    try r.reserve(&r.fields_buffer, r.fields_len, need);
-    var w: Io.Writer = .fixed(r.fields_buffer[r.fields_len..]);
+    try r.reserve(buffer, len.*, need);
+    var w: Io.Writer = .fixed(buffer.*[len.*..]);
     h1.writeField(&w, .{ .name = name, .value = value }) catch unreachable; // unreachable: room was reserved for the line
-    r.fields_len += need;
+    len.* += need;
 }
 
 /// Room for `need` more bytes after `len` in `buffer`, taken from the pool
 /// or moved to a larger buffer.
 fn reserve(r: *Response, buffer: *[]u8, len: usize, need: usize) Error!void {
-    const pool = &r.conn.server.buffers;
-    const io = r.conn.io;
+    const pool = &r.socket.context.buffers;
+    const io = r.socket.io;
     if (buffer.len - len >= need) return;
     const class = BufferPool.Class.fitting(len + need) orelse return error.HeadTooLarge;
     const larger = try pool.acquire(io, class);
@@ -132,7 +156,8 @@ fn reserve(r: *Response, buffer: *[]u8, len: usize, need: usize) Error!void {
 }
 
 /// Declare the body's length, sent as `Content-Length`: the body written
-/// must be exactly this long.
+/// must be exactly this long. A body sent compressed is chunked instead,
+/// and still held to the length declared.
 pub fn setLength(r: *Response, length: u64) Error!void {
     if (r.state != .open) return error.HeadSent;
     r.declared = length;
@@ -146,74 +171,106 @@ pub fn closeAfter(r: *Response) void {
 /// The body's writer. Its buffer is the server's, a few KiB: a body that
 /// fits goes out with its length counted.
 pub fn writer(r: *Response, io: Io) Error!*Io.Writer {
-    r.conn.io = io;
+    r.socket.io = io;
     if (r.state == .hijacked or r.state == .ended) return error.HeadSent;
     if (r.body_buffer.len == 0) {
-        r.body_buffer = try r.conn.server.buffers.acquire(io, .small);
+        r.body_buffer = try r.socket.context.buffers.acquire(io, .small);
         r.interface.buffer = r.body_buffer;
     }
     return &r.interface;
 }
 
-/// Send `body` whole with its length, and end the response.
+/// Send `body` whole, and end the response.
 pub fn send(r: *Response, io: Io, body: []const u8) Error!void {
-    r.conn.io = io;
+    r.socket.io = io;
     if (r.state != .open) return error.HeadSent;
     if (r.declared) |n| if (n != body.len) return error.BodyNotAllowed;
-    r.declared = body.len;
-    try r.sendHead(.length);
-    if (!r.head_only and r.framing == .length) r.out().writeAll(body) catch return r.fail();
-    r.remaining = 0;
-    return r.end(io);
+    return r.sendWhole(body);
 }
 
 /// Add a field to the trailer of a chunked body, sent at `end`.
 pub fn trailer(r: *Response, name: []const u8, value: []const u8) Error!void {
     if (r.state == .ended or r.state == .hijacked) return error.HeadSent;
     h1.checkHeader(.{ .name = name, .value = value }) catch return error.InvalidHeader;
-    const need = name.len + 2 + value.len + 2;
-    try r.reserve(&r.trailer_buffer, r.trailer_len, need);
-    var w: Io.Writer = .fixed(r.trailer_buffer[r.trailer_len..]);
-    h1.writeField(&w, .{ .name = name, .value = value }) catch unreachable; // unreachable: room was reserved for the line
-    r.trailer_len += need;
+    try r.appendField(&r.trailer_buffer, &r.trailer_len, name, value);
 }
 
 /// Finish the response: the head if it has not gone, what the body's
 /// buffer holds, a chunked body's last chunk and trailer, and everything
 /// pushed to the client.
 pub fn end(r: *Response, io: Io) Error!void {
-    r.conn.io = io;
+    r.socket.io = io;
     switch (r.state) {
         .ended, .hijacked => return,
         .open => {
             const buffered = r.interface.buffered();
-            if (r.declared == null) r.declared = buffered.len;
-            try r.sendHead(.length);
-            try r.bodyBytes(&.{buffered}, 1);
             r.interface.end = 0;
+            if (r.declared) |n| if (n != buffered.len) {
+                // Declared and short: the head promised more than came.
+                try r.sendHead(.length, null);
+                try r.bodyBytes(&.{buffered}, 1);
+                return r.finishShort();
+            };
+            return r.sendWhole(buffered);
         },
         .streaming => {
             r.interface.flush() catch return r.fail();
         },
     }
-    switch (r.framing) {
-        .chunked => {
-            const w = r.out();
-            w.writeAll("0\r\n") catch return r.fail();
-            w.writeAll(r.trailer_buffer[0..r.trailer_len]) catch return r.fail();
-            w.writeAll("\r\n") catch return r.fail();
-        },
-        .length => if (r.remaining != 0) {
-            // The client counts on a body this long: the connection ends
-            // short instead, so it sees a truncation.
-            r.broken = true;
-            r.state = .ended;
-            return error.BodyIncomplete;
-        },
-        .none, .close => {},
+    if (r.encoder) |e| {
+        e.finish() catch return r.fail();
+        r.framed.flush() catch return r.fail();
+    }
+    if (r.declared != null and r.remaining != 0) return r.finishShort();
+    if (r.framing == .chunked) {
+        const w = r.out();
+        w.writeAll("0\r\n") catch return r.fail();
+        w.writeAll(r.trailer_buffer[0..r.trailer_len]) catch return r.fail();
+        w.writeAll("\r\n") catch return r.fail();
     }
     r.state = .ended;
-    r.conn.flush() catch return r.fail();
+    r.socket.flush() catch return r.fail();
+}
+
+/// The client counts on a longer body: the connection ends short instead,
+/// so it sees a truncation, never a short success.
+fn finishShort(r: *Response) Error {
+    r.broken = true;
+    r.state = .ended;
+    // glint-ignore: Z026 -- the connection closes next; what went out goes out cut
+    r.socket.flush() catch {};
+    return error.BodyIncomplete;
+}
+
+/// A body known whole: its own length, or compressed and the length of
+/// that, when compressing makes it smaller.
+fn sendWhole(r: *Response, body: []const u8) Error!void {
+    if (r.coding(body.len)) |c| compressed: {
+        const pool = &r.socket.context.buffers;
+        const io = r.socket.io;
+        const out_buffer = pool.acquire(io, .large) catch break :compressed;
+        defer pool.release(io, out_buffer);
+        var sink: Io.Writer = .fixed(out_buffer);
+        const encoders = &r.socket.context.encoders.?;
+        const e = encoders.acquire(io, c, &sink) catch break :compressed;
+        defer encoders.release(io, e);
+        e.writer().writeAll(body) catch break :compressed;
+        e.finish() catch break :compressed;
+        const coded = sink.buffered();
+        if (coded.len >= body.len) break :compressed;
+        r.declared = coded.len;
+        try r.sendHead(.length, c);
+        if (!r.head_only) r.out().writeAll(coded) catch return r.fail();
+        r.remaining = 0;
+        r.state = .ended;
+        r.socket.flush() catch return r.fail();
+        return;
+    }
+    r.declared = body.len;
+    try r.sendHead(.length, null);
+    try r.bodyBytes(&.{body}, 1);
+    r.state = .ended;
+    r.socket.flush() catch return r.fail();
 }
 
 /// A connection taken over by the handler, after a `101` or a `2xx` to a
@@ -223,24 +280,24 @@ pub fn end(r: *Response, io: Io) Error!void {
 pub const Hijacked = struct {
     reader: *Io.Reader,
     writer: *Io.Writer,
-    conn: *Connection,
+    socket: *Socket,
 
     /// Push what was written to the peer.
     pub fn flush(h: Hijacked) Io.Writer.Error!void {
-        return h.conn.flush();
+        return h.socket.flush();
     }
 };
 
 /// Send the head as it stands, with no body framing, and hand the
 /// connection to the caller.
 pub fn hijack(r: *Response, io: Io) Error!Hijacked {
-    r.conn.io = io;
+    r.socket.io = io;
     if (r.state != .open) return error.HeadSent;
-    try r.sendHead(.none);
-    r.conn.flush() catch return r.fail();
+    try r.sendHead(.none, null);
+    r.socket.flush() catch return r.fail();
     r.state = .hijacked;
-    r.conn.hijacked = true;
-    return .{ .reader = r.conn.reader(), .writer = r.conn.writer(), .conn = r.conn };
+    r.socket.hijacked = true;
+    return .{ .reader = r.socket.reader(), .writer = r.socket.writer(), .socket = r.socket };
 }
 
 /// Whether the head has gone out.
@@ -253,13 +310,16 @@ pub fn keepsConnection(r: *const Response) bool {
     return r.state == .ended and !r.closing and !r.broken and r.framing != .close;
 }
 
-/// Give back the response's buffers.
+/// Give back the response's buffers and its encoder.
 pub fn release(r: *Response, io: Io) void {
-    const pool = &r.conn.server.buffers;
-    for ([_][]u8{ r.fields_buffer, r.body_buffer, r.trailer_buffer }) |b| if (b.len != 0) pool.release(io, b);
+    const pool = &r.socket.context.buffers;
+    for ([_][]u8{ r.fields_buffer, r.body_buffer, r.trailer_buffer, r.framed_buffer }) |b| if (b.len != 0) pool.release(io, b);
     r.fields_buffer = &.{};
     r.body_buffer = &.{};
     r.trailer_buffer = &.{};
+    r.framed_buffer = &.{};
+    if (r.encoder) |e| r.socket.context.encoders.?.release(io, e);
+    r.encoder = null;
 }
 
 /// Forget everything set, for an answer the server writes in its place
@@ -268,12 +328,12 @@ pub fn reset(r: *Response, io: Io) void {
     std.debug.assert(r.state == .open);
     r.release(io);
     const kept = r.*;
-    r.* = .init(kept.conn, kept.head_only, kept.http1_0);
+    r.* = .init(kept.socket, kept.head_only, kept.http1_0, kept.accept_encoding);
     r.closing = kept.closing;
 }
 
 fn out(r: *Response) *Io.Writer {
-    return r.conn.writer();
+    return r.socket.writer();
 }
 
 fn fail(r: *Response) Error {
@@ -287,62 +347,96 @@ fn bodiless(status: Status) bool {
     return code / 100 == 1 or code == 204 or code == 304;
 }
 
-/// Write the head. `want` is the framing the caller has: `length` when
-/// the length is known (`declared`), `chunked` while streaming, `none` for
-/// a head alone.
-fn sendHead(r: *Response, want: Framing) Error!void {
+/// The coding to send the body under, for a body `length` long when that
+/// is known: none unless compression is on, the body is one it covers and
+/// long enough, nothing else coded it, and the client accepts one offered.
+fn coding(r: *const Response, length: ?u64) ?Encoder.Coding {
+    const c = r.socket.context.options.compression orelse return null;
+    if (r.head_only or bodiless(r.status) or r.status == .partial_content) return null;
+    if (r.has_content_encoding or !r.compressible) return null;
+    if (length) |n| if (aegis.units.Bytes(u64).fromRaw(n).compare(c.min_size.convert(u64)) == .lt) return null;
+    var offered: [3]wire.coding.ContentCoding = undefined;
+    for (c.codings, 0..) |each, i| offered[i] = each.content();
+    const chosen = wire.coding.negotiate(r.accept_encoding, offered[0..c.codings.len]) orelse return null;
+    for (c.codings) |each| if (each.content() == chosen) return each;
+    return null;
+}
+
+/// Write the head. `want` is the framing the caller has: `length` when the
+/// length is known (`declared`), `chunked` while streaming, `none` for a
+/// head alone. `coded` is the coding a whole body was put under.
+fn sendHead(r: *Response, want: Framing, coded: ?Encoder.Coding) Error!void {
     std.debug.assert(r.state == .open);
     const code = @backingInt(r.status);
+    // A body streamed under a coding is chunked, whatever its length.
+    const streamed = if (want == .chunked) r.coding(r.declared) else null;
     r.framing = if (bodiless(r.status) or want == .none)
         .none
     else switch (want) {
         .length => .length,
-        else => if (r.declared != null) .length else if (r.http1_0) .close else .chunked,
+        else => if (r.declared != null and streamed == null) .length else if (r.http1_0) .close else .chunked,
     };
     if (r.framing == .close) r.closing = true;
-    if (r.conn.server.isStopping()) r.closing = true;
+    if (r.socket.context.isStopping()) r.closing = true;
+    if (streamed) |c| try r.startEncoder(c);
     const w = r.out();
     h1.writeStatusLine(w, r.status) catch return r.fail();
     if (!r.has_date) {
         var date_buf: [wire.date.formatted_len]u8 = undefined;
-        const now = Io.Clock.real.now(r.conn.io).toSeconds();
+        const now = Io.Clock.real.now(r.socket.io).toSeconds();
         w.print("Date: {s}\r\n", .{wire.date.format(now, &date_buf)}) catch return r.fail();
     }
     switch (r.framing) {
-        .length => {
-            const n = r.declared.?;
-            // A 304 or a HEAD keeps the length a GET would have.
-            w.print("Content-Length: {d}\r\n", .{n}) catch return r.fail();
-            r.remaining = n;
-        },
+        .length => w.print("Content-Length: {d}\r\n", .{r.declared.?}) catch return r.fail(),
         .chunked => w.writeAll("Transfer-Encoding: chunked\r\n") catch return r.fail(),
-        .none => if (code == 204 or code / 100 == 1) {} else if (want != .none) w.writeAll("Content-Length: 0\r\n") catch return r.fail(),
+        // A 304 may name the length a 200 would have; nothing else here
+        // has one.
+        .none => if (code == 304 and want != .none) if (r.declared) |n| w.print("Content-Length: {d}\r\n", .{n}) catch return r.fail(),
         .close => {},
     }
+    if (r.declared) |n| r.remaining = n;
+    if (coded orelse streamed) |c| w.print("Content-Encoding: {s}\r\n", .{c.name()}) catch return r.fail();
+    if (r.compressible and !r.has_content_encoding) w.writeAll("Vary: Accept-Encoding\r\n") catch return r.fail();
     if (r.closing and code != 101) w.writeAll("Connection: close\r\n") catch return r.fail();
     w.writeAll(r.fields_buffer[0..r.fields_len]) catch return r.fail();
     w.writeAll("\r\n") catch return r.fail();
     r.state = .streaming;
 }
 
-/// Write body bytes as the framing says; a `HEAD`'s are counted, not sent.
+fn startEncoder(r: *Response, c: Encoder.Coding) Error!void {
+    const io = r.socket.io;
+    r.framed_buffer = try r.socket.context.buffers.acquire(io, .small);
+    r.framed.buffer = r.framed_buffer;
+    r.encoder = try r.socket.context.encoders.?.acquire(io, c, &r.framed);
+}
+
+/// Write body bytes as written by the handler: held to a declared length,
+/// counted and not sent for a `HEAD`, encoded when the body has a coding.
 fn bodyBytes(r: *Response, data: []const []const u8, splat: usize) Error!void {
     var total: u64 = 0;
     for (data[0 .. data.len - 1]) |d| total += d.len;
     total += @as(u64, data[data.len - 1].len) * splat;
     if (total == 0) return;
-    switch (r.framing) {
-        .none => return error.BodyNotAllowed,
-        .length => {
-            if (total > r.remaining) {
-                r.broken = true;
-                return error.BodyNotAllowed;
-            }
-            r.remaining -= total;
-        },
-        .chunked, .close => {},
+    if (r.framing == .none) return error.BodyNotAllowed;
+    if (r.declared != null) {
+        if (total > r.remaining) {
+            r.broken = true;
+            return error.BodyNotAllowed;
+        }
+        r.remaining -= total;
     }
     if (r.head_only) return;
+    if (r.encoder) |e| {
+        const w = e.writer();
+        for (data[0 .. data.len - 1]) |d| w.writeAll(d) catch return r.fail();
+        w.splatBytesAll(data[data.len - 1], splat) catch return r.fail();
+        return;
+    }
+    return r.frame(data, splat, total);
+}
+
+/// Bytes onto the connection as the framing says.
+fn frame(r: *Response, data: []const []const u8, splat: usize, total: u64) Error!void {
     const w = r.out();
     if (r.framing == .chunked) w.print("{x}\r\n", .{total}) catch return r.fail();
     for (data[0 .. data.len - 1]) |d| w.writeAll(d) catch return r.fail();
@@ -353,7 +447,7 @@ fn bodyBytes(r: *Response, data: []const []const u8, splat: usize) Error!void {
 fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
     const r: *Response = @alignCast(@fieldParentPtr("interface", w)); // safe: this vtable is installed only on a Response's interface
     switch (r.state) {
-        .open => r.sendHead(.chunked) catch return error.WriteFailed,
+        .open => r.sendHead(.chunked, null) catch return error.WriteFailed,
         .streaming => {},
         .ended, .hijacked => return error.WriteFailed,
     }
@@ -364,4 +458,16 @@ fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!
     n += data[data.len - 1].len * splat;
     r.bodyBytes(data, splat) catch return error.WriteFailed;
     return w.consume(n);
+}
+
+/// What the encoder writes, framed onto the connection.
+fn drainFramed(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
+    const r: *Response = @alignCast(@fieldParentPtr("framed", w)); // safe: this vtable is installed only on a Response's `framed`
+    const buffered = w.buffered();
+    var n: usize = 0;
+    for (data[0 .. data.len - 1]) |d| n += d.len;
+    n += data[data.len - 1].len * splat;
+    if (buffered.len != 0) r.frame(&.{buffered}, 1, buffered.len) catch return error.WriteFailed;
+    if (n != 0) r.frame(data, splat, n) catch return error.WriteFailed;
+    return w.consume(buffered.len + n);
 }

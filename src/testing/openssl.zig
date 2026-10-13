@@ -22,7 +22,8 @@ fn required() bool {
 }
 
 /// A directory of certificates: an authority for clients and a stranger
-/// one, a server certificate for 127.0.0.1, and each kind of client key
+/// one, a server certificate for 127.0.0.1 with an RSA key and one with
+/// ECDSA, and each kind of client key
 /// with its certificate from each authority, plain and encrypted.
 pub const Pki = struct {
     gpa: Allocator,
@@ -45,6 +46,8 @@ pub const Pki = struct {
         try p.openssl(io, &.{ "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", "ca.key", "-out", "ca.pem", "-days", "2", "-subj", "/CN=uplink-test-ca" });
         try p.openssl(io, &.{ "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", "stranger.key", "-out", "stranger.pem", "-days", "2", "-subj", "/CN=uplink-test-stranger" });
         try p.openssl(io, &.{ "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "server.key", "-out", "server.pem", "-days", "2", "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1,DNS:127.0.0.1,DNS:localhost" });
+        // uplink's own server signs with what cloak signs with: ECDSA.
+        try p.openssl(io, &.{ "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", "server-ec.key", "-out", "server-ec.pem", "-days", "2", "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1,DNS:localhost" });
         for (kinds) |kind| try p.clientKey(io, kind);
         return p;
     }

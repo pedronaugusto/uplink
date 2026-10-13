@@ -103,7 +103,7 @@ test "a client's requests are answered over one kept connection" {
         try testing.expectEqualStrings("hello", body);
     }
     try testing.expectEqual(@as(u64, 1), client.stats().connections_opened);
-    try testing.expectEqual(@as(u64, 10), running.server.counters.requests.load(.monotonic));
+    try testing.expectEqual(@as(u64, 10), running.server.stats().requests);
 }
 
 test "a body longer than the buffer is chunked, and one that fits goes with its length" {
@@ -264,7 +264,7 @@ test "shutdown ends idle connections at once and lets an answer under way finish
     // The client keeps its connection; the server ends it at shutdown.
     running.halt();
     defer running.free();
-    try testing.expectEqual(@as(u32, 0), running.server.counters.open.load(.monotonic));
+    try testing.expectEqual(@as(u32, 0), running.server.stats().open);
 }
 
 fn item(io: Io, request: *Request, response: *Response) anyerror!void {
@@ -305,4 +305,211 @@ test "a router serves its patterns, redirects, and answers 405 and 404" {
             return err;
         };
     }
+}
+
+fn page(io: Io, request: *Request, response: *Response) anyerror!void {
+    try response.header("Content-Type", if (std.mem.eql(u8, request.path, "/png")) "image/png" else "text/html; charset=utf-8");
+    const lines: usize = if (std.mem.eql(u8, request.path, "/small")) 1 else if (std.mem.eql(u8, request.path, "/big")) 5000 else 60;
+    const w = try response.writer(io);
+    for (0..lines) |i| try w.print("<p>paragraph {d} of a page that compresses well</p>\n", .{i % 7});
+    try response.end(io);
+}
+
+test "responses go compressed when the client accepts a coding, and as they are when not" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const running = try Running.start(gpa, .{ .compression = .{} }, .of(page));
+    defer running.stop();
+    var client: Client = .init(gpa, .{});
+    defer client.deinit(io);
+    var buf: [64]u8 = undefined;
+    const Case = struct { path: []const u8, coding: ?[]const u8, chunked: bool };
+    for ([_]Case{
+        .{ .path = "/", .coding = "zstd", .chunked = false },
+        .{ .path = "/big", .coding = "zstd", .chunked = true },
+        .{ .path = "/small", .coding = null, .chunked = false },
+        .{ .path = "/png", .coding = null, .chunked = false },
+    }) |case| {
+        var response = try client.send(io, .{ .url = running.url(&buf, case.path) });
+        defer response.deinit(io);
+        try testing.expectEqual(case.chunked, response.headers.get("transfer-encoding") != null);
+        if (case.coding) |want| {
+            try testing.expectEqualStrings(want, response.headers.get("content-encoding").?);
+            try testing.expectEqualStrings("Accept-Encoding", response.headers.get("vary").?);
+        } else try testing.expectEqual(null, response.headers.get("content-encoding"));
+        const body = try response.collect(gpa, io, .limited(1 << 20));
+        defer gpa.free(body);
+        try testing.expect(std.mem.startsWith(u8, body, "<p>paragraph 0 of a page"));
+    }
+    // A client that asks for gzip only gets it.
+    const got = try running.raw(gpa, "GET / HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip;q=0.5, zstd;q=0\r\nConnection: close\r\n\r\n");
+    defer gpa.free(got);
+    try testing.expect(std.mem.find(u8, got, "Content-Encoding: gzip\r\n") != null);
+    const plain = try running.raw(gpa, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    defer gpa.free(plain);
+    try testing.expect(std.mem.find(u8, plain, "Content-Encoding") == null);
+}
+
+const cloak = @import("cloak");
+const openssl = @import("../testing/openssl.zig");
+
+fn whoami(io: Io, request: *Request, response: *Response) anyerror!void {
+    try response.send(io, if (request.secure) "secure" else "plain");
+}
+
+test "TLS is terminated with cloak, a client certificate asked for and checked" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const pki = try openssl.Pki.make(gpa, io);
+    defer pki.destroy();
+    const cert = try pki.read(io, "server-ec.pem");
+    defer gpa.free(cert);
+    const key_pem = try pki.read(io, "server-ec.key");
+    defer gpa.free(key_pem);
+    const key = try cloak.PrivateKey.parse(gpa, key_pem, .{});
+    defer key.deinit();
+    var identity = try cloak.Identity.initPem(gpa, cert, key, .{});
+    defer identity.deinit();
+    const ca = try pki.read(io, "ca.pem");
+    defer gpa.free(ca);
+    var authorities: cloak.Trust = .init(gpa);
+    defer authorities.deinit();
+    try authorities.addPem(ca, .{});
+    var clients = try authorities.freeze();
+    defer clients.deinit();
+    var servers_builder: cloak.Trust = .init(gpa);
+    defer servers_builder.deinit();
+    try servers_builder.addPem(cert, .{});
+    var servers = try servers_builder.freeze();
+    defer servers.deinit();
+    const credentials = [_]cloak.tls.Credential{.{ .identity = identity }};
+    const running = try Running.start(gpa, .{ .tls = .{ .credentials = &credentials, .client_certificate = .required, .client_trust = clients } }, .of(whoami));
+    defer running.stop();
+
+    const client_cert = try pki.read(io, "p256.pem");
+    defer gpa.free(client_cert);
+    const client_key_pem = try pki.read(io, "p256.key");
+    defer gpa.free(client_key_pem);
+    const client_key = try cloak.PrivateKey.parse(gpa, client_key_pem, .{});
+    defer client_key.deinit();
+    var auth = try cloak.ClientAuth.initPem(gpa, client_cert, client_key, .{});
+    defer auth.deinit();
+    var url_buf: [64]u8 = undefined;
+    const url = try std.mem.print(&url_buf, "https://127.0.0.1:{d}/", .{running.port});
+    {
+        var client: Client = .init(gpa, .{ .tls = .{ .trust = servers, .client_auth = auth } });
+        defer client.deinit(io);
+        for (0..2) |_| {
+            var response = try client.send(io, .{ .url = url });
+            defer response.deinit(io);
+            const body = try response.collect(gpa, io, .limited(1 << 20));
+            defer gpa.free(body);
+            try testing.expectEqualStrings("secure", body);
+        }
+        try testing.expectEqual(@as(u64, 1), client.stats().connections_opened);
+    }
+    {
+        // No certificate: refused.
+        var client: Client = .init(gpa, .{ .tls = .{ .trust = servers }, .retries = .none });
+        defer client.deinit(io);
+        try testing.expectError(error.ClientCertificateRejected, client.send(io, .{ .url = url }));
+    }
+}
+
+/// Connect to `running` over a fresh socket.
+fn dialRaw(running: *const Running) !Io.net.Stream {
+    const address = try Io.net.IpAddress.parse("127.0.0.1", running.port);
+    return address.connect(test_io.io(), .{ .mode = .stream });
+}
+
+/// Read from `stream` until it ends, and how long that took.
+fn readToEnd(stream: Io.net.Stream, gpa: std.mem.Allocator) !struct { []u8, Io.Duration } {
+    const io = test_io.io();
+    const started = Io.Clock.awake.now(io);
+    var rbuf: [4096]u8 = undefined;
+    var rd = stream.reader(io, &rbuf);
+    const got = rd.interface.allocRemaining(gpa, .limited(1 << 20)) catch |err| switch (err) {
+        error.ReadFailed => try gpa.dupe(u8, ""),
+        else => |e| return e,
+    };
+    return .{ got, started.durationTo(Io.Clock.awake.now(io)) };
+}
+
+test "a head sent a byte at a time is cut off at the head timeout, whatever its pace" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const running = try Running.start(gpa, .{ .timeouts = .{ .head = .literal("200ms") } }, .of(hello));
+    defer running.stop();
+    const stream = try dialRaw(running);
+    defer stream.close(io);
+    const Trickle = struct {
+        fn run(s: Io.net.Stream) Io.Cancelable!void {
+            const tio = test_io.io();
+            var wbuf: [64]u8 = undefined;
+            var w = s.writer(tio, &wbuf);
+            w.interface.writeAll("GET / HTTP/1.1\r\n") catch return;
+            while (true) {
+                w.interface.writeAll("X: a\r\n") catch return;
+                w.interface.flush() catch return;
+                try tio.sleep(.fromMilliseconds(20), .awake);
+            }
+        }
+    };
+    var trickle = io.concurrent(Trickle.run, .{stream}) catch return error.SkipZigTest;
+    // glint-ignore: Z026 -- the trickle ends canceled; its result is not what the test checks
+    defer trickle.cancel(io) catch {};
+    const got, const took = try readToEnd(stream, gpa);
+    defer gpa.free(got);
+    try testing.expectEqualStrings("", got);
+    try testing.expect(took.nanoseconds < 3 * std.time.ns_per_s);
+}
+
+test "a kept connection idle past the idle timeout is closed" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const running = try Running.start(gpa, .{ .timeouts = .{ .idle = .literal("150ms") } }, .of(hello));
+    defer running.stop();
+    const stream = try dialRaw(running);
+    defer stream.close(io);
+    var wbuf: [256]u8 = undefined;
+    var w = stream.writer(io, &wbuf);
+    try w.interface.writeAll("GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    try w.interface.flush();
+    const got, const took = try readToEnd(stream, gpa);
+    defer gpa.free(got);
+    try testing.expect(std.mem.endsWith(u8, got, "hello"));
+    try testing.expect(took.nanoseconds >= 100 * std.time.ns_per_ms);
+    try testing.expect(took.nanoseconds < 3 * std.time.ns_per_s);
+}
+
+fn slow(io: Io, _: *Request, response: *Response) anyerror!void {
+    try io.sleep(.fromMilliseconds(200), .awake);
+    try response.send(io, "late but whole");
+}
+
+test "shutdown lets an answer under way finish, telling its client the connection closes" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const running = try Running.start(gpa, .{}, .of(slow));
+    const stream = try dialRaw(running);
+    defer stream.close(io);
+    var wbuf: [256]u8 = undefined;
+    var w = stream.writer(io, &wbuf);
+    try w.interface.writeAll("GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    try w.interface.flush();
+    // Once the handler runs, shut down.
+    while (running.server.stats().requests == 0) try io.sleep(.fromMilliseconds(1), .awake);
+    const Stop = struct {
+        fn run(r: *Running) Io.Cancelable!void {
+            r.halt();
+        }
+    };
+    var stopping = io.concurrent(Stop.run, .{running}) catch return error.SkipZigTest;
+    const got, _ = try readToEnd(stream, gpa);
+    defer gpa.free(got);
+    // glint-ignore: Z026 -- the shutdown's task returns nothing the test checks
+    stopping.await(io) catch {};
+    running.free();
+    try testing.expect(std.mem.find(u8, got, "Connection: close\r\n") != null);
+    try testing.expect(std.mem.endsWith(u8, got, "late but whole"));
 }

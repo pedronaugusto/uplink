@@ -3,6 +3,8 @@
 
 /// An HTTP/1.1 server.
 pub const Server = @import("server/Server.zig");
+/// What a server does for each request.
+pub const Handler = @import("server/Handler.zig");
 /// A request as the server received it.
 pub const Request = @import("server/Request.zig");
 /// The answer to a request.
@@ -18,6 +20,9 @@ test {
     _ = Response;
     _ = Router;
     _ = Pattern;
+    _ = Handler;
     _ = @import("server/Connection.zig");
+    _ = @import("server/Context.zig");
+    _ = @import("server/Socket.zig");
     _ = @import("server/server_test.zig");
 }

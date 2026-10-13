@@ -57,6 +57,7 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "coding", .patterns = &.{
         "src/coding/ZstdBuffer.zig",
         "src/coding/Decoder.zig",
+        "src/coding/Encoder.zig",
         "src/coding.zig",
     } },
     .{ .name = "transport shared", .patterns = &.{
@@ -100,11 +101,24 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "server patterns", .patterns = &.{
         "src/server/Pattern.zig",
     } },
-    .{ .name = "server", .patterns = &.{
-        "src/server/Server.zig",
-        "src/server/Connection.zig",
+    .{ .name = "server context", .patterns = &.{
+        "src/server/Context.zig",
+    } },
+    .{ .name = "server socket", .patterns = &.{
+        "src/server/Socket.zig",
+    } },
+    .{ .name = "server exchange", .patterns = &.{
         "src/server/Request.zig",
         "src/server/Response.zig",
+    } },
+    .{ .name = "server handler", .patterns = &.{
+        "src/server/Handler.zig",
+    } },
+    .{ .name = "server connection", .patterns = &.{
+        "src/server/Connection.zig",
+    } },
+    .{ .name = "server", .patterns = &.{
+        "src/server/Server.zig",
     } },
     .{ .name = "server routing", .patterns = &.{
         "src/server/Router.zig",
