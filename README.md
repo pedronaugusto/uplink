@@ -417,7 +417,24 @@ proved against `openssl s_server` with certificates made for each run in a
 scratch `HOME`: TLS 1.3 (and a TLS 1.2 server turned away), authorities given and
 refused, client certificates of the key kinds cloak signs with and an RSA one
 refused, a certificate checked at a stepped clock, and TLS inside a `CONNECT`
-tunnel and SOCKS.
+tunnel and SOCKS. HTTP/2 is driven from both ends: the client against the
+server by prior knowledge, bodies past every window both ways, trailers,
+`Expect: 100-continue`, sixteen requests at once over one connection, and a
+WebSocket opened by an extended `CONNECT`; curl against the server when it
+is installed. HPACK blocks, frame sequences, WebSocket heads and resolve
+entries are fuzzed.
+
+The protocols' own suites run by hand before a release, each driven by a
+Zig program in `conformance/` that starts the peer and reads its report:
+`bay h2spec`, `bay autobahn` and `bay h1`. As of 2026-10-14:
+
+| Suite | Against | Result |
+|---|---|---|
+| h2spec 2.6.0, `--strict` | the HTTP/2 server | 146 of 147 passed, 1 skipped, none failed |
+| Autobahn\|Testsuite 0.10.9 | the WebSocket server | 517 cases: 514 OK, 3 informational, none failed |
+| Autobahn\|Testsuite 0.10.9 | the WebSocket client | 517 cases: 514 OK, 3 informational, none failed |
+| h1spec, `--strict` | the HTTP/1.1 server | 33 of 33 passed |
+| Http11Probe | the HTTP/1.1 server | 159 of 159 scored passed, 16 warnings where RFC 9112 allows either answer |
 
 `bay bench` measures head parsing, chunked decoding, Server-Sent Events
 and `Set-Cookie` reading, keep-alive requests with their latency percentiles
