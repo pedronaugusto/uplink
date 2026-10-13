@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- TLS 1.2 through cloak for servers that speak nothing newer: ECDHE with AEAD suites and the extended master secret. TLS 1.2 with RSA key exchange, CBC or without the extended master secret is refused.
+- A client answers a server's request for a certificate with an RSA key too, signed by cloak (RSA-PSS in TLS 1.3, PSS or PKCS#1 v1.5 in TLS 1.2).
+
 ## [0.3.0] - 2026-10-13
 
 ### Breaking
