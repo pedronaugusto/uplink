@@ -32,8 +32,8 @@
             .lazy = true,
         },
         .warp = .{
-            .url = "git+https://github.com/pedronaugusto/warp?ref=v0.2.3#b2125f631275b0ed4634242c6739e2c117c5fb4e",
-            .hash = "warp-0.2.3-JASxFbRHEQBrLylxnCrA5sfeSl4YNAYVr0W-3jHwMrwM",
+            .url = "git+https://github.com/pedronaugusto/warp?ref=v0.3.0#256d2e4e52522a412e9d6632bf922002977bec17",
+            .hash = "warp-0.3.0-JASxFZVEEQCbvPOOzTXyC2fufw4xL4Drs4oCzfCu_717",
             .lazy = true,
         },
     },
