@@ -27,10 +27,11 @@
         },
 
         .cloak = .{
-            .url = "git+https://github.com/pedronaugusto/cloak?ref=v0.3.0#586056267b809809332539aa391facbb53ef2b8b",
-            .hash = "cloak-0.3.0-9onwccD68QJnVgOrTh0c3fvMKYzj3Oi84eXxyGrGyeEE",
+            .url = "git+https://github.com/pedronaugusto/cloak?ref=v0.4.0#6e2ffc0b4502eba11872b83473d7d2a15485b284",
+            .hash = "cloak-0.4.0-9onwceYJEgM-HB0Dan0UMwcDTVmOcvB7mo6XrfEu2_X_",
             .lazy = true,
         },
+
         .warp = .{
             .url = "git+https://github.com/pedronaugusto/warp?ref=v0.2.3#b2125f631275b0ed4634242c6739e2c117c5fb4e",
             .hash = "warp-0.2.3-JASxFbRHEQBrLylxnCrA5sfeSl4YNAYVr0W-3jHwMrwM",
