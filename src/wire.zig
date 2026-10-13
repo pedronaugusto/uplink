@@ -26,6 +26,8 @@ pub const sse = @import("wire/sse.zig");
 pub const form = @import("wire/form.zig");
 /// `multipart/form-data` bodies, written.
 pub const multipart = @import("wire/multipart.zig");
+/// `.netrc`: a user's logins per machine.
+pub const netrc = @import("wire/netrc.zig");
 /// Byte ranges: `Range` read, `Content-Range` written.
 pub const range = @import("wire/range.zig");
 /// HTTP/2's frames, settings and error codes.
@@ -53,6 +55,7 @@ test {
     _ = form;
     _ = multipart;
     _ = range;
+    _ = netrc;
     _ = ws;
     _ = hpack;
     _ = h2;

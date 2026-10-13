@@ -147,7 +147,8 @@ retries name them, after `Retry-After`. A 401 is answered from the caller's
 `Credentials`, asked once per origin, and the answer, Basic, Digest or
 Bearer, is sent with every later request to that origin and no other; the
 store is told whether it was taken, as git's credential helpers want. The answer is kept in aegis secret memory and wiped when it is
-forgotten. A
+forgotten. `Credentials.Netrc` is such a store over a `.netrc`'s text, which
+the caller reads: the host's machine, or the file's default. A
 `CookieJar` keeps cookies by RFC 6265bis and reads and writes the Netscape
 cookie file. A `Prepare` hook sees every attempt before it is written, so a
 signature is made again for each redirect and retry, and an `Observer` is

@@ -9,6 +9,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/wire/form.zig",
         "src/wire/sse.zig",
         "src/wire/range.zig",
+        "src/wire/netrc.zig",
         "src/wire/ws.zig",
         "src/wire/hpack/huffman_codes.zig",
         "src/wire/hpack.zig",
