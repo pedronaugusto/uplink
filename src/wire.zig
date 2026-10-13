@@ -28,6 +28,8 @@ pub const form = @import("wire/form.zig");
 pub const multipart = @import("wire/multipart.zig");
 /// Byte ranges: `Range` read, `Content-Range` written.
 pub const range = @import("wire/range.zig");
+/// The WebSocket protocol's frames, keys, close codes and extension.
+pub const ws = @import("wire/ws.zig");
 /// A request method: any token.
 pub const Method = @import("wire/Method.zig");
 /// The HTTP version a message was exchanged in.
@@ -47,4 +49,5 @@ test {
     _ = form;
     _ = multipart;
     _ = range;
+    _ = ws;
 }

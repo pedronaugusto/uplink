@@ -27,6 +27,7 @@ const h1 = wire.h1;
 const fields = wire.fields;
 const BufferPool = @import("../transport/BufferPool.zig");
 const Encoder = @import("../coding/Encoder.zig");
+const Timed = @import("../transport/Timed.zig");
 const Socket = @import("Socket.zig");
 
 const Response = @This();
@@ -278,7 +279,8 @@ fn sendWhole(r: *Response, body: []const u8) Error!void {
 /// A connection taken over by the handler, after a `101` or a `2xx` to a
 /// `CONNECT`: the head goes out as set, and the handler speaks the new
 /// protocol on the reader and writer until it returns, when the server
-/// closes the connection.
+/// closes the connection. No server timeout bounds it any more: the
+/// protocol keeps its own.
 pub const Hijacked = struct {
     reader: *Io.Reader,
     writer: *Io.Writer,
@@ -287,6 +289,12 @@ pub const Hijacked = struct {
     /// Push what was written to the peer.
     pub fn flush(h: Hijacked) Io.Writer.Error!void {
         return h.socket.flush();
+    }
+
+    /// Wait up to `timeout` for the peer to send something; the wait ends
+    /// nothing when nothing comes.
+    pub fn awaitReadable(h: Hijacked, io: Io, timeout: Io.Duration) Io.Cancelable!Timed.Readiness {
+        return h.socket.awaitReadable(io, timeout);
     }
 };
 
@@ -299,6 +307,7 @@ pub fn hijack(r: *Response, io: Io) Error!Hijacked {
     r.socket.flush() catch return r.fail();
     r.state = .hijacked;
     r.socket.hijacked = true;
+    r.socket.phase = .hijacked;
     return .{ .reader = r.socket.reader(), .writer = r.socket.writer(), .socket = r.socket };
 }
 

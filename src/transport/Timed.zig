@@ -90,3 +90,35 @@ pub fn perform(t: *Timed, io: Io, keeper: Keeper, op: Io.Operation, deadline: ?I
         .unwatched, .unenforced => unreachable, // unreachable: the mode was chosen above, and unenforced returned before it
     }
 }
+
+/// What a wait for something to read found.
+pub const Readiness = enum {
+    /// Bytes came, or the stream's end or an error, which the next read
+    /// finds and names.
+    ready,
+    /// Nothing came within the time.
+    timed_out,
+    /// This `Io` cannot wait a bounded time on a socket.
+    unbounded,
+};
+
+/// Wait up to `timeout` for `handle` to have something to read, reading
+/// it into `r`'s empty buffer, without a deadline that ends the socket
+/// when nothing comes: a wait that times out leaves the socket as it was.
+pub fn awaitReadable(io: Io, handle: Io.net.Socket.Handle, r: *Io.Reader, timeout: Io.Duration) Io.Cancelable!Readiness {
+    if (r.seek != r.end) return .ready;
+    r.seek = 0;
+    r.end = 0;
+    var data: [1][]u8 = .{r.buffer};
+    const result = io.operateTimeout(.{ .net_read = .{ .socket_handle = handle, .data = &data } }, .{
+        .duration = .{ .raw = timeout, .clock = .awake },
+    }) catch |err| return switch (err) {
+        error.Timeout => .timed_out,
+        error.ConcurrencyUnavailable => .unbounded,
+        error.Canceled => error.Canceled,
+    };
+    // An error or the end is for the reader to find and name.
+    const n = (result.net_read catch return .ready).data_len;
+    r.end = n;
+    return .ready;
+}

@@ -18,6 +18,8 @@ pub const Response = client.Response;
 pub const server = @import("server.zig");
 /// An HTTP/1.1 server.
 pub const Server = server.Server;
+/// WebSocket on the client and the server.
+pub const ws = @import("ws.zig");
 /// A request whose body the caller writes.
 pub const Outgoing = client.Outgoing;
 /// A connection a response handed over: after a 101, or a `CONNECT`.
@@ -67,6 +69,7 @@ test {
     _ = client;
     _ = transport;
     _ = server;
+    _ = ws;
     _ = tls;
     _ = net;
     _ = @import("coding.zig");

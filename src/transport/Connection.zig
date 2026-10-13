@@ -75,6 +75,8 @@ failure: Failure = .none,
 /// The exchange this connection serves, for its failure details; null
 /// between exchanges.
 diagnostics: ?*Diagnostics = null,
+/// Private: no timeout bounds its operations any more (`unbind`).
+unbound: bool = false,
 
 /// Why an operation failed.
 pub const Failure = enum { none, timed_out, canceled, broken };
@@ -347,23 +349,22 @@ pub fn alive(conn: *Connection, io: Io) Io.Cancelable!bool {
 /// False when the time ran out, or when the `Io` cannot wait for a bounded
 /// time, which `Expect: 100-continue` then reads as the time run out.
 pub fn readable(conn: *Connection, io: Io, timeout: Io.Duration) Io.Cancelable!bool {
+    return try conn.awaitReadable(io, timeout) == .ready;
+}
+
+/// Wait up to `timeout` for the peer to send something, keeping it for
+/// the reader, and say what the wait found; it ends nothing.
+pub fn awaitReadable(conn: *Connection, io: Io, timeout: Io.Duration) Io.Cancelable!Timed.Readiness {
     conn.io = io;
-    if (conn.reader().bufferedLen() != 0) return true;
-    const r = &conn.input.interface;
-    if (r.seek != r.end) return true;
-    r.seek = 0;
-    r.end = 0;
-    var data: [1][]u8 = .{r.buffer};
-    const result = io.operateTimeout(.{ .net_read = .{ .socket_handle = conn.stream.socket.handle, .data = &data } }, .{
-        .duration = .{ .raw = timeout, .clock = .awake },
-    }) catch |err| return switch (err) {
-        error.Timeout, error.ConcurrencyUnavailable => false,
-        error.Canceled => error.Canceled,
-    };
-    // An error or the end is for the reader to find and name.
-    const n = (result.net_read catch return true).data_len;
-    r.end = n;
-    return true;
+    if (conn.reader().bufferedLen() != 0) return .ready;
+    return Timed.awaitReadable(io, conn.stream.socket.handle, &conn.input.interface, timeout);
+}
+
+/// Bound no read or write by a timeout any more: what the connection
+/// carries now, after an upgrade, keeps its own.
+pub fn unbind(conn: *Connection) void {
+    conn.unbound = true;
+    conn.deadline = null;
 }
 
 /// Whether the connection may carry another exchange: no operation failed
@@ -492,6 +493,7 @@ const Limit = struct { at: Io.Timestamp, kind: Diagnostics.Timeout };
 /// The deadline of an operation starting now, or null when none applies,
 /// found without reading the clock.
 fn operationLimit(conn: *Connection, io: Io) ?Limit {
+    if (conn.unbound) return null;
     const t = conn.ctx.timeouts;
     if (conn.handshake_until == null and t.activity == null and conn.deadline == null and t.low_speed == null) return null;
     const now = Io.Clock.awake.now(io);

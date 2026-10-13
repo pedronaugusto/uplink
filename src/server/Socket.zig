@@ -42,7 +42,14 @@ failure: Failure = .none,
 /// The handler took the connection over.
 hijacked: bool = false,
 
-pub const Phase = enum { handshake, idle, head, answer };
+pub const Phase = enum {
+    handshake,
+    idle,
+    head,
+    answer,
+    /// The handler took the connection over: it keeps its own time.
+    hijacked,
+};
 
 /// Why an operation failed.
 pub const Failure = enum { none, timed_out, canceled, broken };
@@ -85,6 +92,14 @@ pub fn startIdle(c: *Socket, io: Io) void {
 pub fn startAnswer(c: *Socket) void {
     c.phase = .answer;
     c.until = null;
+}
+
+/// Wait up to `timeout` for the peer to send something; the wait ends
+/// nothing when nothing comes.
+pub fn awaitReadable(c: *Socket, io: Io, timeout: Io.Duration) Io.Cancelable!Timed.Readiness {
+    c.io = io;
+    if (c.reader().bufferedLen() != 0) return .ready;
+    return Timed.awaitReadable(io, c.stream.socket.handle, &c.input.interface, timeout);
 }
 
 /// Tell the observer a wait ran out.
@@ -195,6 +210,7 @@ pub fn readError(c: *const Socket) ReadError {
 fn deadline(c: *Socket) ?Io.Timestamp {
     return switch (c.phase) {
         .handshake, .idle, .head => c.until,
+        .hijacked => null,
         .answer => if (c.context.options.timeouts.activity) |a| Io.Clock.awake.now(c.io).addDuration(span.toIo(a)) else null,
     };
 }

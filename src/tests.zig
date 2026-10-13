@@ -14,4 +14,5 @@ test {
     _ = @import("client/policy_test.zig");
     _ = @import("client/tls_test.zig");
     _ = @import("transport/verify_test.zig");
+    _ = @import("ws_test.zig");
 }

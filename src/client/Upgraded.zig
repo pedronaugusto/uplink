@@ -12,6 +12,7 @@ const Io = std.Io;
 const Connection = @import("../transport/Connection.zig");
 const Context = @import("../transport/Context.zig");
 const Pool = @import("../pool/Pool.zig");
+const Timed = @import("../transport/Timed.zig");
 
 const Upgraded = @This();
 
@@ -46,6 +47,18 @@ pub fn flush(u: *Upgraded, io: Io) Error!void {
 /// Why the last read failed.
 pub fn readFailure(u: *Upgraded) Error {
     return u.conn.readError();
+}
+
+/// Wait up to `timeout` for the peer to send something; the wait ends
+/// nothing when nothing comes.
+pub fn awaitReadable(u: *Upgraded, io: Io, timeout: Io.Duration) Io.Cancelable!Timed.Readiness {
+    return u.conn.awaitReadable(io, timeout);
+}
+
+/// Bound no read or write by the client's timeouts any more: the protocol
+/// the stream carries keeps its own, as WebSocket does.
+pub fn unbind(u: *Upgraded) void {
+    u.conn.unbind();
 }
 
 /// Close the stream; TLS close_notify is sent as a courtesy.
