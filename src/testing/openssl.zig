@@ -48,6 +48,10 @@ pub const Pki = struct {
         try p.openssl(io, &.{ "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "server.key", "-out", "server.pem", "-days", "2", "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1,DNS:127.0.0.1,DNS:localhost" });
         // uplink's own server signs with what cloak signs with: ECDSA.
         try p.openssl(io, &.{ "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", "server-ec.key", "-out", "server-ec.pem", "-days", "2", "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1,DNS:localhost" });
+        // Client certificates as a CA issues them: X.509 v3 with their
+        // extensions. Without an extension file OpenSSL 3.0's `x509 -req`
+        // issues version 1, which a strict verifier refuses.
+        try p.dir.dir.writeFile(io, .{ .sub_path = "client.ext", .data = "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=clientAuth\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n" });
         for (kinds) |kind| try p.clientKey(io, kind);
         return p;
     }
@@ -72,8 +76,8 @@ pub const Pki = struct {
         try genpkey.appendSlice(a, &.{ "-out", key });
         try p.openssl(io, genpkey.items);
         try p.openssl(io, &.{ "req", "-new", "-key", key, "-subj", try a.print("/CN=client-{s}", .{kind}), "-out", csr });
-        try p.openssl(io, &.{ "x509", "-req", "-in", csr, "-CA", "ca.pem", "-CAkey", "ca.key", "-set_serial", "7", "-days", "2", "-out", try a.print("{s}.pem", .{kind}) });
-        try p.openssl(io, &.{ "x509", "-req", "-in", csr, "-CA", "stranger.pem", "-CAkey", "stranger.key", "-set_serial", "8", "-days", "2", "-out", try a.print("{s}.stranger.pem", .{kind}) });
+        try p.openssl(io, &.{ "x509", "-req", "-in", csr, "-CA", "ca.pem", "-CAkey", "ca.key", "-set_serial", "7", "-days", "2", "-extfile", "client.ext", "-out", try a.print("{s}.pem", .{kind}) });
+        try p.openssl(io, &.{ "x509", "-req", "-in", csr, "-CA", "stranger.pem", "-CAkey", "stranger.key", "-set_serial", "8", "-days", "2", "-extfile", "client.ext", "-out", try a.print("{s}.stranger.pem", .{kind}) });
         try p.openssl(io, &.{ "pkcs8", "-topk8", "-in", key, "-v2", "aes-256-cbc", "-passout", "pass:" ++ passphrase, "-out", try a.print("{s}.enc.key", .{kind}) });
     }
 
