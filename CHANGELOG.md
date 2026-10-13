@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-13
+
 ### Breaking
 
 - Every timeout, delay, keepalive and lifetime is an aegis `Duration` (`uplink.Duration`, nanoseconds), and every duration the observer reports: `Timeouts`, `Dial`, `Pool.Options.idle_timeout`, `Retries`, `Resolver.Cache.Options.ttl`, `expect_continue_timeout`. Write one as `.literal("30s")`, or read it with `Duration.parse`; log one with `{f}`. `h1.Limits.max_head` is an aegis `Bytes(u32)`.
