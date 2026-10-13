@@ -13,7 +13,7 @@ const tls = @import("../tls.zig");
 const span = @import("../span.zig");
 const Duration = span.Duration;
 const BufferPool = @import("../transport/BufferPool.zig");
-const Timed = @import("../transport/Timed.zig");
+const Timed = @import("../net/Timed.zig");
 const ZstdBuffer = @import("../coding/ZstdBuffer.zig");
 const Encoder = @import("../coding/Encoder.zig");
 

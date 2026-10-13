@@ -1,6 +1,6 @@
 //! The client: requests, responses, and the policy between them.
 
-/// An HTTP/1.1 client.
+/// An HTTP client: HTTP/1.1, and HTTP/2 where it is agreed.
 pub const Client = @import("client/Client.zig");
 /// A request: a value that owns nothing.
 pub const Request = @import("client/Request.zig");
@@ -18,6 +18,8 @@ pub const CookieJar = @import("client/CookieJar.zig");
 pub const Credentials = @import("client/Credentials.zig");
 /// The hook called before every attempt is written.
 pub const Prepare = @import("client/Prepare.zig");
+/// DNS over HTTPS: a transport for `net.Dns` through a client.
+pub const Doh = @import("client/Doh.zig");
 
 test {
     _ = Client;
@@ -29,6 +31,7 @@ test {
     _ = CookieJar;
     _ = Credentials;
     _ = Prepare;
+    _ = Doh;
     _ = @import("client/OriginAuth.zig");
     _ = @import("client/Run.zig");
     _ = @import("client/Shared.zig");

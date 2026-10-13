@@ -35,7 +35,7 @@ const Context = @import("Context.zig");
 const span = @import("../span.zig");
 const Diagnostics = @import("Diagnostics.zig");
 const Proxy = @import("Proxy.zig");
-const Timed = @import("Timed.zig");
+const Timed = @import("../net/Timed.zig");
 
 const Connection = @This();
 

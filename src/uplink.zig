@@ -1,22 +1,23 @@
-//! uplink: HTTP for Zig. An HTTP/1.1 client with keep-alive and per-route
-//! limits, proxies of every common kind, TLS with client certificates,
-//! timeouts and deadlines that need no task per connection, redirects,
-//! retries, cookies, authentication and decompression; and the codecs it
-//! is built from.
+//! uplink: HTTP for Zig. A client with keep-alive and per-route limits,
+//! HTTP/2 multiplexed, proxies of every common kind, TLS with client
+//! certificates, timeouts and deadlines that need no task per connection,
+//! redirects, retries, cookies, authentication, decompression and its own
+//! DNS when asked; a server with routing, files and compression; WebSocket
+//! on both; and the codecs they are built from.
 
 const std = @import("std");
 const client = @import("client.zig");
 const transport = @import("transport.zig");
 
-/// An HTTP/1.1 client.
+/// An HTTP client: HTTP/1.1, and HTTP/2 where it is agreed.
 pub const Client = client.Client;
 /// A request: a value that owns nothing.
 pub const Request = client.Request;
 /// A response: its head, and its body read through `reader`.
 pub const Response = client.Response;
-/// An HTTP/1.1 server, its requests and its responses.
+/// An HTTP server, its requests and its responses, its routers and files.
 pub const server = @import("server.zig");
-/// An HTTP/1.1 server.
+/// An HTTP server: HTTP/1.1, and HTTP/2.
 pub const Server = server.Server;
 /// WebSocket on the client and the server.
 pub const ws = @import("ws.zig");
@@ -34,6 +35,11 @@ pub const CookieJar = client.CookieJar;
 pub const Credentials = client.Credentials;
 /// The hook called before every attempt is written.
 pub const Prepare = client.Prepare;
+/// A resolver that speaks DNS itself: the stub over UDP and TCP, or DNS
+/// over HTTPS.
+pub const Dns = net.Dns;
+/// DNS over HTTPS, a transport for `Dns`.
+pub const Doh = client.Doh;
 /// Every step of a request, with its timing, as it happens.
 pub const Observer = transport.Observer;
 /// A proxy, read from settings or the environment.

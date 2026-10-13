@@ -65,9 +65,6 @@ fn priorKnowledge(c: *Connection) bool {
 /// Wait for the next request's first byte, or take one already buffered
 /// (pipelined). False when the connection ends: the client closed it, the
 /// idle wait ran out, or the server is stopping.
-/// Wait for the next request's first byte, or take one already buffered
-/// (pipelined). False when the connection ends: the client closed it, the
-/// idle wait ran out, or the server is stopping.
 fn awaitRequest(c: *Connection, first: bool) bool {
     const s = c.socket.context;
     const io = c.socket.io;
@@ -80,7 +77,19 @@ fn awaitRequest(c: *Connection, first: bool) bool {
     c.socket.park();
     if (!s.setIdle(io, &c.socket.entry, true)) return false;
     c.socket.startIdle(io);
-    const more = r.fillMore();
+    // An idle connection past its time is closed cleanly where the `Io`
+    // can wait without a deadline that aborts the socket: a FIN, not a
+    // reset that could take the last response's bytes with it.
+    if (s.options.timeouts.idle) |idle| switch (c.socket.awaitReadable(io, span.toIo(idle)) catch .ready) {
+        .ready, .unbounded => {},
+        .timed_out => {
+            _ = s.setIdle(io, &c.socket.entry, false);
+            c.socket.noteTimeout(.idle);
+            return false;
+        },
+    };
+    // What the wait read is the request's start; else the read waits for it.
+    const more = if (r.bufferedLen() != 0) {} else r.fillMore();
     const stopping = !s.setIdle(io, &c.socket.entry, false);
     more catch |err| {
         if (err == error.ReadFailed and c.socket.failure == .timed_out) c.socket.noteTimeout(.idle);

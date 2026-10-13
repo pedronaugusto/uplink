@@ -21,8 +21,6 @@ pub const Observer = @import("transport/Observer.zig");
 pub const Body = @import("transport/Body.zig");
 /// A message head gathered into a pooled buffer.
 pub const Head = @import("transport/Head.zig");
-/// One socket's operations, each ended at its deadline.
-pub const Timed = @import("transport/Timed.zig");
 /// One HTTP/2 connection, its requests multiplexed over it.
 pub const H2 = @import("transport/H2.zig");
 
@@ -36,7 +34,6 @@ test {
     _ = Diagnostics;
     _ = Observer;
     _ = Body;
-    _ = Timed;
     _ = Head;
     _ = H2;
 }

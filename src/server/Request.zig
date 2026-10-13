@@ -327,3 +327,34 @@ test "params are found by name" {
     try testing.expectEqualStrings("a/b", p.get("rest").?);
     try testing.expectEqual(null, p.get("none"));
 }
+
+test "fuzz: any target is read or refused, and one read names a path, a query or an authority" {
+    const shakedown = @import("shakedown");
+    const seeds = [_][]const u8{ "/a/b?c=d", "http://h:1/p?q", "h:443", "*", "/", "https://x" };
+    try shakedown.check(std.testing.allocator, {}, struct {
+        fn one(_: void, case: *shakedown.Case) anyerror!void {
+            const gen = shakedown.gen;
+            const s = case.source;
+            var buf: [64]u8 = undefined;
+            var len: usize = 0;
+            if (gen.boolean(s)) {
+                const seed = gen.oneOf(s, []const u8, &seeds);
+                @memcpy(buf[0..seed.len], seed);
+                len = seed.len;
+                for (0..gen.intRange(s, u8, 0, 3)) |_| buf[gen.intRange(s, usize, 0, len - 1)] = gen.oneOf(s, u8, "/?:*h#%");
+            } else {
+                while (len < buf.len and s.more(12)) : (len += 1) buf[len] = gen.oneOf(s, u8, "/?:*hp.#%");
+            }
+            const text = buf[0..len];
+            const methods = [_]Method{ .GET, .CONNECT, .OPTIONS };
+            const method = gen.oneOf(s, Method, &methods);
+            if (Target.parse(method, text)) |t| {
+                if (t.path.len != 0) try std.testing.expect(t.path[0] == '/');
+                if (t.query) |q| try std.testing.expect(std.mem.findScalar(u8, q, '?') == null or std.mem.findScalar(u8, text, '?') != null);
+            } else |_| {}
+            if (Target.parseExtended(text)) |t| {
+                try std.testing.expect(t.path.len != 0 and t.path[0] == '/');
+            } else |_| {}
+        }
+    }.one, .{});
+}

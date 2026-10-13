@@ -7,11 +7,18 @@
 pub const dial = @import("net/dial.zig");
 /// How host names become addresses: the system's, overrides, a cache.
 pub const Resolver = @import("net/Resolver.zig");
+/// A resolver that speaks DNS itself: a stub over UDP and TCP, or any
+/// transport, DNS over HTTPS among them.
+pub const Dns = @import("net/Dns.zig");
 /// Socket options.
 pub const sys = @import("net/sys.zig");
+/// One socket's operations, each ended at its deadline.
+pub const Timed = @import("net/Timed.zig");
 
 test {
     _ = dial;
     _ = Resolver;
+    _ = Dns;
     _ = sys;
+    _ = Timed;
 }

@@ -26,7 +26,7 @@ const Io = std.Io;
 const wire = @import("uplink.wire");
 const ws = wire.ws;
 const span = @import("../span.zig");
-const Timed = @import("../transport/Timed.zig");
+const Timed = @import("../net/Timed.zig");
 const Duration = span.Duration;
 
 const Conn = @This();

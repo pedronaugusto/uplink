@@ -70,7 +70,7 @@ pub const Netrc = struct {
 
     /// The store, reading `n`, which must outlive the client.
     pub fn credentials(n: *const Netrc) Credentials {
-        return .{ .context = @constCast(n), .fillFn = fillNetrc };
+        return .{ .context = @constCast(n), .fillFn = fillNetrc }; // safe: a fill only reads through the pointer
     }
 
     fn fillNetrc(_: Io, context: ?*anyopaque, query: Query) FillError!?Secret {

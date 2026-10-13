@@ -26,6 +26,8 @@ pub const sse = @import("wire/sse.zig");
 pub const form = @import("wire/form.zig");
 /// `multipart/form-data` bodies, written.
 pub const multipart = @import("wire/multipart.zig");
+/// DNS messages, their records and `resolv.conf`.
+pub const dns = @import("wire/dns.zig");
 /// `.netrc`: a user's logins per machine.
 pub const netrc = @import("wire/netrc.zig");
 /// Byte ranges: `Range` read, `Content-Range` written.
@@ -56,6 +58,7 @@ test {
     _ = multipart;
     _ = range;
     _ = netrc;
+    _ = dns;
     _ = ws;
     _ = hpack;
     _ = h2;

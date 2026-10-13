@@ -197,7 +197,14 @@ or `Resolver.Static` for chosen names, as a pinned address does, and a
 cache keeps answers for a minute. The system's lookup is reactor's bounded
 one, which never waits on itself the way std's does when its queue fills;
 with no task to spare, a libc target calls `getaddrinfo` on the caller's task
-and other targets return `error.ConcurrencyUnavailable` for a name. A name's
+and other targets return `error.ConcurrencyUnavailable` for a name. `Dns`
+speaks DNS itself when a client is given it: a stub that asks the name
+servers of `resolv.conf` (the adapters' on Windows, `Dns.System`) over UDP
+and over TCP when an answer is truncated, each wait bounded, or DNS over
+HTTPS (`Doh`, RFC 8484) through a client of its own. It asks for AAAA and A
+at once, follows CNAMEs, tries the search domains in the C library's order,
+and reads HTTPS records (RFC 9460) with `Dns.https`. The messages are
+`wire.dns`'s, read with every name and pointer bounded, and fuzzed. A name's
 addresses are raced by Happy Eyeballs (RFC 8305): one at a time, the families
 alternating, each a quarter second after the last or at once when it failed,
 and each attempt is reactor's connect, which its runtime ends at the deadline

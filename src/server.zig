@@ -1,7 +1,7 @@
 //! The server: connections accepted and served, requests and the
 //! responses that answer them.
 
-/// An HTTP/1.1 server.
+/// An HTTP server: HTTP/1.1, and HTTP/2.
 pub const Server = @import("server/Server.zig");
 /// What a server does for each request.
 pub const Handler = @import("server/Handler.zig");

@@ -1,6 +1,7 @@
-//! An HTTP/1.1 client: requests over kept connections, through a proxy when
-//! one is set, with TLS, timeouts, decompression, redirects, retries,
-//! cookies and answers to servers' and proxies' challenges.
+//! An HTTP client: requests over kept HTTP/1.1 connections or multiplexed
+//! HTTP/2 ones, through a proxy when one is set, with TLS, timeouts,
+//! decompression, redirects, retries, cookies and answers to servers' and
+//! proxies' challenges.
 //!
 //! A client may be used by several tasks at once. It must not move once it
 //! has made a request: connections point at its shared state.

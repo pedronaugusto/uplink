@@ -20,7 +20,7 @@ const hpack = wire.hpack;
 const Field = wire.fields.Field;
 const Context = @import("../Context.zig");
 const Socket = @import("../Socket.zig");
-const Timed = @import("../../transport/Timed.zig");
+const Timed = @import("../../net/Timed.zig");
 
 const Session = @This();
 

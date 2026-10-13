@@ -1,6 +1,7 @@
-//! An HTTP/1.1 server: it accepts connections, reads the requests on each
-//! in order, pipelined ones included, and hands every request to one
-//! `Handler`, which answers it through a `Response`. TLS is cloak's.
+//! An HTTP server: it accepts connections, reads the requests on each in
+//! order, pipelined ones included, or the streams of an HTTP/2 connection
+//! each on a task of its own, and hands every request to one `Handler`,
+//! which answers it through a `Response`. TLS is cloak's.
 //!
 //! `serve` accepts until `shutdown`, each connection a task of its own
 //! started with `io.concurrent`. On an `Io` with no task to spare it

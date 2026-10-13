@@ -12,7 +12,7 @@ const Io = std.Io;
 const Connection = @import("../transport/Connection.zig");
 const Context = @import("../transport/Context.zig");
 const Pool = @import("../pool/Pool.zig");
-const Timed = @import("../transport/Timed.zig");
+const Timed = @import("../net/Timed.zig");
 
 const Upgraded = @This();
 

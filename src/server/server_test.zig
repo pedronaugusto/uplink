@@ -364,6 +364,7 @@ test "responses go compressed when the client accepts a coding, and as they are 
 }
 
 const cloak = @import("cloak");
+const Diagnostics = @import("../transport/Diagnostics.zig");
 const openssl = @import("../testing/openssl.zig");
 
 fn whoami(io: Io, request: *Request, response: *Response) anyerror!void {
@@ -412,8 +413,12 @@ test "TLS is terminated with cloak, a client certificate asked for and checked" 
     {
         var client: Client = .init(gpa, .{ .tls = .{ .trust = servers, .client_auth = auth } });
         defer client.deinit(io);
-        for (0..2) |_| {
-            var response = try client.send(io, .{ .url = url });
+        for (0..2) |round| {
+            var diagnostics: Diagnostics = .{};
+            var response = client.send(io, .{ .url = url, .diagnostics = &diagnostics }) catch |err| {
+                std.debug.print("round {d}: {t}, tls error {?t}, alert {?t}, stage {t}\n", .{ round, err, diagnostics.tls_error, diagnostics.tls_alert, diagnostics.stage });
+                return err;
+            };
             defer response.deinit(io);
             const body = try response.collect(gpa, io, .limited(1 << 20));
             defer gpa.free(body);
@@ -439,13 +444,11 @@ fn dialRaw(running: *const Running) !Io.net.Stream {
 fn readToEnd(stream: Io.net.Stream, gpa: std.mem.Allocator) !struct { []u8, Io.Duration } {
     const io = test_io.io();
     const started = Io.Clock.awake.now(io);
-    var rbuf: [4096]u8 = undefined;
+    var rbuf: [64 << 10]u8 = undefined;
     var rd = stream.reader(io, &rbuf);
-    const got = rd.interface.allocRemaining(gpa, .limited(1 << 20)) catch |err| switch (err) {
-        error.ReadFailed => try gpa.dupe(u8, ""),
-        else => |e| return e,
-    };
-    return .{ got, started.durationTo(Io.Clock.awake.now(io)) };
+    // What came before the connection ended, cleanly or with a reset.
+    while (rd.interface.bufferedLen() < rbuf.len) rd.interface.fillMore() catch break;
+    return .{ try gpa.dupe(u8, rd.interface.buffered()), started.durationTo(Io.Clock.awake.now(io)) };
 }
 
 test "a head sent a byte at a time is cut off at the head timeout, whatever its pace" {
@@ -742,6 +745,10 @@ fn curl(gpa: std.mem.Allocator, args: []const []const u8) !?[]u8 {
 
 test "curl speaks HTTP/2 to the server by prior knowledge, and HTTP/1.1 beside it" {
     const gpa = testing.allocator;
+    // A curl built without HTTP/2, as Windows ships one, proves nothing here.
+    const version = try curl(gpa, &.{"--version"}) orelse return error.SkipZigTest;
+    defer gpa.free(version);
+    if (std.mem.find(u8, version, "HTTP2") == null) return error.SkipZigTest;
     const running = try Running.start(gpa, .{ .h2c = .alongside_http1 }, .of(echoVersion));
     defer running.stop();
     var url_buf: [64]u8 = undefined;
@@ -905,4 +912,55 @@ test "an HTTP/2 connection idle past the pool's idle timeout is closed, and the 
         if (round == 0) try io.sleep(.fromMilliseconds(120), .awake);
     }
     try testing.expectEqual(@as(u64, 2), client.stats().connections_opened);
+}
+
+const dns = @import("uplink.wire").dns;
+const Doh = @import("../client/Doh.zig");
+const Dns = @import("../net/Dns.zig");
+
+test "a query goes as an HTTP POST and its answer comes back with the query's id" {
+    const io = test_io.io();
+    const media_type = "application/dns-message";
+    const Answer = struct {
+        /// One A record for any question, its owner the question's name.
+        fn handle(hio: Io, request: *Request, response: *Response) anyerror!void {
+            if (!request.method.eql(.POST) or !std.mem.eql(u8, request.headers.get("content-type") orelse "", media_type)) {
+                response.status = .bad_request;
+                return response.send(hio, "");
+            }
+            const query = try request.collect(testing.allocator, hio, .limited(512));
+            defer testing.allocator.free(query);
+            const m = try dns.Message.parse(query);
+            // A cacheable query: id 0.
+            if (m.id != 0) return error.IdNotZero;
+            var out: [512]u8 = undefined;
+            @memcpy(out[0..m.answers_at], query[0..m.answers_at]);
+            std.mem.writeInt(u16, out[2..4], 0x8180, .big);
+            std.mem.writeInt(u16, out[6..8], 1, .big);
+            std.mem.writeInt(u16, out[10..12], 0, .big);
+            const record = "\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04\xc6\x33\x64\x07";
+            @memcpy(out[m.answers_at..][0..record.len], record);
+            try response.header("Content-Type", media_type);
+            try response.send(hio, out[0 .. m.answers_at + record.len]);
+        }
+    };
+    var server: Server = .init(testing.allocator, .{}, .of(Answer.handle));
+    defer server.deinit(io);
+    var listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    var serving = io.concurrent(Server.serve, .{ &server, io, &listener }) catch return error.SkipZigTest;
+    defer {
+        server.shutdown(io);
+        // glint-ignore: Z026 -- serve ends with the shutdown; its result is not what the test checks
+        serving.await(io) catch {};
+    }
+    var client: Client = .init(testing.allocator, .{});
+    defer client.deinit(io);
+    var url_buf: [64]u8 = undefined;
+    const doh: Doh = .{ .client = &client, .url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/dns-query", .{listener.socket.address.getPort()}) };
+    const d: Dns = .{ .transport = doh.transport() };
+    var out: [4]Io.net.IpAddress = undefined;
+    const got = try d.resolver().lookup(io, "doh.test", 443, .ip4, &out);
+    try testing.expectEqual(1, got.len);
+    try testing.expectEqualSlices(u8, &.{ 198, 51, 100, 7 }, &got[0].ip4.bytes);
 }

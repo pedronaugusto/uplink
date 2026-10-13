@@ -11,7 +11,7 @@ const Io = std.Io;
 const cloak = @import("cloak");
 const tls = @import("../tls.zig");
 const span = @import("../span.zig");
-const Timed = @import("../transport/Timed.zig");
+const Timed = @import("../net/Timed.zig");
 const Context = @import("Context.zig");
 
 const Socket = @This();

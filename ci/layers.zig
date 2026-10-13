@@ -10,6 +10,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/wire/sse.zig",
         "src/wire/range.zig",
         "src/wire/netrc.zig",
+        "src/wire/dns.zig",
         "src/wire/ws.zig",
         "src/wire/hpack/huffman_codes.zig",
         "src/wire/hpack.zig",
@@ -43,9 +44,14 @@ pub const layers: []const gantry.rules.Layer = &.{
     } },
     .{ .name = "net system", .patterns = &.{
         "src/net/sys.zig",
+        "src/net/Timed.zig",
+        "src/net/dns/windows.zig",
     } },
     .{ .name = "net resolver", .patterns = &.{
         "src/net/Resolver.zig",
+    } },
+    .{ .name = "net dns", .patterns = &.{
+        "src/net/Dns.zig",
     } },
     .{ .name = "net dial", .patterns = &.{
         "src/net/dial.zig",
@@ -55,7 +61,6 @@ pub const layers: []const gantry.rules.Layer = &.{
     } },
     .{ .name = "transport clock", .patterns = &.{
         "src/transport/awake.zig",
-        "src/transport/Timed.zig",
     } },
     .{ .name = "transport values", .patterns = &.{
         "src/transport/Proxy.zig",
@@ -111,6 +116,9 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/client/Run.zig",
         "src/client/Outgoing.zig",
         "src/client/Client.zig",
+    } },
+    .{ .name = "client dns", .patterns = &.{
+        "src/client/Doh.zig",
     } },
     .{ .name = "server patterns", .patterns = &.{
         "src/server/Pattern.zig",
