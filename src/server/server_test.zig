@@ -513,3 +513,23 @@ test "shutdown lets an answer under way finish, telling its client the connectio
     try testing.expect(std.mem.find(u8, got, "Connection: close\r\n") != null);
     try testing.expect(std.mem.endsWith(u8, got, "late but whole"));
 }
+
+const server_ns = @import("../server.zig");
+
+fn file(io: Io, _: *Request, response: *Response, captures: server_ns.Captures("GET /files/{name}/{rest...}")) anyerror!void {
+    var buf: [128]u8 = undefined;
+    try response.send(io, try std.mem.print(&buf, "{s}|{s}", .{ captures.name, captures.rest }));
+}
+
+test "comptime routes serve with typed captures, their escapes undone" {
+    const gpa = testing.allocator;
+    const routes = server_ns.Routes(.{.{ "GET /files/{name}/{rest...}", file }});
+    const running = try Running.start(gpa, .{}, routes.handler());
+    defer running.stop();
+    const got = try running.raw(gpa, "GET /files/a%20b/c/d%2Fe HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    defer gpa.free(got);
+    try testing.expect(std.mem.endsWith(u8, got, "a b|c/d/e"));
+    const missing = try running.raw(gpa, "POST /files/a/b HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    defer gpa.free(missing);
+    try testing.expect(std.mem.startsWith(u8, missing, "HTTP/1.1 405 "));
+}

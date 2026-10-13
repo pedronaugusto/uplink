@@ -11,6 +11,11 @@ pub const Request = @import("server/Request.zig");
 pub const Response = @import("server/Response.zig");
 /// Routes requests to handlers by pattern, as Go 1.22's `ServeMux`.
 pub const Router = @import("server/Router.zig");
+/// A router whose patterns are known at compile time: a conflict is a
+/// compile error, and captures are typed.
+pub const Routes = @import("server/routes.zig").Routes;
+/// The typed captures of a comptime route's pattern.
+pub const Captures = @import("server/routes.zig").Captures;
 /// A route pattern and how two of them relate.
 pub const Pattern = @import("server/Pattern.zig");
 
@@ -20,6 +25,7 @@ test {
     _ = Response;
     _ = Router;
     _ = Pattern;
+    _ = @import("server/routes.zig");
     _ = Handler;
     _ = @import("server/Connection.zig");
     _ = @import("server/Context.zig");

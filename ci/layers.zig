@@ -123,6 +123,9 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "server routing", .patterns = &.{
         "src/server/Router.zig",
     } },
+    .{ .name = "server comptime routing", .patterns = &.{
+        "src/server/routes.zig",
+    } },
     .{ .name = "server namespace", .patterns = &.{
         "src/server.zig",
     } },

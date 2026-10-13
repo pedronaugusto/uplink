@@ -197,6 +197,48 @@ pub fn eqlEscaped(literal: []const u8, escaped: []const u8) bool {
     return i == literal.len;
 }
 
+/// Whether `path` (as sent, escapes in, starting with `/`) matches the
+/// pattern's path; its wildcards' escaped values go into `values` in
+/// order, and how many there are is returned.
+pub fn matchPath(p: *const Pattern, path: []const u8, values: *[max_wildcards][]const u8) ?u8 {
+    var rest = path[1..];
+    var slash = true;
+    var n: u8 = 0;
+    for (p.segments) |seg| switch (seg.kind) {
+        .multi => {
+            if (!slash) return null;
+            if (seg.text.len != 0) {
+                values[n] = rest;
+                n += 1;
+            }
+            return n;
+        },
+        .end => return if (slash and rest.len == 0) n else null,
+        .literal, .wildcard => {
+            if (!slash) return null;
+            const cut = std.mem.findScalar(u8, rest, '/');
+            const segment = rest[0 .. cut orelse rest.len];
+            if (seg.kind == .literal) {
+                if (!eqlEscaped(seg.text, segment)) return null;
+            } else {
+                if (segment.len == 0) return null;
+                values[n] = segment;
+                n += 1;
+            }
+            rest = if (cut) |c| rest[c + 1 ..] else "";
+            slash = cut != null;
+        },
+    };
+    return if (!slash and rest.len == 0) n else null;
+}
+
+/// Whether the pattern's method takes `method`: its own, `GET`'s for a
+/// `HEAD`, or any for a pattern with none.
+pub fn takesMethod(p: *const Pattern, method: []const u8) bool {
+    const m = p.method orelse return true;
+    return std.mem.eql(u8, m, method) or (std.mem.eql(u8, m, "GET") and std.mem.eql(u8, method, "HEAD"));
+}
+
 /// How the requests two patterns match relate.
 pub const Relation = enum {
     /// The same requests.
@@ -356,4 +398,24 @@ test "a request segment matches a literal with its escapes undone" {
     var out: [8]u8 = undefined;
     try testing.expectEqualStrings("a b", unescape("a%20b", &out).?);
     try testing.expectEqual(null, unescape("a%2", &out));
+}
+
+test "a path is matched segment by segment, its captures in order" {
+    var seg: [8]Segment = undefined;
+    var scratch: [32]u8 = undefined;
+    var values: [max_wildcards][]const u8 = undefined;
+    const p = try parse("/a/{x}/c/{rest...}", &seg, &scratch);
+    try testing.expectEqual(@as(?u8, 2), p.matchPath("/a/b%2F/c/d/e", &values));
+    try testing.expectEqualStrings("b%2F", values[0]);
+    try testing.expectEqualStrings("d/e", values[1]);
+    try testing.expectEqual(@as(?u8, 2), p.matchPath("/a/b/c/", &values));
+    try testing.expectEqualStrings("", values[1]);
+    try testing.expectEqual(null, p.matchPath("/a/b/c", &values));
+    try testing.expectEqual(null, p.matchPath("/a//c/d", &values));
+    const end = try parse("/a/{$}", &seg, &scratch);
+    try testing.expectEqual(@as(?u8, 0), end.matchPath("/a/", &values));
+    try testing.expectEqual(null, end.matchPath("/a/b", &values));
+    const exact = try parse("/a", &seg, &scratch);
+    try testing.expectEqual(@as(?u8, 0), exact.matchPath("/a", &values));
+    try testing.expectEqual(null, exact.matchPath("/a/", &values));
 }

@@ -160,7 +160,7 @@ pub const Allowed = struct {
     /// Any method: a pattern with none matched.
     any: bool = false,
 
-    fn add(a: *Allowed, method: []const u8) void {
+    pub fn add(a: *Allowed, method: []const u8) void {
         for (a.methods[0..a.len]) |m| if (std.mem.eql(u8, m, method)) return;
         if (a.len == a.methods.len) return;
         a.methods[a.len] = method;
@@ -215,7 +215,7 @@ pub fn match(r: *const Router, method: Method, host: []const u8, path: []const u
 }
 
 /// A host without its port.
-fn hostName(host: []const u8) []const u8 {
+pub fn hostName(host: []const u8) []const u8 {
     if (host.len != 0 and host[0] == '[') {
         const close = std.mem.findScalar(u8, host, ']') orelse return host;
         return host[0 .. close + 1];
@@ -306,24 +306,48 @@ pub fn handler(r: *Router) Handler {
 /// subtree without its `/`, answer 405 or 404, or call the handler with the
 /// captures in `request.params`.
 pub fn serve(r: *Router, io: Io, request: *Request, response: *Response) anyerror!void {
+    return dispatch(r, io, request, response);
+}
+
+/// The router's side of `dispatch`.
+pub fn find(r: *const Router, method: Method, host: []const u8, path: []const u8, allowed: *Allowed) ?Match {
+    return r.match(method, host, path, allowed);
+}
+
+/// Call the handler `found` names, its captures in `request.params`.
+pub fn run(_: *const Router, found: Match, io: Io, request: *Request, response: *Response) anyerror!void {
+    try capture(io, request, found.route.pattern.segments, found.values[0..found.len]);
+    return found.route.handler.handle(io, request, response);
+}
+
+/// What a request no pattern matches gets.
+pub fn notFound(r: *const Router, io: Io, request: *Request, response: *Response) anyerror!void {
+    if (r.not_found) |h| return h.handle(io, request, response);
+    return plain(io, response, .not_found, "not found\n");
+}
+
+/// Answer `request` as a router does, whichever router `table` is: a
+/// value with `find`, `run` and `notFound` as `Router` has them. A path
+/// that is not clean is redirected to its clean form, one with a broken
+/// escape is a 400, one that names a subtree without its `/` is
+/// redirected to it, one that matches only under other methods is a 405
+/// with `Allow`, and one nothing matches is the table's `notFound`.
+pub fn dispatch(table: anytype, io: Io, request: *Request, response: *Response) anyerror!void {
     const path = request.path;
-    if (request.method.eql(.CONNECT) or path.len == 0) return r.notFound(io, request, response);
+    if (request.method.eql(.CONNECT) or path.len == 0) return table.notFound(io, request, response);
     if (!validEscapes(path)) return plain(io, response, .bad_request, "bad request\n");
     if (!isClean(path)) {
         const buffer = try request.scratchBuffer(io, path.len + 1);
         return redirect(io, request, response, clean(path, buffer));
     }
     var allowed: Allowed = .{};
-    if (r.match(request.method, request.host, path, &allowed)) |found| {
-        try capture(io, request, &found);
-        return found.route.handler.handle(io, request, response);
-    }
+    if (table.find(request.method, request.host, path, &allowed)) |found| return table.run(found, io, request, response);
     if (path[path.len - 1] != '/') {
         const buffer = try request.scratchBuffer(io, path.len + 1);
         @memcpy(buffer[0..path.len], path);
         buffer[path.len] = '/';
         var ignored: Allowed = .{};
-        if (r.match(request.method, request.host, buffer[0 .. path.len + 1], &ignored) != null)
+        if (table.find(request.method, request.host, buffer[0 .. path.len + 1], &ignored) != null)
             return redirect(io, request, response, buffer[0 .. path.len + 1]);
     }
     if (allowed.len != 0) {
@@ -336,15 +360,11 @@ pub fn serve(r: *Router, io: Io, request: *Request, response: *Response) anyerro
         try response.header("Allow", w.buffered());
         return plain(io, response, .method_not_allowed, "method not allowed\n");
     }
-    return r.notFound(io, request, response);
+    return table.notFound(io, request, response);
 }
 
-fn notFound(r: *Router, io: Io, request: *Request, response: *Response) anyerror!void {
-    if (r.not_found) |h| return h.handle(io, request, response);
-    return plain(io, response, .not_found, "not found\n");
-}
-
-fn plain(io: Io, response: *Response, status: std.http.Status, body: []const u8) Response.Error!void {
+/// Answer with `status` and a short plain-text `body`.
+pub fn plain(io: Io, response: *Response, status: std.http.Status, body: []const u8) Response.Error!void {
     response.status = status;
     try response.header("Content-Type", "text/plain; charset=utf-8");
     return response.send(io, body);
@@ -366,17 +386,18 @@ fn redirect(io: Io, request: *const Request, response: *Response, path: []const 
     return plain(io, response, response.status, "");
 }
 
-/// The wildcards' values, their escapes undone, in `request.params`.
-fn capture(io: Io, request: *Request, found: *const Match) error{OutOfMemory}!void {
-    if (found.len == 0) return;
+/// The values captured for `segments`' wildcards, their escapes undone,
+/// in `request.params`.
+pub fn capture(io: Io, request: *Request, segments: []const Pattern.Segment, values: []const []const u8) error{OutOfMemory}!void {
+    if (values.len == 0) return;
     var need: usize = 0;
-    for (found.values[0..found.len]) |v| need += v.len;
+    for (values) |v| need += v.len;
     const buffer = try request.scratchBuffer(io, need);
     var at: usize = 0;
     var i: usize = 0;
-    for (found.route.pattern.segments) |seg| {
+    for (segments) |seg| {
         if (seg.kind != .wildcard and !(seg.kind == .multi and seg.text.len != 0)) continue;
-        const value = Pattern.unescape(found.values[i], buffer[at..]) orelse found.values[i];
+        const value = Pattern.unescape(values[i], buffer[at..]) orelse values[i];
         if (value.ptr == buffer.ptr + at) at += value.len;
         request.params.put(seg.text, value);
         i += 1;
