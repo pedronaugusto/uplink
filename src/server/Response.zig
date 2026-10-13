@@ -75,6 +75,10 @@ trailer_len: usize = 0,
 encoder: ?*Encoder = null,
 framed: Io.Writer = .{ .vtable = &.{ .drain = drainFramed }, .buffer = &.{} },
 framed_buffer: []u8 = &.{},
+/// Private: a taken-over HTTP/2 stream's writer: its bytes as DATA.
+tunnel: Io.Writer = .{ .vtable = &.{ .drain = drainTunnel }, .buffer = &.{} },
+/// Private: the buffer a taken-over HTTP/2 stream is read through.
+tunnel_in: []u8 = &.{},
 /// Private: the HTTP/2 stream the response goes on, if it does.
 stream: ?*Session.Stream = null,
 /// Private: the body writer.
@@ -213,7 +217,16 @@ pub fn trailer(r: *Response, name: []const u8, value: []const u8) Error!void {
 pub fn end(r: *Response, io: Io) Error!void {
     r.socket.io = io;
     switch (r.state) {
-        .ended, .hijacked => return,
+        .ended => return,
+        .hijacked => {
+            // A taken-over stream ends with the handler, as a connection
+            // taken over closes.
+            if (r.stream) |st| if (!st.ended) {
+                r.tunnel.flush() catch return r.fail();
+                st.writeData(io, "", true) catch return r.fail();
+            };
+            return;
+        },
         .open => {
             const buffered = r.interface.buffered();
             r.interface.end = 0;
@@ -330,26 +343,45 @@ pub const Hijacked = struct {
     reader: *Io.Reader,
     writer: *Io.Writer,
     socket: *Socket,
+    /// The HTTP/2 stream taken over, when it is one.
+    stream: ?*Session.Stream = null,
 
     /// Push what was written to the peer.
     pub fn flush(h: Hijacked) Io.Writer.Error!void {
+        if (h.stream != null) return h.writer.flush();
         return h.socket.flush();
     }
 
     /// Wait up to `timeout` for the peer to send something; the wait ends
     /// nothing when nothing comes.
     pub fn awaitReadable(h: Hijacked, io: Io, timeout: Io.Duration) Io.Cancelable!Timed.Readiness {
+        if (h.stream) |st| return st.awaitReadable(io, timeout);
         return h.socket.awaitReadable(io, timeout);
     }
 };
 
 /// Send the head as it stands, with no body framing, and hand the
-/// connection to the caller.
+/// connection to the caller. On HTTP/2, after a 2xx to an extended
+/// `CONNECT` (RFC 8441), the stream is what is taken over: its data both
+/// ways, until either end ends it.
 pub fn hijack(r: *Response, io: Io) Error!Hijacked {
     r.socket.io = io;
     if (r.state != .open) return error.HeadSent;
-    // On HTTP/2 a stream is not a connection to take over.
-    if (r.stream != null) return error.HeadSent;
+    if (r.stream) |st| {
+        if (@backingInt(r.status) / 100 != 2) return error.HeadSent;
+        // The stream carries another protocol's bytes: never coded.
+        r.compressible = false;
+        try r.sendHeadH2(st, .chunked, null);
+        r.body_buffer = try r.socket.context.buffers.acquire(io, .small);
+        r.tunnel.buffer = r.body_buffer;
+        // What the stream carries is read as a connection would be,
+        // through a buffer of its own.
+        r.tunnel_in = try r.socket.context.buffers.acquire(io, .record);
+        const in = st.reader(io);
+        in.buffer = r.tunnel_in;
+        r.state = .hijacked;
+        return .{ .reader = in, .writer = &r.tunnel, .socket = r.socket, .stream = st };
+    }
     try r.sendHead(.none, null);
     r.flushOut() catch return r.fail();
     r.state = .hijacked;
@@ -372,7 +404,8 @@ pub fn keepsConnection(r: *const Response) bool {
 /// Give back the response's buffers and its encoder.
 pub fn release(r: *Response, io: Io) void {
     const pool = &r.socket.context.buffers;
-    for ([_][]u8{ r.fields_buffer, r.body_buffer, r.trailer_buffer, r.framed_buffer }) |b| if (b.len != 0) pool.release(io, b);
+    for ([_][]u8{ r.fields_buffer, r.body_buffer, r.trailer_buffer, r.framed_buffer, r.tunnel_in }) |b| if (b.len != 0) pool.release(io, b);
+    r.tunnel_in = &.{};
     r.fields_buffer = &.{};
     r.body_buffer = &.{};
     r.trailer_buffer = &.{};
@@ -518,9 +551,6 @@ fn sendHeadH2(r: *Response, st: *Session.Stream, want: Framing, coded: ?Encoder.
 /// The most fields an HTTP/2 head carries.
 const max_h2_fields = 128;
 
-/// Fields written as `Name: value` lines, their names made lower case in
-/// place, after `n` in `list`; a connection's own fields left out, which
-/// HTTP/2 forbids (RFC 9113 §8.2.2).
 fn startEncoder(r: *Response, c: Encoder.Coding) Error!void {
     const io = r.socket.io;
     r.framed_buffer = try r.socket.context.buffers.acquire(io, .small);
@@ -582,6 +612,25 @@ fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!
     n += data[data.len - 1].len * splat;
     r.bodyBytes(data, splat) catch return error.WriteFailed;
     return w.consume(n);
+}
+
+/// A taken-over stream's bytes, as DATA.
+fn drainTunnel(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
+    const r: *Response = @alignCast(@fieldParentPtr("tunnel", w)); // safe: this vtable is installed only on a Response's `tunnel`
+    const st = r.stream.?;
+    const io = r.socket.io;
+    st.writeData(io, w.buffered(), false) catch return error.WriteFailed;
+    var n: usize = 0;
+    for (data[0 .. data.len - 1]) |d| {
+        st.writeData(io, d, false) catch return error.WriteFailed;
+        n += d.len;
+    }
+    for (0..splat) |_| {
+        st.writeData(io, data[data.len - 1], false) catch return error.WriteFailed;
+        n += data[data.len - 1].len;
+    }
+    w.end = 0;
+    return n;
 }
 
 /// What the encoder writes, framed onto the connection.

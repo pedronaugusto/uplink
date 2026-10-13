@@ -20,6 +20,7 @@ const hpack = wire.hpack;
 const Field = wire.fields.Field;
 const Context = @import("../Context.zig");
 const Socket = @import("../Socket.zig");
+const Timed = @import("../../transport/Timed.zig");
 
 const Session = @This();
 
@@ -287,6 +288,23 @@ pub const Stream = struct {
                 s.changed.wait(io, &held, .none) catch return error.Canceled;
             }
         }
+    }
+
+    /// Wait up to `timeout` for data, the stream's end or its reset; the
+    /// wait ends nothing when nothing comes.
+    pub fn awaitReadable(st: *Stream, io: Io, timeout: Io.Duration) Io.Cancelable!Timed.Readiness {
+        const s = st.session;
+        var held = try s.shared.acquire(io);
+        defer held.deinit(io);
+        const until = Io.Clock.awake.now(io).addDuration(timeout);
+        while (st.recv_len == 0 and !st.recv_end and st.reset_code == null and !held.value().closed) {
+            s.changed.wait(io, &held, .{ .deadline = .{ .raw = until, .clock = .awake } }) catch |err| switch (err) {
+                error.Timeout => return .timed_out,
+                error.Canceled => return error.Canceled,
+                error.WaiterLimit => return .unbounded,
+            };
+        }
+        return .ready;
     }
 
     /// Reset the stream with `code`.

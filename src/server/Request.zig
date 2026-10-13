@@ -42,6 +42,9 @@ remote: ?Io.net.IpAddress,
 secure: bool,
 /// What a router captured from the path, by name.
 params: Params = .{},
+/// The protocol an extended `CONNECT` (RFC 8441) asks the stream to
+/// carry, over HTTP/2: `websocket`, for one.
+protocol: ?[]const u8 = null,
 
 /// Private: the connection's I/O.
 socket: *Socket,
@@ -234,6 +237,17 @@ pub const Target = struct {
             if (target.len == 0 or target[0] == '/' or std.mem.findScalar(u8, target, '/') != null) return error.InvalidTarget;
             return .{ .path = "", .query = null, .authority = target };
         }
+        return resource(method, target);
+    }
+
+    /// The target of an extended `CONNECT` (RFC 8441): a path, as other
+    /// methods have, not an authority.
+    pub fn parseExtended(target: []const u8) Error!Target {
+        if (target.len == 0 or target[0] != '/') return error.InvalidTarget;
+        return resource(.CONNECT, target);
+    }
+
+    fn resource(method: Method, target: []const u8) Error!Target {
         if (std.mem.eql(u8, target, "*")) {
             if (!method.eql(.OPTIONS)) return error.InvalidTarget;
             return .{ .path = "", .query = null };

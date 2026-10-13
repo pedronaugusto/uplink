@@ -280,7 +280,9 @@ arrives and fails at the frame that breaks it (1007), refuses what RFC
 whole or in pieces. One task reads and one writes. A keepalive ping needs
 no task: a reader that waits `ping_interval` sends one, and closes after
 twice that. Compression is warp's; a server keeps no compressor between
-messages by default.
+messages by default. Over HTTP/2 the server accepts a WebSocket as an
+extended `CONNECT` (RFC 8441), the stream carrying its frames; the client
+opens its WebSocket over HTTP/1.1, which every WebSocket server speaks.
 
 **HTTP/2.** The server speaks HTTP/2 by ALPN over TLS, and over plain TCP by
 prior knowledge when `Options.h2c` says so. Its frames, HPACK and the
@@ -324,7 +326,10 @@ environment itself.
 ## Scope
 
 - HTTP/2 over TLS waits for cloak's full-duplex `tls.Session`. No server
-  push, which browsers dropped. There is no TLS engine of uplink's own (TLS is
+  push, which browsers dropped. The client does not open a WebSocket over
+  HTTP/2 (RFC 8441), only the server accepts one, so a server that speaks
+  HTTP/2 alone, with no HTTP/1.1 beside it, takes no WebSocket from uplink's
+  client. There is no TLS engine of uplink's own (TLS is
   cloak's), and HTTP/3 belongs to a QUIC package of its own.
 - No middleware framework, sessions, templating, JSON binding or reverse
   proxy: a handler is a function, and the rest is a program's own.

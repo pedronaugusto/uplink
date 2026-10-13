@@ -233,13 +233,15 @@ fn answer(session: *Session, handler: Handler, st: *Stream) void {
     defer finish(session, st);
     const head = h2.message.checkRequest(st.fields).?; // `startStream` refused a malformed head
     const target_text = if (head.method.eql(.CONNECT) and head.protocol == null) head.authority.? else head.path;
-    const target = Request.Target.parse(head.method, target_text) catch return st.reset(io, .protocol_error);
+    const parsed = if (head.protocol != null) Request.Target.parseExtended(target_text) else Request.Target.parse(head.method, target_text);
+    const target = parsed catch return st.reset(io, .protocol_error);
     var request: Request = .{
         .method = head.method,
         .target = target_text,
         .path = target.path,
         .query = target.query,
         .version = .h2,
+        .protocol = head.protocol,
         .headers = .init(head.fields),
         .host = head.authority orelse "",
         .remote = if (session.socket.stream.socket.address == .ip4 or session.socket.stream.socket.address == .ip6) session.socket.stream.socket.address else null,

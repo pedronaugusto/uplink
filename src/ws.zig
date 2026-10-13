@@ -70,18 +70,23 @@ pub const AcceptError = error{
 
 /// Answer `request` as a WebSocket handshake and take the connection over,
 /// into `out`, which must stay where it is while the connection is used.
+/// Over HTTP/2 the handshake is an extended `CONNECT` (RFC 8441), and the
+/// stream is taken over.
 pub fn accept(out: *Accepted, gpa: Allocator, io: Io, request: *ServerRequest, response: *ServerResponse, options: AcceptOptions) AcceptError!void {
     const h = &request.headers;
-    const handshake = request.method.eql(.GET) and request.version == .http1_1 and
-        h.hasToken("upgrade", "websocket") and h.hasToken("connection", "upgrade");
+    const over_h2 = request.version == .h2;
+    const handshake = if (over_h2)
+        request.method.eql(.CONNECT) and std.mem.eql(u8, request.protocol orelse "", "websocket")
+    else
+        request.method.eql(.GET) and request.version == .http1_1 and
+            h.hasToken("upgrade", "websocket") and h.hasToken("connection", "upgrade");
     const key = h.get("sec-websocket-key") orelse "";
-    if (!handshake or !ws.validKey(key)) return refuse(io, response, .bad_request, error.NotWebSocket);
+    if (!handshake or (!over_h2 and !ws.validKey(key))) return refuse(io, response, .bad_request, error.NotWebSocket);
     const version = std.mem.trim(u8, h.get("sec-websocket-version") orelse "", " \t");
     if (!std.mem.eql(u8, version, "13")) {
         response.header("Sec-WebSocket-Version", "13") catch return error.WriteFailed;
         return refuse(io, response, .upgrade_required, error.UnsupportedVersion);
     }
-    const accept_key = ws.acceptKey(key);
     var protocol: ?[]const u8 = null;
     if (options.protocols.len != 0) for (options.protocols) |p| {
         if (h.hasToken("sec-websocket-protocol", p)) {
@@ -90,11 +95,14 @@ pub fn accept(out: *Accepted, gpa: Allocator, io: Io, request: *ServerRequest, r
         }
     };
     const agreed = if (options.compression) |c| agreeDeflate(h, c) else null;
-    response.status = .switching_protocols;
+    response.status = if (over_h2) .ok else .switching_protocols;
     headers: {
-        response.header("Upgrade", "websocket") catch break :headers;
-        response.header("Connection", "Upgrade") catch break :headers;
-        response.header("Sec-WebSocket-Accept", &accept_key) catch break :headers;
+        if (!over_h2) {
+            const accept_key = ws.acceptKey(key);
+            response.header("Upgrade", "websocket") catch break :headers;
+            response.header("Connection", "Upgrade") catch break :headers;
+            response.header("Sec-WebSocket-Accept", &accept_key) catch break :headers;
+        }
         if (protocol) |p| response.header("Sec-WebSocket-Protocol", p) catch break :headers;
         if (agreed) |d| {
             var buf: [256]u8 = undefined;

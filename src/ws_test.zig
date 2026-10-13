@@ -20,13 +20,17 @@ const Running = struct {
     port: u16,
 
     fn start(gpa: std.mem.Allocator, handler: Server.Handler) !*Running {
+        return startWith(gpa, .{}, handler);
+    }
+
+    fn startWith(gpa: std.mem.Allocator, options: Server.Options, handler: Server.Handler) !*Running {
         const io = test_io.io();
         const r = try gpa.create(Running);
         errdefer gpa.destroy(r);
         r.listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
         errdefer r.listener.deinit(io);
         r.port = r.listener.socket.address.getPort();
-        r.server = .init(gpa, .{}, handler);
+        r.server = .init(gpa, options, handler);
         r.task = io.concurrent(Server.serve, .{ &r.server, io, &r.listener }) catch return error.SkipZigTest;
         return r;
     }
@@ -192,4 +196,126 @@ test "a ping is answered with its payload, and a close with the same code" {
     try testing.expectEqual(wire.ws.Opcode.pong, h.opcode);
     try testing.expectEqualStrings("are you there", got[size..][0..@intCast(h.len)]);
     try testing.expectEqual(@as(u16, 4000), closeCode(got).?);
+}
+
+/// One end of an HTTP/2 connection over a raw stream, frames read into
+/// events as a test asks for them.
+const RawH2 = struct {
+    const h2 = wire.h2;
+    const hpack = wire.hpack;
+    streams: [8]h2.Connection.Stream = @splat(.{}),
+    block: [4096]u8 = undefined,
+    field_bytes: [4096]u8 = undefined,
+    fields: [32]hpack.Field = undefined,
+    db: [8192]u8 = undefined,
+    de: [129]hpack.Table.Entry = undefined,
+    eb: [8192]u8 = undefined,
+    ee: [129]hpack.Table.Entry = undefined,
+    conn: h2.Connection = undefined,
+    stream: Io.net.Stream = undefined,
+    rbuf: [32 << 10]u8 = undefined,
+    wbuf: [32 << 10]u8 = undefined,
+    r: Io.net.Stream.Reader = undefined,
+    w: Io.net.Stream.Writer = undefined,
+
+    fn open(c: *RawH2, port: u16) !void {
+        const io = test_io.io();
+        c.stream = try (try Io.net.IpAddress.parse("127.0.0.1", port)).connect(io, .{ .mode = .stream });
+        c.r = c.stream.reader(io, &c.rbuf);
+        c.w = c.stream.writer(io, &c.wbuf);
+        c.conn = .init(.client, .{ .enable_push = false }, .{}, .{ .streams = &c.streams, .block = &c.block, .field_bytes = &c.field_bytes, .fields = &c.fields, .decoder_bytes = &c.db, .decoder_entries = &c.de, .encoder_bytes = &c.eb, .encoder_entries = &c.ee });
+        try c.conn.start(&c.w.interface);
+        try c.w.interface.flush();
+    }
+
+    fn close(c: *RawH2) void {
+        c.stream.close(test_io.io());
+    }
+
+    /// The next frame's event, the protocol's own answers sent.
+    fn next(c: *RawH2) !?h2.Connection.Event {
+        const head_bytes = try c.r.interface.peek(h2.head_len);
+        const head = h2.Head.parse(head_bytes[0..h2.head_len]);
+        const whole = try c.r.interface.peek(h2.head_len + head.len);
+        const payload = whole[h2.head_len..];
+        const event = try c.conn.receive(&c.w.interface, head, payload);
+        try c.w.interface.flush();
+        // An event's bytes live in the reader's buffer until the next read.
+        c.r.interface.toss(h2.head_len + head.len);
+        return event;
+    }
+};
+
+test "a WebSocket opens over HTTP/2 by an extended CONNECT, its frames the stream's data" {
+    const gpa = testing.allocator;
+    const running = try Running.startWith(gpa, .{ .h2c = .alongside_http1 }, .of(echo));
+    defer running.stop();
+    const c = try gpa.create(RawH2);
+    defer gpa.destroy(c);
+    c.* = .{};
+    try c.open(running.port);
+    defer c.close();
+    // The server's settings allow an extended CONNECT.
+    while (!c.conn.remote.enable_connect_protocol) _ = try c.next();
+    const id = try c.conn.open();
+    var scratch: [1024]u8 = undefined;
+    try c.conn.writeHeaders(&c.w.interface, id, &.{
+        .{ .name = ":method", .value = "CONNECT" },
+        .{ .name = ":protocol", .value = "websocket" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":authority", .value = "127.0.0.1" },
+        .{ .name = "sec-websocket-version", .value = "13" },
+        .{ .name = "sec-websocket-protocol", .value = "echo" },
+    }, false, &scratch);
+    try c.w.interface.flush();
+    const status, const chosen = while (true) {
+        const event = try c.next() orelse continue;
+        if (event != .headers) continue;
+        var status: []const u8 = "";
+        var chosen: []const u8 = "";
+        for (event.headers.fields) |f| {
+            if (std.mem.eql(u8, f.name, ":status")) status = f.value;
+            if (std.mem.eql(u8, f.name, "sec-websocket-protocol")) chosen = f.value;
+        }
+        break .{ try gpa.dupe(u8, status), try gpa.dupe(u8, chosen) };
+    };
+    defer gpa.free(status);
+    defer gpa.free(chosen);
+    try testing.expectEqualStrings("200", status);
+    try testing.expectEqualStrings("echo", chosen);
+    var frame_buf: [64]u8 = undefined;
+    _ = try c.conn.writeData(&c.w.interface, id, clientFrame(&frame_buf, 0x81, "hello over h2"), false);
+    try c.w.interface.flush();
+    var got: std.ArrayList(u8) = .empty;
+    defer got.deinit(gpa);
+    while (got.items.len < 2 + 13) {
+        const event = try c.next() orelse continue;
+        if (event == .data) {
+            try got.appendSlice(gpa, event.data.bytes);
+            try c.conn.giveBack(&c.w.interface, id, event.data.bytes.len);
+        }
+    }
+    const h, const size = (try wire.ws.parseHeader(got.items)).?;
+    try testing.expectEqual(wire.ws.Opcode.text, h.opcode);
+    try testing.expectEqualStrings("hello over h2", got.items[size..][0..@intCast(h.len)]);
+    // A close ends it: the server answers with its own and ends the stream.
+    var close_payload: [2]u8 = undefined;
+    std.mem.writeInt(u16, &close_payload, 1000, .big);
+    _ = try c.conn.writeData(&c.w.interface, id, clientFrame(&frame_buf, 0x88, &close_payload), true);
+    try c.w.interface.flush();
+    got.clearRetainingCapacity();
+    var ended = false;
+    while (!ended) {
+        const event = try c.next() orelse continue;
+        switch (event) {
+            .data => |d| {
+                try got.appendSlice(gpa, d.bytes);
+                ended = d.end_stream;
+            },
+            .reset => ended = true,
+            else => {},
+        }
+    }
+    try testing.expectEqual(@as(?u16, 1000), closeCode(got.items));
 }

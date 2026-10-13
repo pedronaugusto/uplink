@@ -377,7 +377,10 @@ the lock, and say so where they are declared.
 
 - **Above both, known to neither.** `ws` imports the client and the server;
   they hand over an upgraded stream (`Response.upgrade`, `Response.hijack`)
-  and know nothing of WebSocket. The codec (`wire.ws`) is sans-I/O.
+  and know nothing of WebSocket. The codec (`wire.ws`) is sans-I/O. On
+  HTTP/2, `hijack` after a 2xx to an extended `CONNECT` hands over the
+  stream instead of the connection, and a WebSocket over it is the same
+  `Conn`.
 - **A message is a stream.** The reader yields a message's payload as it
   arrives across its frames, answering control frames between them, so a
   message of any size costs its reader's buffer, and the limits are checked
