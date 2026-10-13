@@ -435,14 +435,9 @@ the lock, and say so where they are declared.
   a handshake that fails reports its alerts through the session's diagnostics.
   An end of stream without close_notify ends a body cleanly, since HTTP says
   where a body ends.
-- **TLS 1.2 and RSA client keys wait for cloak.** The engine uplink used before
-  was std's TLS client with client authentication added, which also spoke TLS
-  1.2 and signed with RSA. cloak's is TLS 1.3, signing with ECDSA on P-256
-  and P-384 and Ed25519; TLS 1.2 and RSA-PSS signing come with its next phase.
-  Until then a server that speaks only TLS 1.2 is refused with a
-  `protocol_version` alert, and a client key that is RSA fails the handshake
-  with `ClientCertificateSchemeUnsupported`. Neither is hidden behind a
-  second engine.
+- **TLS 1.2 is cloak's too.** A server that speaks nothing newer is answered
+  in TLS 1.2 with ECDHE, AEAD suites and the extended master secret; RSA key
+  exchange, CBC and legacy suites are refused by cloak, not filtered here.
 - **Authorities are cloak's snapshots.** An immutable `Trust.Snapshot` is
   shared by any number of clients; a client without one builds the system's
   once, at its first verifying handshake, and keeps it until it is deinitialized.

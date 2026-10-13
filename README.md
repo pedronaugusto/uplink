@@ -228,13 +228,11 @@ put away idle gives its socket buffers back. A small exchange on a kept
 connection is one `writev`, one read and one look at the socket, and allocates
 nothing, cookies and a kept answer to a challenge included.
 
-**TLS** is [cloak](https://github.com/pedronaugusto/cloak)'s, TLS 1.3 only for now:
-a server that speaks TLS 1.2 and not 1.3 is turned away with a `protocol_version`
-alert, and TLS 1.2 comes with cloak's own next phase. A client answers a server's
-request for a certificate with ECDSA on P-256 and P-384 or Ed25519 keys, read by
-cloak from PKCS #8, SEC 1, encrypted PKCS #8 and OpenSSL's older encrypted PEM;
-an RSA client key is refused with `ClientCertificateSchemeUnsupported` until
-cloak signs with RSA. `tls.ClientOptions` takes a cloak `Trust.Snapshot` for the
+**TLS** is [cloak](https://github.com/pedronaugusto/cloak)'s: TLS 1.3, and TLS 1.2 with
+ECDHE, AEAD suites and the extended master secret for servers that speak nothing newer.
+A client answers a server's request for a certificate with ECDSA on P-256 and P-384,
+Ed25519 or RSA keys, read by cloak from PKCS #8, SEC 1, PKCS #1, encrypted PKCS #8
+and OpenSSL's older encrypted PEM. `tls.ClientOptions` takes a cloak `Trust.Snapshot` for the
 authorities, which clients may share; without one the client reads the system's
 once, at its first verifying handshake. Each handshake checks certificates at
 the current real time, and a handshake that fails says why in
@@ -347,8 +345,6 @@ environment itself.
   proxy: a handler is a function, and the rest is a program's own.
 - A file is sent through the response's writer, read and written with the
   activity timeout kept: no `sendfile`, which no `Io` bounds by a deadline yet.
-- TLS 1.3 only and no RSA client keys, until cloak adds TLS 1.2 and RSA-PSS
-  signing.
 - No Brotli decoding: such a body is handed over as it came, with its
   `Content-Encoding`.
 - No NTLM, Negotiate, PAC files, OCSP or `.netrc`, and no HTTP cache.
@@ -422,9 +418,8 @@ comptime routes, and files with every condition and range. Two tests
 count what an exchange costs on a warm client: no allocation, with cookies and
 a kept answer too, and one write, one read and one look at the socket. TLS is
 proved against `openssl s_server` with certificates made for each run in a
-scratch `HOME`: TLS 1.3 (and a TLS 1.2 server turned away), authorities given and
-refused, client certificates of the key kinds cloak signs with and an RSA one
-refused, a certificate checked at a stepped clock, and TLS inside a `CONNECT`
+scratch `HOME`: TLS 1.3 and a server that speaks only TLS 1.2, authorities given and
+refused, client certificates of every key kind cloak signs with, RSA included, a certificate checked at a stepped clock, and TLS inside a `CONNECT`
 tunnel and SOCKS. HTTP/2 is driven from both ends: the client against the
 server by prior knowledge, bodies past every window both ways, trailers,
 `Expect: 100-continue`, sixteen requests at once over one connection, and a

@@ -156,7 +156,7 @@ pub fn handshake(c: *Socket, options: tls.ServerOptions) error{Failed}!void {
     c.phase = .handshake;
     c.until = if (s.options.timeouts.handshake) |t| Io.Clock.awake.now(io).addDuration(span.toIo(t)) else null;
     var report: cloak.tls.Session.Diagnostics = .{};
-    c.session.accept(s.gpa, io, &c.input.interface, &c.output.interface, .{
+    c.session.accept(s.gpa, io, &c.input.interface, &c.output.interface, read_buffer, write_buffer, .{
         .credentials = options.credentials,
         .alpn = if (s.options.http2) tls.server_protocols else tls.server_protocols_h1,
         .client_auth = options.client_certificate,
@@ -166,7 +166,7 @@ pub fn handshake(c: *Socket, options: tls.ServerOptions) error{Failed}!void {
         // the end of the connection, not an attack on a body.
         .eof = .allow,
         .diagnostics = &report,
-    }, read_buffer, write_buffer) catch |err| {
+    }) catch |err| {
         pool.release(io, read_buffer);
         pool.release(io, write_buffer);
         if (s.options.observer) |o| o.emit(.{ .handshake_failed = .{ .error_name = @errorName(err) } });
