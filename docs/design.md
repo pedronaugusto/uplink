@@ -1,6 +1,6 @@
 # uplink design
 
-uplink is an HTTP/1.1 client with the codecs it is built from. This page says
+uplink is an HTTP/1.1 client and server with the codecs they are built from. This page says
 how it is put together and why: the layers, who owns which state, what always
 holds, and the decisions that shaped it. The README says what it does and how
 to use it.
@@ -8,11 +8,15 @@ to use it.
 ## Layers
 
 ```
+ server     Server, its connections, Request, Response, Handler; Router and the
+            comptime routes; Files
  client     Client, Request, Response, Outgoing; the policy: redirects, retries,
             origin authentication, cookies, decoding, hooks
  pool       which connection serves which exchange: idle sets, route limits, waiters
+ coding     warp's decoders and encoders, a body's codings undone or applied
  transport  one connection: TCP, then TLS to a proxy, a CONNECT or SOCKS tunnel,
-            TLS to the server; deadlines; the buffers connections borrow
+            TLS to the server; deadlines; the buffers connections borrow; a
+            body as its framing delimits it; a head gathered from a socket
  net        names and sockets: lookup, resolvers, Happy Eyeballs, socket options
  tls        how connections use cloak's TLS: client options, what an alert says
             about a client certificate, the shape of the buffers
@@ -79,6 +83,9 @@ because a module's tests run only from the build that has it as root.
 | Name answers | `net.Resolver.Cache` (a client's own) around the caller's or the system's resolver |
 | Body framing state | the exchange's `client.Body` |
 | Everything a request of one client shares | `client.Shared` |
+| What a server's connections share: options, buffers, encoders, deadlines, counters, the live list | `server.Context` |
+| One served connection's socket, TLS session and wait | `server.Socket` |
+| The patterns and their tree | `server.Router` |
 
 A lock sits beside the data it guards, in aegis's `BlockingGuarded`, so the
 state cannot be reached without it. The few counters read without the lock
@@ -303,6 +310,69 @@ the lock, and say so where they are declared.
   suffix list is a seam (`Options.public_suffix`), not a table in the package;
   without one a cookie for a domain of one label is refused.
 
+### The server
+
+- **The server is a DAG of its own.** `Context` holds what connections share
+  and knows nothing of requests; `Socket` is one connection's I/O and its
+  deadlines; `Request` and `Response` sit on a `Socket`; `Handler` names
+  them; `Connection` is the loop that reads requests and calls the handler;
+  `Server` accepts. Nothing imports upward, so the response cannot reach the
+  accept loop and the context cannot reach a handler.
+- **One way to time an operation.** The client's connections and the
+  server's share `transport.Timed`: an operation and its deadline, kept by
+  reactor's `Deadlines` or the `Io`'s own timeout, or counted as unkept.
+  Each side only decides which deadline: the client the nearest of its
+  limits, the server the wait it is in (handshake, idle, head, answer).
+- **One way to read a head.** `transport.Head` gathers a head into a pooled
+  buffer with room for its fields and a body buffer, taking exactly its bytes
+  from the connection, for the client's responses and the server's requests
+  alike, so a head's fields never point into a buffer the body read refills.
+- **A head timeout ends the connection without a 408.** A deadline that
+  fires poisons its socket, as on the client, so nothing can be written
+  after it: the client of a slowloris gets a closed connection, as nginx and
+  Go give it.
+- **Nothing goes out before it must.** A response's fields are kept as their
+  lines until the head goes, at the first drain of its 4 KiB body buffer or
+  at `end`, so a handler sets status and fields in any order and a small
+  body gets its `Content-Length` counted. A declared length is held to.
+- **A failure is never a short success.** Before the head, a 500; after it,
+  what went out is flushed and the connection closed without a chunked
+  body's last chunk.
+- **Shutdown knows which connections are idle.** The live list marks a
+  connection idle under its lock while it waits for a request; `shutdown`
+  ends those sockets at once and gives the rest their grace.
+- **Compression is negotiated, not assumed.** The client's weights decide
+  between the codings offered, ties going to the server's order; a body
+  shorter than `min_size`, of a type not listed, already coded, partial or
+  for a `HEAD` goes as it is; a whole body is compressed into a buffer and
+  sent with its own length when that is shorter, a streamed one is chunked.
+  Encoders live in pooled blocks of their own.
+- **No `sendfile`.** `Io.Writer.sendFile` goes through `netWriteFile`, which
+  no deadline bounds; a file is read and written through the response's
+  writer with the activity timeout kept, until reactor's deadlines cover it.
+
+### Routing
+
+- **Go 1.22's semantics, one implementation.** `Pattern` parses a pattern
+  and relates two of them (equivalent, more specific, more general,
+  disjoint, overlapping), purely, so the runtime `Router` and the comptime
+  `Routes` refuse the same conflicts, one at `add`, the other at compile
+  time.
+- **A tree of segments.** Literal children are sorted for a binary search;
+  one wildcard child serves every name, the names belonging to the pattern;
+  the routes that end at a node, take the rest from it or end with `{$}` sit
+  on it. A match tries literal before wildcard before the rest and backs out
+  of a branch with no route for the method; conflicts having been refused,
+  the first route found is the most specific. A match allocates nothing;
+  captures are unescaped into the request's scratch buffer.
+- **Comptime routes are an ordered list.** The patterns are sorted at compile
+  time, the more specific first, and matched in that order with every
+  literal comparison unrolled; a handler's captures are a struct made from
+  its pattern.
+- **Both routers answer alike.** `Router.dispatch` does the cleaning
+  redirects, the subtree redirect, the 405 with `Allow` and the 404 for any
+  table with `find`, `run` and `notFound`.
+
 ### TLS
 
 - **TLS is cloak's, and uplink owns only its HTTP side.** The engine, the
@@ -357,8 +427,8 @@ point. The shape is in the README; what the design depends on is:
 
 ## Left out, and why
 
-- **HTTP/2, a server, WebSocket and a TLS engine of uplink's own** are not in
-  the package. The pool's `Kind`, `Version` and the `Session` layer assume
+- **HTTP/2 and WebSocket** are not in the package yet, and **a TLS engine of
+  uplink's own** never will be. The pool's `Kind`, `Version` and the `Session` layer assume
   neither HTTP/1.1 alone nor one TLS client.
 - **HTTP/3** belongs to a QUIC package of its own: QUIC is a transport, as large
   as this package, with users that have no HTTP.

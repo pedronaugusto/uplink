@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `Server`: an HTTP/1.1 server on any `std.Io`, evented on reactor's runtime. Requests are read strictly (bare LF, folded fields, request smuggling, `Host`, limits), pipelined requests answered in order, every wait bounded (head, idle, activity, handshake), `100 Continue` sent when the body is first read, TLS terminated by cloak with client certificates, request bodies decoded and responses compressed through warp, `Response.hijack` after a 101, trailers both ways, a connection limit, an observer, and a graceful `shutdown`.
+- `server.Router`: Go 1.22's patterns and precedence on a tree of segments, conflicts refused at `add`, 405 with `Allow`, clean-path and subtree redirects, captures unescaped; `server.Routes`: the same at compile time, conflicts a compile error and captures a struct.
+- `server.Files`: a directory served with `Content-Type`, `ETag` and `Last-Modified`, conditional requests, byte ranges one or several, and index files.
+- `wire.range` (`Range` and `Content-Range`), `wire.multipart.Reader` (parts read as they arrive), `wire.coding.negotiate` (`Accept-Encoding`), `wire.h1.writeStatusLine`, `wire.fields.ListIterator.contains`.
+
 ## [0.3.0] - 2026-10-13
 
 ### Breaking

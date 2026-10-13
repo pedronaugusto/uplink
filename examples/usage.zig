@@ -1,11 +1,10 @@
-//! A client sends a request and reads its response, on a kept connection,
-//! through the same calls whether the URL is `http` or `https` and whether
-//! a proxy stands between.
+//! A server answers through a router, and a client calls it: a request
+//! with a body sent over a kept connection, through the same calls whether
+//! the URL is `http` or `https` and whether a proxy stands between.
 //!
-//! `zig build examples` builds AND runs this against a server it starts on
-//! loopback; `zig build docs -- usage` extracts the region between the
-//! usage markers into README.md, so the snippet a reader copies is code CI
-//! executes.
+//! `zig build examples` builds AND runs this; `zig build docs -- usage`
+//! extracts the region between the usage markers into README.md, so the
+//! snippet a reader copies is code CI executes.
 
 const std = @import("std");
 const Io = std.Io;
@@ -20,17 +19,38 @@ pub fn main(init: std.process.Init) !void {
     try runtime.init(gpa, .{ .environ = init.minimal.environ });
     defer runtime.deinit();
     try runtime.start();
-    var server: Answering = undefined;
-    try server.start(runtime.io());
-    defer server.stop(runtime.io());
-    var url_buffer: [64]u8 = undefined;
-    const url = try std.mem.print(&url_buffer, "http://127.0.0.1:{d}/hello", .{server.port});
 
     // --- README:usage ---
     // Any `std.Io`: here a reactor runtime's, the evented one.
     const io = runtime.io();
 
-    // One client for the program: it keeps connections for reuse, follows
+    // A server: patterns with Go 1.22's semantics, routed to handlers,
+    // each given the request, with what the router captured, and the
+    // response that answers it.
+    const Echo = struct {
+        fn handle(hio: Io, request: *uplink.server.Request, response: *uplink.server.Response) anyerror!void {
+            var buffer: [256]u8 = undefined;
+            const body = try request.reader(hio).readSliceShort(&buffer);
+            try response.header("Content-Type", "text/plain");
+            const w = try response.writer(hio);
+            try w.print("{s}: {s}", .{ request.param("name").?, buffer[0..body] });
+            try response.end(hio);
+        }
+    };
+    var router: uplink.server.Router = .init(gpa);
+    defer router.deinit();
+    try router.add("POST /echo/{name}", .of(Echo.handle));
+    var server: uplink.Server = .init(gpa, .{ .compression = .{} }, router.handler());
+    defer server.deinit(io);
+    var listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    var serving = try io.concurrent(uplink.Server.serve, .{ &server, io, &listener });
+    defer {
+        server.shutdown(io);
+        serving.await(io) catch |err| std.log.err("serve: {t}", .{err});
+    }
+
+    // A client for the program: it keeps connections for reuse, follows
     // redirects, tries failed requests again where that is safe, and may be
     // shared by several tasks. Cookies go in a jar of the caller's.
     var jar: uplink.CookieJar = .init(gpa, .{});
@@ -42,12 +62,14 @@ pub fn main(init: std.process.Init) !void {
     });
     defer client.deinit(io);
 
+    var url_buffer: [64]u8 = undefined;
+    const url = try std.mem.print(&url_buffer, "http://127.0.0.1:{d}/echo/ping", .{listener.socket.address.getPort()});
     var diagnostics: uplink.Diagnostics = .{};
     var response = client.send(io, .{
         .method = .POST,
         .url = url,
         .headers = &.{.{ .name = "Content-Type", .value = "text/plain" }},
-        .body = .{ .bytes = "ping" },
+        .body = .{ .bytes = "hello" },
         // The whole request, retries and redirects included.
         .timeout = .{ .duration = .{ .raw = .fromSeconds(60), .clock = .awake } },
         .diagnostics = &diagnostics,
@@ -60,39 +82,6 @@ pub fn main(init: std.process.Init) !void {
     std.debug.assert(response.status == .ok);
     const body = try response.collect(gpa, io, .limited(1 << 20));
     defer gpa.free(body);
-    std.debug.assert(std.mem.eql(u8, body, "pong"));
+    std.debug.assert(std.mem.eql(u8, body, "ping: hello"));
     // --- README:usage ---
 }
-
-/// A server that answers `pong` to every request, until stopped.
-const Answering = struct {
-    listener: Io.net.Server,
-    port: u16,
-    task: Io.Future(void),
-
-    fn start(a: *Answering, io: Io) !void {
-        a.listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
-        errdefer a.listener.deinit(io);
-        a.port = a.listener.socket.address.getPort();
-        a.task = try io.concurrent(serve, .{ io, &a.listener });
-    }
-
-    fn stop(a: *Answering, io: Io) void {
-        a.task.cancel(io);
-        a.listener.deinit(io);
-    }
-
-    fn serve(io: Io, listener: *Io.net.Server) void {
-        const stream = listener.accept(io) catch return;
-        defer stream.close(io);
-        var read_buffer: [4096]u8 = undefined;
-        var write_buffer: [256]u8 = undefined;
-        var r = stream.reader(io, &read_buffer);
-        var w = stream.writer(io, &write_buffer);
-        while (std.mem.find(u8, r.interface.buffered(), "ping") == null) r.interface.fillMore() catch return;
-        w.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\npong") catch return;
-        w.interface.flush() catch return;
-        // Wait for the client to close the connection.
-        while (true) r.interface.fillMore() catch return;
-    }
-};

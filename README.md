@@ -1,6 +1,6 @@
 # uplink
 
-uplink is an HTTP/1.1 client for Zig. It keeps connections for reuse and
+uplink is HTTP for Zig: a client and a server. The client keeps connections for reuse and
 shares them between tasks, limits them per route when asked, follows
 redirects, tries failed requests again where that is safe, answers servers'
 and proxies' challenges, keeps cookies, and goes through HTTP, HTTPS and SOCKS
@@ -8,9 +8,13 @@ proxies with TLS to the server inside the tunnel. It presents client
 certificates, keeps connect, handshake, activity, low-speed and per-request
 deadlines without a task per connection, races a name's addresses by Happy
 Eyeballs, and decodes gzip, deflate and zstd bodies with
-[warp](https://github.com/pedronaugusto/warp), every checksum verified. It runs on any `std.Io`
-and evented on [reactor](https://github.com/pedronaugusto/reactor)'s runtime. A warm client makes a
-request without allocating. The codecs it is built from, HTTP/1.1 heads and
+[warp](https://github.com/pedronaugusto/warp), every checksum verified. The
+server reads requests strictly, pipelined ones in order, keeps every wait to a
+timeout, terminates TLS, compresses responses, serves files with their
+validators and ranges, and routes by Go 1.22's patterns at run time or at
+compile time. Both run on any `std.Io` and evented on
+[reactor](https://github.com/pedronaugusto/reactor)'s runtime, and allocate
+nothing per request once warm. The codecs it is built from, HTTP/1.1 heads and
 chunked bodies, header fields, dates, cookies, authentication challenges,
 Server-Sent Events, form and multipart bodies and SOCKS, are public and do no
 I/O.
@@ -42,9 +46,8 @@ two are the same declarations, not copies.
 
 ## Usage
 
-[examples/usage.zig](examples/usage.zig) sends a request with a body and
-reads the response, against a server it starts on loopback, on a reactor
-runtime.
+[examples/usage.zig](examples/usage.zig) starts a server with a router on
+loopback and sends it a request with a body, on a reactor runtime.
 
 <!-- BEGIN GENERATED zig build docs -- usage -->
 ```zig
@@ -53,7 +56,33 @@ const uplink = @import("uplink");
 // Any `std.Io`: here a reactor runtime's, the evented one.
 const io = runtime.io();
 
-// One client for the program: it keeps connections for reuse, follows
+// A server: patterns with Go 1.22's semantics, routed to handlers,
+// each given the request, with what the router captured, and the
+// response that answers it.
+const Echo = struct {
+    fn handle(hio: Io, request: *uplink.server.Request, response: *uplink.server.Response) anyerror!void {
+        var buffer: [256]u8 = undefined;
+        const body = try request.reader(hio).readSliceShort(&buffer);
+        try response.header("Content-Type", "text/plain");
+        const w = try response.writer(hio);
+        try w.print("{s}: {s}", .{ request.param("name").?, buffer[0..body] });
+        try response.end(hio);
+    }
+};
+var router: uplink.server.Router = .init(gpa);
+defer router.deinit();
+try router.add("POST /echo/{name}", .of(Echo.handle));
+var server: uplink.Server = .init(gpa, .{ .compression = .{} }, router.handler());
+defer server.deinit(io);
+var listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
+defer listener.deinit(io);
+var serving = try io.concurrent(uplink.Server.serve, .{ &server, io, &listener });
+defer {
+    server.shutdown(io);
+    serving.await(io) catch |err| std.log.err("serve: {t}", .{err});
+}
+
+// A client for the program: it keeps connections for reuse, follows
 // redirects, tries failed requests again where that is safe, and may be
 // shared by several tasks. Cookies go in a jar of the caller's.
 var jar: uplink.CookieJar = .init(gpa, .{});
@@ -65,12 +94,14 @@ var client: uplink.Client = .init(gpa, .{
 });
 defer client.deinit(io);
 
+var url_buffer: [64]u8 = undefined;
+const url = try std.mem.print(&url_buffer, "http://127.0.0.1:{d}/echo/ping", .{listener.socket.address.getPort()});
 var diagnostics: uplink.Diagnostics = .{};
 var response = client.send(io, .{
     .method = .POST,
     .url = url,
     .headers = &.{.{ .name = "Content-Type", .value = "text/plain" }},
-    .body = .{ .bytes = "ping" },
+    .body = .{ .bytes = "hello" },
     // The whole request, retries and redirects included.
     .timeout = .{ .duration = .{ .raw = .fromSeconds(60), .clock = .awake } },
     .diagnostics = &diagnostics,
@@ -83,7 +114,7 @@ defer response.deinit(io);
 std.debug.assert(response.status == .ok);
 const body = try response.collect(gpa, io, .limited(1 << 20));
 defer gpa.free(body);
-std.debug.assert(std.mem.eql(u8, body, "pong"));
+std.debug.assert(std.mem.eql(u8, body, "ping: hello"));
 ```
 <!-- END GENERATED -->
 
@@ -97,8 +128,8 @@ from it.
 
 The package is layered, and each layer owns its state alone: `wire` (the
 codecs, sans I/O) under `tls` (the HTTP side of cloak's TLS) and `net`, under `transport` (one connection),
-under `pool` (which connection serves which request), under `client` (the
-policy). The layer rule is checked in CI. [docs/design.md](docs/design.md)
+under `coding` (warp's codecs, both ways), under `pool` (which connection
+serves which request), under `client` (the policy) and `server`. The layer rule is checked in CI. [docs/design.md](docs/design.md)
 gives the layers, who owns which state, what always holds, and the reasons
 behind the decisions.
 
@@ -201,6 +232,51 @@ once, at its first verifying handshake. Each handshake checks certificates at
 the current real time, and a handshake that fails says why in
 `Diagnostics.tls_error` and `tls_alert`.
 
+**The server.** `Server.serve` accepts on a listener until `shutdown`, each
+connection a task of its own; on an `Io` with no task to spare it serves one
+connection at a time, and never deadlocks. `serveConnection` serves one a
+caller accepted. A request is read strictly, as RFC 9112 asks of a server: a
+bare LF or a folded field is a 400, a request with both `Transfer-Encoding`
+and `Content-Length`, or whose last coding is not `chunked`, is a 400 that
+closes its connection (the request-smuggling class), an HTTP/1.1 request
+without exactly one `Host` is a 400, a head past `max_head` (16 KiB by
+default) a 431, a body past `max_body` a 413, an expectation other than
+`100-continue` a 417. Pipelined requests are answered in order. A `Response`
+sends nothing until it must: a body that fits its buffer goes out with its
+length counted, a longer one is chunked, a `HEAD` gets the head a `GET` would,
+and a handler that fails before its head gets a 500 while one that fails after
+it has its connection cut, so its client sees a truncation and never a short
+success. `100 Continue` goes out when the handler first reads the body.
+Request bodies under gzip, deflate or zstd are decoded, their checksums
+verified, and responses of a compressible type are compressed when the client
+accepts zstd or gzip (`Options.compression`). Every wait is bounded: the whole
+of a request's head (10 seconds, however slowly it trickles in), the time
+between requests (60), each read and write while answering (30), the TLS
+handshake (10), by the same reactor deadlines the client keeps. `shutdown`
+stops accepting, ends idle connections at once, lets requests under way finish
+with `Connection: close` for up to `Timeouts.shutdown`, then ends the rest.
+`Response.hijack` hands the connection to the handler after a 101, and
+`trailer` writes a chunked body's trailer. TLS termination is cloak's, client
+certificates included.
+
+**Routing.** `server.Router` holds patterns with Go 1.22's `ServeMux`
+grammar and semantics: `[METHOD ][HOST]/PATH`, `{name}` for a segment,
+`{name...}` for the rest, `{$}` for the end, a trailing `/` for a subtree.
+The most specific pattern wins whatever the order they were added in, two
+that conflict are refused at `add` naming the first, `GET` serves `HEAD`, a
+path that matches only under other methods is a 405 with `Allow`, a path that
+is not clean or names a subtree without its `/` is redirected, and segments
+are matched with their escapes undone. Patterns live in a tree of segments,
+and a match allocates nothing. `server.Routes` takes the patterns at compile
+time: a conflict is a compile error, and each handler takes its captures as
+a struct, so `captures.id` exists or the program does not build.
+
+**Files.** `server.Files` serves a directory: `Content-Type` by extension,
+`Last-Modified` and a strong `ETag`, the conditional requests of RFC 9110 in
+their order, one byte range or several as `multipart/byteranges` (a request
+for overlapping ranges past the whole is answered whole), the directory's
+index, and nothing outside the root.
+
 **Proxies.** `Proxy.parse` reads `host:port` or a URL with scheme `http`,
 `https`, `socks4`, `socks4a`, `socks5` or `socks5h`. `Proxy.fromEnvironment`
 picks a proxy for a URL from an environment the caller passes, by one of two
@@ -210,8 +286,12 @@ environment itself.
 
 ## Scope
 
-- HTTP/1.1 only, client only. No HTTP/2, server, WebSocket or TLS engine of
-  uplink's own (TLS is cloak's); HTTP/3 belongs to a QUIC package of its own.
+- HTTP/1.1 only. HTTP/2 and WebSocket come next; there is no TLS engine of
+  uplink's own (TLS is cloak's), and HTTP/3 belongs to a QUIC package of its own.
+- No middleware framework, sessions, templating, JSON binding or reverse
+  proxy: a handler is a function, and the rest is a program's own.
+- A file is sent through the response's writer, read and written with the
+  activity timeout kept: no `sendfile`, which no `Io` bounds by a deadline yet.
 - TLS 1.3 only and no RSA client keys, until cloak adds TLS 1.2 and RSA-PSS
   signing.
 - No Brotli decoding: such a body is handed over as it came, with its
@@ -223,8 +303,9 @@ environment itself.
   one label.
 - No event loop of its own: uplink runs on the `Io` it is given, and is evented
   on reactor's runtime.
-- A client must not move once it has made a request, and a response once
-  its reader has been asked for.
+- A client must not move once it has made a request, a server once it
+  serves, and a request or response once its reader or writer has been
+  asked for.
 
 ## Platforms
 
@@ -246,7 +327,9 @@ reactor's runtime both are kept on every system.
   the client.
 - [reactor](https://github.com/pedronaugusto/reactor) is the evented `std.Io`,
   and owns the sockets' deadlines, name lookup and connecting. It is a lazy
-  dependency, fetched only for the client.
+  dependency, fetched only for the client and the server.
+- [warp](https://github.com/pedronaugusto/warp) decodes and encodes gzip,
+  deflate and zstd, every checksum verified. It is a lazy dependency too.
 - [preflight](https://github.com/pedronaugusto/preflight) runs the source checks,
   the tests and CI.
 - [shakedown](https://github.com/pedronaugusto/shakedown) is the layered `Io`,
@@ -273,7 +356,14 @@ one client and waiting on a full route, redirects and their method rules,
 retries by status and by failure, 401s answered with Basic, Digest and Bearer,
 cookies across a redirect, `Expect: 100-continue`, upgrades and tunnels,
 trailers, proxies from the environment, and the observer and prepare hook.
-Happy Eyeballs is held to its timing against a black-holed address. Two tests
+Happy Eyeballs is held to its timing against a black-holed address. The
+server is driven by the client and by raw bytes: kept and pipelined
+connections, every refusal of the smuggling class and every limit, `HEAD`,
+handlers failing before and after their head, request bodies decoded and
+responses compressed, TLS with a required client certificate, the head,
+idle and shutdown timeouts on real sockets, an upgrade, trailers both ways,
+the connection limit, the router's precedence, conflicts, 405s and redirects,
+comptime routes, and files with every condition and range. Two tests
 count what an exchange costs on a warm client: no allocation, with cookies and
 a kept answer too, and one write, one read and one look at the socket. TLS is
 proved against `openssl s_server` with certificates made for each run in a
