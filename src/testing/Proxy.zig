@@ -275,6 +275,11 @@ fn pump(io: Io, r: *Io.Reader, to: Io.net.Stream) void {
         r.tossBuffered();
         w.interface.flush() catch break;
     }
+    // The end goes on even when the proxy is stopping: a cancelation that
+    // skipped it left the other direction waiting on a peer that waits for
+    // more, and `stop` waiting on both.
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
     // glint-ignore: Z026 -- either side ending ends the tunnel; there is nothing to report
     to.shutdown(io, .send) catch {};
 }
