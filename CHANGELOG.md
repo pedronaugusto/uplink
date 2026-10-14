@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Pins reactor 0.4.2 (shuttle 0.2.1: one aegis in a plain `zig build` consumer's graph), shakedown 0.4.2 and preflight 0.5.0.
+
+### Fixed
+
+- HTTP/2 reads in one task while the streams write in others, and ThreadSanitizer found what they shared without a lock; each now has one owner or a lock. A socket keeps a read's deadline apart from a write's, so a write no longer replaced the deadline of a read under way, or left it unarmed once done (on any `Io` but reactor's runtime, an idle HTTP/2 connection's read could then wait past its timeout). The server's HTTP/2 writes keep the activity timeout whatever the reading task waits for; a stream never moves its connection's `Io`, and reads its state (the body's end, its trailers, a reset) under the session's lock; a connection's failure is recorded atomically. The client's shared connection keeps the `Io` it was opened on, and only its reads, which one request makes at a time, count toward the low-speed window.
+
 ## [0.4.0] - 2026-10-14
 
 ### Breaking
