@@ -21,8 +21,8 @@
         },
 
         .reactor = .{
-            .url = "git+https://github.com/pedronaugusto/reactor?ref=v0.3.1#786b20d151a1dff6fe474364a291bf86ac856703",
-            .hash = "reactor-0.3.1-MjQ-WGNKEgAIrpnvwVnD2orGD6-zzOP69BuJ7WjntKdj",
+            .url = "git+https://github.com/pedronaugusto/reactor?ref=v0.4.2#19d10e152043b9f1c524757d240a9cd1bf2ba136",
+            .hash = "reactor-0.4.2-MjQ-WLF8EgDg1DwDFX1iaaNsK5R8Xqb0qcBrrjp_qm8C",
             .lazy = true,
         },
 
@@ -40,13 +40,13 @@
     },
     .dev_dependencies = .{
         .preflight = .{
-            .url = "git+https://github.com/pedronaugusto/preflight?ref=v0.4.5#22e928fba1b897fd5888cc7ef92037b29e1d8e06",
-            .hash = "preflight-0.4.5-LX1ZwgeZDgD4Mmm3Cxjy04JQkPBUlcYKDQa9BPv4_GWW",
+            .url = "git+https://github.com/pedronaugusto/preflight?ref=v0.5.0#33bdaa6f5a8d2a622e48ebb72287824d63d6764e",
+            .hash = "preflight-0.5.0-LX1ZwoZuDwCA6HdW2bN8u9WkQKetRUvVe_IfXcGvcFoV",
         },
 
         .shakedown = .{
-            .url = "git+https://github.com/pedronaugusto/shakedown?ref=v0.4.1#1fd9fd619b105a65c7478525dfd83f24004e1b8a",
-            .hash = "shakedown-0.4.1-BR8U4z_qFQBovSS7wrfzvzZO0Vb8tTGeXEXcEUBXzxQE",
+            .url = "git+https://github.com/pedronaugusto/shakedown?ref=v0.4.2#93217f8d5c29d3f72b94da9cf961df321bba8430",
+            .hash = "shakedown-0.4.2-BR8U4-oKFgD-vju9MmZmggQ2e43dhqBS6KhKONWGXV62",
         },
     },
 }
