@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-14
+
 ### Breaking
 
 - `pool.Pool.Kind` has an `h2` arm and `Pool.Acquired` a `shared` one, for HTTP/2 connections; `client.Run.Lease` holds a `Pool.Kind`.
