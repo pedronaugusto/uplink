@@ -116,7 +116,8 @@ pub fn startH2(c: *Socket) void {
 /// The protocol ALPN agreed, empty without TLS or without one.
 pub fn alpn(c: *const Socket) []const u8 {
     if (!c.secure) return "";
-    return c.session.info().alpn;
+    const info = c.session.info() orelse return "";
+    return info.alpn;
 }
 
 /// Answer a request: each operation ends at the activity timeout.

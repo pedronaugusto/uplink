@@ -419,9 +419,9 @@ the lock, and say so where they are declared.
   response and trailer blocks and turns HTTP/1.1 field lines into fields,
   dropping those of a connection's own; the server and the client both use
   it.
-- **HTTP/2 over TLS waits for cloak.** A connection reads in one task while
-  others write; cloak's `tls.Session` is single-duplex until its next change,
-  so TLS agrees HTTP/1.1 by ALPN until then (`tls.h2_over_tls`).
+- **HTTP/2 over TLS rests on a full-duplex session.** A connection reads in
+  one task while others write; cloak's `tls.Session` (0.5.0 on) keeps the two
+  halves apart, so both ends offer `h2` first by ALPN.
 
 ### TLS
 

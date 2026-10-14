@@ -964,3 +964,56 @@ test "a query goes as an HTTP POST and its answer comes back with the query's id
     try testing.expectEqual(1, got.len);
     try testing.expectEqualSlices(u8, &.{ 198, 51, 100, 7 }, &got[0].ip4.bytes);
 }
+
+test "over TLS both ends agree HTTP/2 by ALPN, and requests at once share its connection" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const pki = try openssl.Pki.make(gpa, io);
+    defer pki.destroy();
+    const cert = try pki.read(io, "server-ec.pem");
+    defer gpa.free(cert);
+    const key_pem = try pki.read(io, "server-ec.key");
+    defer gpa.free(key_pem);
+    const key = try cloak.PrivateKey.parse(gpa, key_pem, .{});
+    defer key.deinit();
+    var identity = try cloak.Identity.initPem(gpa, cert, key, .{});
+    defer identity.deinit();
+    var servers_builder: cloak.Trust = .init(gpa);
+    defer servers_builder.deinit();
+    try servers_builder.addPem(cert, .{});
+    var servers = try servers_builder.freeze();
+    defer servers.deinit();
+    const credentials = [_]cloak.tls.Credential{.{ .identity = identity }};
+    const running = try Running.start(gpa, .{ .tls = .{ .credentials = &credentials } }, .of(h2Echo));
+    defer running.stop();
+    var client: Client = .init(gpa, .{ .tls = .{ .trust = servers } });
+    defer client.deinit(io);
+    var buf: [64]u8 = undefined;
+    const url = try std.mem.print(&buf, "https://127.0.0.1:{d}/echo", .{running.port});
+    {
+        var response = try client.send(io, .{ .url = url });
+        defer response.deinit(io);
+        try testing.expectEqual(.h2, response.version);
+    }
+    // Streams read and write the one session at once, with bodies past
+    // every window both ways.
+    const One = struct {
+        fn run(c: *Client, u: []const u8, n: usize, ok: *std.atomic.Value(u32)) Io.Cancelable!void {
+            const tio = test_io.io();
+            const payload = testing.allocator.alloc(u8, 300 << 10) catch return;
+            defer testing.allocator.free(payload);
+            for (payload, 0..) |*b, i| b.* = @truncate(i *% (n + 3));
+            var response = c.send(tio, .{ .url = u, .method = .POST, .body = .{ .bytes = payload } }) catch return;
+            defer response.deinit(tio);
+            const body = response.collect(testing.allocator, tio, .limited(1 << 20)) catch return;
+            defer testing.allocator.free(body);
+            if (response.version == .h2 and std.mem.eql(u8, body, payload)) _ = ok.fetchAdd(1, .monotonic);
+        }
+    };
+    var ok: std.atomic.Value(u32) = .init(0);
+    var group: Io.Group = .init;
+    for (0..8) |i| group.concurrent(io, One.run, .{ &client, url, i, &ok }) catch return error.SkipZigTest;
+    try group.await(io);
+    try testing.expectEqual(@as(u32, 8), ok.load(.monotonic));
+    try testing.expectEqual(@as(u64, 1), client.stats().connections_opened);
+}

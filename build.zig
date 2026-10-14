@@ -152,7 +152,7 @@ pub fn dev(b: *std.Build, tools: type) void {
     // hand, before a cut: CI compiles them only.
     const conformance = [_]struct { name: []const u8, about: []const u8 }{
         .{ .name = "autobahn", .about = "Autobahn|Testsuite against the WebSocket client or server: -- server|client <wstest> <workdir>" },
-        .{ .name = "h2spec", .about = "h2spec against the HTTP/2 server: -- <h2spec> <workdir> [h2spec's options]" },
+        .{ .name = "h2spec", .about = "h2spec against the HTTP/2 server: -- <h2spec> <workdir> [--tls <cert.pem> <key.pem>] [h2spec's options]" },
         .{ .name = "h1", .about = "An HTTP/1.1 conformance tool against the server: -- <command> [arguments, {url} and {port} replaced]" },
     };
     for (conformance) |c| {
@@ -165,6 +165,7 @@ pub fn dev(b: *std.Build, tools: type) void {
                 .imports = &.{
                     .{ .name = "uplink", .module = module },
                     .{ .name = "reactor", .module = reactor },
+                    .{ .name = "cloak", .module = cloak },
                 },
             }),
         });

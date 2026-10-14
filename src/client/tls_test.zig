@@ -119,7 +119,7 @@ fn loadAuth(gpa: Allocator, io: Io, pki: *openssl.Pki, cert_name: []const u8, ke
     defer gpa.free(cert_pem);
     const key_pem = try pki.read(io, key_name);
     defer gpa.free(key_pem);
-    const key = try cloak.PrivateKey.parse(gpa, key_pem, .{ .passphrase = pass, .entropy = cloak.PrivateKey.Entropy.fromIo(&io) });
+    const key = try cloak.PrivateKey.parse(gpa, key_pem, .{ .passphrase = pass });
     defer key.deinit();
     return cloak.ClientAuth.initPem(gpa, cert_pem, key, .{});
 }

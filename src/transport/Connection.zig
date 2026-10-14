@@ -378,7 +378,8 @@ pub fn unbind(conn: *Connection) void {
 pub fn speaksH2(conn: *const Connection) bool {
     if (conn.route.protocol == .h2_prior_knowledge) return true;
     if (!conn.session_on[1]) return false;
-    return std.mem.eql(u8, conn.sessions[1].info().alpn, "h2");
+    const info = conn.sessions[1].info() orelse return false;
+    return std.mem.eql(u8, info.alpn, "h2");
 }
 
 /// Whether the connection may carry another exchange: no operation failed
@@ -439,7 +440,7 @@ pub fn readError(conn: *Connection) IoError {
     if (conn.timed.fired()) return conn.timedOut(conn.armed.load(.monotonic));
     for (&conn.sessions, conn.session_on) |*s, on| {
         if (!on) continue;
-        const err = s.failure orelse continue;
+        const err = s.failure() orelse continue;
         const seen = s.diagnostics();
         // TLS 1.3 finishes the handshake before the server has read the
         // client's certificate: its refusal is the first thing read.
@@ -475,7 +476,7 @@ pub fn writeError(conn: *Connection) IoError {
         if (!on or !s.diagnostics().certificate_requested) continue;
         // glint-ignore: Z026 -- the read only takes the alert in; its failure lands in the session's failure, checked next
         _ = s.reader().peekByte() catch {};
-        if (s.failure != null) return conn.readError();
+        if (s.failure() != null) return conn.readError();
     }
     if (conn.missingCertificateReset()) return error.ClientCertificateRejected;
     return error.ConnectionFailed;

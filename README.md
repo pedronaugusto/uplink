@@ -317,9 +317,8 @@ request the server refused before it processed it goes again on another
 connection. `CONNECT`, a request with `Upgrade` and one sent whole to an
 HTTP proxy go in HTTP/1.1.
 
-Over TLS, both ends agree HTTP/1.1 for now. An HTTP/2 connection reads in
-one task while others write, and cloak's `tls.Session` takes that only after
-its full-duplex change; until then HTTP/2 goes over plain TCP alone.
+Over TLS both ends offer `h2` first by ALPN: one task reads the session
+while the streams write it, which cloak's `tls.Session` allows.
 
 **Files.** `server.Files` serves a directory: `Content-Type` by extension,
 `Last-Modified` and a strong `ETag`, the conditional requests of RFC 9110 in
@@ -433,11 +432,12 @@ entries are fuzzed.
 
 The protocols' own suites run by hand before a release, each driven by a
 Zig program in `conformance/` that starts the peer and reads its report:
-`bay h2spec`, `bay autobahn` and `bay h1`. As of 2026-10-14:
+`bay h2spec` (with `--tls <cert> <key>` over TLS), `bay autobahn` and `bay h1`. As of 2026-10-14:
 
 | Suite | Against | Result |
 |---|---|---|
-| h2spec 2.6.0, `--strict` | the HTTP/2 server | 146 of 147 passed, 1 skipped, none failed |
+| h2spec 2.6.0, `--strict` | the HTTP/2 server, by prior knowledge | 146 of 147 passed, 1 skipped, none failed |
+| h2spec 2.6.0, `--strict`, built with Go 1.27 | the HTTP/2 server over TLS, agreed by ALPN | 146 of 147 passed, 1 skipped, none failed |
 | Autobahn\|Testsuite 0.10.9 | the WebSocket server | 517 cases: 514 OK, 3 informational, none failed |
 | Autobahn\|Testsuite 0.10.9 | the WebSocket client | 517 cases: 514 OK, 3 informational, none failed |
 | h1spec, `--strict` | the HTTP/1.1 server | 33 of 33 passed |

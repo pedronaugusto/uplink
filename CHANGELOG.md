@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- `tls.h2_over_tls` is gone: over TLS both ends offer `h2` first by ALPN (`tls.client_protocols`, `tls.server_protocols`), as cloak's `tls.Session` reads in one task while others write (cloak 0.5.0).
+
+### Changed
+
+- HTTP/2 over TLS, both ends: the client speaks it to a server that agrees it by ALPN, its requests streams of one connection, and the server serves it to a client that asks (WebSocket over HTTP/2, RFC 8441, with it). h2spec 2.6.0 `--strict` passes over TLS as over plain TCP: 146 of 147, 1 skipped, none failed. `bay h2spec` takes `--tls <cert.pem> <key.pem>`.
+- Pins cloak 0.6.0.
+
 ## [0.4.2] - 2026-10-14
 
 ### Changed
