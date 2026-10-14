@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-14
+
 ### Breaking
 
 - `tls.h2_over_tls` is gone: over TLS both ends offer `h2` first by ALPN (`tls.client_protocols`, `tls.server_protocols`), as cloak's `tls.Session` reads in one task while others write (cloak 0.5.0).
