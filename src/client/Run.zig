@@ -36,6 +36,7 @@ const Response = @import("Response.zig");
 const OriginAuth = @import("OriginAuth.zig");
 const Prepare = @import("Prepare.zig");
 const policy = @import("policy.zig");
+const xenoglyph = @import("xenoglyph");
 
 const Run = @This();
 
@@ -111,13 +112,15 @@ pub fn init(c: *Shared, io: Io, request: Request) Error!Run {
         deadline = t.toClock(io, .awake).raw;
         c.context.deadlines.tighten(io, Io.Clock.awake.now(io).durationTo(deadline.?));
     }
+    const ascii = try asciiUrl(c, io, request.url, url);
     return .{
         .shared = c,
         .request = request,
         .method = request.method,
         .body = request.body,
-        .url = url,
-        .url_text = request.url,
+        .url = ascii.url,
+        .url_text = ascii.text,
+        .url_buffer = ascii.buffer,
         .deadline = deadline,
         .redirects = request.redirects orelse c.options.redirects,
         .retries = request.retries orelse c.options.retries,
@@ -824,10 +827,29 @@ fn followRedirect(run: *Run, io: Io, response: *Response) Error!bool {
     const code = @backingInt(response.status);
     const hop = policy.hop(code, run.method) orelse return false;
     const location = response.headers.getKnown(.location) orelse return false;
-    const resolved = try run.resolveLocation(io, location);
+    const located = try run.resolveLocation(io, location);
+    const located_url = url_mod.parse(located.text) catch {
+        run.shared.context.buffers.release(io, located.buffer);
+        return error.InvalidRedirect;
+    };
+    // The name as DNS has it: the Location's text, or a copy with its host
+    // in IDNA's ASCII form, which the resolved text's buffer then gives way
+    // to.
+    const ascii = asciiUrl(run.shared, io, located.text, located_url) catch |err| {
+        run.shared.context.buffers.release(io, located.buffer);
+        return switch (err) {
+            error.InvalidUrl => error.InvalidRedirect,
+            else => err,
+        };
+    };
+    var resolved = located;
+    if (ascii.buffer.len != 0) {
+        run.shared.context.buffers.release(io, located.buffer);
+        resolved = .{ .buffer = ascii.buffer, .text = ascii.text };
+    }
     var keep = true;
     defer if (keep) run.shared.context.buffers.release(io, resolved.buffer);
-    const next = url_mod.parse(resolved.text) catch return error.InvalidRedirect;
+    const next = ascii.url;
     if (!try policy.mayFollow(follow, run.url, next, run.hops)) return false;
     const same = url_mod.sameOrigin(run.url, next);
     if (hop.keep_body and !run.body.replayable()) {
@@ -859,10 +881,42 @@ fn followRedirect(run: *Run, io: Io, response: *Response) Error!bool {
     return true;
 }
 
-const Resolved = struct { buffer: []u8, text: []u8 };
+const Resolved = struct { buffer: []u8, text: []const u8 };
 
 /// `location` resolved against the current URL, in a buffer from the
 /// pool.
+/// A URL with its host as DNS has it, and the pooled buffer its text is in
+/// (empty when it is the text it came from).
+const AsciiUrl = struct { url: url_mod.Url, text: []const u8, buffer: []u8 };
+
+/// `text`, which parsed as `u`, with its host in IDNA's ASCII form (UTS #46
+/// ToASCII with the URL Standard's options, xenoglyph's `idna`): `text`
+/// itself when its host is that already, else a copy in a pooled buffer.
+/// A host IDNA refuses is an invalid URL.
+fn asciiUrl(c: *Shared, io: Io, text: []const u8, u: url_mod.Url) Error!AsciiUrl {
+    if (u.ipv6()) return .{ .url = u, .text = text, .buffer = &.{} };
+    var host_bytes: [256]u8 = undefined;
+    var w: Io.Writer = .fixed(&host_bytes);
+    const failures = xenoglyph.idna.toAscii(u.host, &w, .url) catch return error.InvalidUrl;
+    if (failures.any()) return error.InvalidUrl;
+    const host = w.buffered();
+    if (std.mem.eql(u8, host, u.host)) return .{ .url = u, .text = text, .buffer = &.{} };
+    const buffers = &c.context.buffers;
+    for ([_]BufferPool.Class{ .small, .record, .large }) |class| {
+        const buffer = try buffers.acquire(io, class);
+        const mapped = url_mod.withHost(text, u, host, buffer) catch {
+            buffers.release(io, buffer);
+            continue;
+        };
+        const parsed = url_mod.parse(mapped) catch {
+            buffers.release(io, buffer);
+            return error.InvalidUrl;
+        };
+        return .{ .url = parsed, .text = mapped, .buffer = buffer };
+    }
+    return error.InvalidUrl;
+}
+
 fn resolveLocation(run: *Run, io: Io, location: []const u8) Error!Resolved {
     const buffers = &run.shared.context.buffers;
     for ([_]BufferPool.Class{ .small, .record, .large }) |class| {

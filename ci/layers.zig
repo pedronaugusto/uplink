@@ -187,6 +187,7 @@ pub const references: []const gantry.rules.ReferenceRule = &.{
         "builtin",
         "cloak",
         "warp",
+        "xenoglyph",
         "reactor",
         "shakedown",
         "std",

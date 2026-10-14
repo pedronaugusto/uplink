@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- A URL's host, the request's and a `Location`'s, goes as IDNA's ASCII form (xenoglyph's `idna`: UTS #46 ToASCII with the URL Standard's options): a name in Unicode or upper case is looked up, sent in `Host` and the request line, given as SNI and matched for cookies and proxies as `xn--bcher-kva.de` and `example.com`; a host IDNA refuses (a disallowed code point, a joiner out of context, Punycode that does not decode, a Bidi label that breaks RFC 5893) is `InvalidUrl` (`InvalidRedirect` for a `Location`).
+- Pins xenoglyph 0.3.2, a new dependency fetched only with the client.
+
 ## [0.4.1] - 2026-10-14
 
 ### Changed

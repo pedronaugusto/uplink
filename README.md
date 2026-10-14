@@ -7,7 +7,7 @@ and proxies' challenges, keeps cookies, and goes through HTTP, HTTPS and SOCKS
 proxies with TLS to the server inside the tunnel. It presents client
 certificates, keeps connect, handshake, activity, low-speed and per-request
 deadlines without a task per connection, races a name's addresses by Happy
-Eyeballs, and decodes gzip, deflate and zstd bodies with
+Eyeballs, sends a host in Unicode as IDNA's ASCII form, and decodes gzip, deflate and zstd bodies with
 [warp](https://github.com/pedronaugusto/warp), every checksum verified. The
 server reads requests strictly, pipelined ones in order, keeps every wait to a
 timeout, terminates TLS, compresses responses, serves files with their
@@ -26,9 +26,10 @@ git+https://github.com/pedronaugusto/uplink` and add the `uplink` module to
 your module's imports. It depends on `std`,
 [aegis](https://github.com/pedronaugusto/aegis),
 [reactor](https://github.com/pedronaugusto/reactor),
-[cloak](https://github.com/pedronaugusto/cloak) and
-[warp](https://github.com/pedronaugusto/warp), the last three fetched only when
-the client is built.
+[cloak](https://github.com/pedronaugusto/cloak),
+[warp](https://github.com/pedronaugusto/warp) and
+[xenoglyph](https://github.com/pedronaugusto/xenoglyph), the last four fetched
+only when the client is built.
 
 The codecs are a module of their own. A program that reads and writes HTTP
 messages and has no use for the client, a server, a proxy or a test tool, asks
@@ -381,6 +382,9 @@ reactor's runtime both are kept on every system.
   dependency, fetched only for the client and the server.
 - [warp](https://github.com/pedronaugusto/warp) decodes and encodes gzip,
   deflate and zstd, every checksum verified. It is a lazy dependency too.
+- [xenoglyph](https://github.com/pedronaugusto/xenoglyph) maps a URL's host to
+  the name DNS has (UTS #46 ToASCII, `Bücher.de` to `xn--bcher-kva.de`). It is
+  a lazy dependency, fetched only for the client.
 - [preflight](https://github.com/pedronaugusto/preflight) runs the source checks,
   the tests and CI.
 - [shakedown](https://github.com/pedronaugusto/shakedown) is the layered `Io`,

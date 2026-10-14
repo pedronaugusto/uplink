@@ -800,3 +800,30 @@ test "a warm client with cookies and a kept answer still allocates nothing per r
     defer testing.allocator.free(seen);
     try testing.expect(std.mem.endsWith(u8, seen, "Authorization: Basic YTpi\r\nCookie: sid=1\r\n\r\n"));
 }
+
+fn hostOf(_: ?*anyopaque, request: Server.Request) Server.Answer {
+    var host_buf: [128]u8 = undefined;
+    const host = Server.headerValue(request.head, "host") orelse "-";
+    @memcpy(host_buf[0..host.len], host);
+    return ok(host_buf[0..host.len]);
+}
+
+test "a host in Unicode goes as IDNA's ASCII form, to the resolver and in Host; one IDNA refuses is an invalid URL" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const server = try Server.start(gpa, io, .{ .answer = hostOf });
+    defer server.stop();
+    const entries = [_]Resolver.Static.Entry{.{ .host = "xn--bcher-kva.test", .addresses = &.{.{ .ip4 = .loopback(0) }} }};
+    const static: Resolver.Static = .{ .entries = &entries };
+    var client: Client = .init(gpa, .{ .resolver = static.resolver() });
+    defer client.deinit(io);
+    var url: [64]u8 = undefined;
+    const body = try get(&client, io, .{ .url = try std.mem.print(&url, "http://B\u{dc}cher.TEST:{d}/", .{server.port}) });
+    defer gpa.free(body);
+    var want: [64]u8 = undefined;
+    try testing.expectEqualStrings(try std.mem.print(&want, "xn--bcher-kva.test:{d}", .{server.port}), body);
+    // A ZERO WIDTH JOINER between letters: CheckJoiners refuses it.
+    try testing.expectError(error.InvalidUrl, client.send(io, .{ .url = "http://a\u{200d}b.test/" }));
+    // Punycode that does not decode.
+    try testing.expectError(error.InvalidUrl, client.send(io, .{ .url = "http://xn--a-.test/" }));
+}

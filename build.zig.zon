@@ -37,6 +37,11 @@
             .hash = "warp-0.3.1-JASxFdFEEQDaCNoyxHxZKBAO9tlBpaFG_1p_tu2Udfmi",
             .lazy = true,
         },
+        .xenoglyph = .{
+            .url = "git+https://github.com/pedronaugusto/xenoglyph?ref=v0.3.2#f6166e8ba5108cc169663ed46e78eb422087b38c",
+            .hash = "xenoglyph-0.3.2-YKXZlXUoGwAmNSZEy8Y4yr3zUTGRuODke6HR6iXGLYBs",
+            .lazy = true,
+        },
     },
     .dev_dependencies = .{
         .preflight = .{

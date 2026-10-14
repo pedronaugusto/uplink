@@ -16,7 +16,8 @@ pub fn build(b: *std.Build) void {
     // and cloak, the family's TLS, whose system trust links the platform's
     // own libraries on macOS and Windows.
     //
-    // reactor, cloak and warp (the codings) are fetched lazily, and only for
+    // reactor, cloak, warp (the codings) and xenoglyph (domain names) are
+    // fetched lazily, and only for
     // the client. The one
     // build option, `client`, is true unless a project says otherwise: a
     // project that builds an HTTP client writes nothing extra, and one that
@@ -29,7 +30,8 @@ pub fn build(b: *std.Build) void {
     const reactor: ?*std.Build.Module = if (with_client) if (b.dependencyLazy("reactor", .{ .target = target, .optimize = optimize })) |package| package.module("reactor") else |_| null else null;
     const cloak: ?*std.Build.Module = if (with_client) if (b.dependencyLazy("cloak", .{ .target = target, .optimize = optimize })) |package| package.module("cloak") else |_| null else null;
     const warp: ?*std.Build.Module = if (with_client) if (b.dependencyLazy("warp", .{ .target = target, .optimize = optimize })) |package| package.module("warp") else |_| null else null;
-    _ = uplinkModules(b, target, optimize, aegis, with_client, .{ .reactor = reactor, .cloak = cloak, .warp = warp });
+    const xenoglyph: ?*std.Build.Module = if (with_client) if (b.dependencyLazy("xenoglyph", .{ .target = target, .optimize = optimize })) |package| package.module("xenoglyph") else |_| null else null;
+    _ = uplinkModules(b, target, optimize, aegis, with_client, .{ .reactor = reactor, .cloak = cloak, .warp = warp, .xenoglyph = xenoglyph });
 }
 
 /// uplink's development: its tests, example, checks and benchmarks, under
@@ -46,9 +48,11 @@ pub fn dev(b: *std.Build, tools: type) void {
     const reactor_package = p.dependencyLazy("reactor", .{ .target = target, .optimize = optimize }) catch return;
     const cloak_package = p.dependencyLazy("cloak", .{ .target = target, .optimize = optimize }) catch return;
     const warp_package = p.dependencyLazy("warp", .{ .target = target, .optimize = optimize }) catch return;
+    const xenoglyph_package = p.dependencyLazy("xenoglyph", .{ .target = target, .optimize = optimize }) catch return;
     const reactor = reactor_package.module("reactor");
     const cloak = cloak_package.module("cloak");
     const warp = warp_package.module("warp");
+    const xenoglyph = xenoglyph_package.module("xenoglyph");
     const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
 
     const module = package.module("uplink");
@@ -58,6 +62,7 @@ pub fn dev(b: *std.Build, tools: type) void {
         .{ .name = "reactor", .module = reactor },
         .{ .name = "cloak", .module = cloak },
         .{ .name = "warp", .module = warp },
+        .{ .name = "xenoglyph", .module = xenoglyph },
         .{ .name = "uplink.wire", .module = wire },
     };
 
@@ -192,7 +197,7 @@ pub fn dev(b: *std.Build, tools: type) void {
     // A project that depends on uplink by path, with only aegis, reactor,
     // cloak and warp (and what they depend on) to fetch: the build a
     // client's user gets.
-    preflight.addConsumerCheck(b, p, .{ .package = "uplink", .program = p.path("ci/consumer.zig"), .modules = &.{ "uplink", "uplink.wire" }, .packages = &.{ aegis_package, reactor_package, cloak_package, warp_package } });
+    preflight.addConsumerCheck(b, p, .{ .package = "uplink", .program = p.path("ci/consumer.zig"), .modules = &.{ "uplink", "uplink.wire" }, .packages = &.{ aegis_package, reactor_package, cloak_package, warp_package, xenoglyph_package } });
     addWireConsumerCheck(b, p, aegis_package);
     addColdConsumerCheck(b, p);
 }
@@ -227,6 +232,7 @@ const Lazy = struct {
     reactor: ?*std.Build.Module,
     cloak: ?*std.Build.Module,
     warp: ?*std.Build.Module,
+    xenoglyph: ?*std.Build.Module,
 };
 
 /// The modules, one set of source files per module: `uplink` imports `uplink.wire`
@@ -256,6 +262,7 @@ fn uplinkModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
     if (lazy.reactor) |module| root.addImport("reactor", module);
     if (lazy.cloak) |module| root.addImport("cloak", module);
     if (lazy.warp) |module| root.addImport("warp", module);
+    if (lazy.xenoglyph) |module| root.addImport("xenoglyph", module);
     return .{ .wire = wire, .root = root };
 }
 

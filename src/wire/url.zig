@@ -86,6 +86,29 @@ pub fn parse(text: []const u8) ParseError!Url {
     };
 }
 
+/// `text`, which parsed as `u`, with `host` in place of its host, into
+/// `out`: the URL with its name in another form (IDNA's ASCII one).
+pub fn withHost(text: []const u8, u: Url, host: []const u8, out: []u8) error{NoSpaceLeft}![]u8 {
+    const start = @intFromPtr(u.host.ptr) - @intFromPtr(text.ptr); // safe: `parse` gave `u.host` as a slice of `text`, so it starts within it
+    const end = start + u.host.len;
+    const len = start + host.len + (text.len - end);
+    if (len > out.len) return error.NoSpaceLeft;
+    @memcpy(out[0..start], text[0..start]);
+    @memcpy(out[start..][0..host.len], host);
+    @memcpy(out[start + host.len .. len], text[end..]);
+    return out[0..len];
+}
+
+test "a URL's host is replaced, the rest kept" {
+    const text = "https://B\xc3\x9cCHER.example:8443/a?b#c";
+    const u = try parse(text);
+    var out: [128]u8 = undefined;
+    const replaced = try withHost(text, u, "xn--bcher-kva.example", &out);
+    try std.testing.expectEqualStrings("https://xn--bcher-kva.example:8443/a?b#c", replaced);
+    try std.testing.expectEqualStrings("xn--bcher-kva.example", (try parse(replaced)).host);
+    try std.testing.expectError(error.NoSpaceLeft, withHost(text, u, "xn--bcher-kva.example", out[0..10]));
+}
+
 /// Whether two URLs have the same origin (RFC 6454): scheme, host without
 /// case, and port.
 pub fn sameOrigin(a: Url, b: Url) bool {

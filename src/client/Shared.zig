@@ -84,8 +84,8 @@ pub const Http2 = enum {
 
 /// Why a request failed.
 pub const SendError = error{
-    /// Not an `http` or `https` URL, or one with a byte a request line
-    /// cannot carry.
+    /// Not an `http` or `https` URL, one with a byte a request line
+    /// cannot carry, or one whose host IDNA refuses (UTS #46 ToASCII).
     InvalidUrl,
     UnsupportedScheme,
     /// A field name or value that cannot be sent, or a field uplink writes
