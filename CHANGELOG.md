@@ -8,7 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- Pins reactor 0.4.2 (shuttle 0.2.1: one aegis in a plain `zig build` consumer's graph), shakedown 0.4.2 and preflight 0.5.0.
+- Pins reactor 0.4.3 (shuttle 0.2.1: one aegis in a plain `zig build` consumer's graph; a task's file calls on Windows on a lane, where the file server's handler overflowed its stack), shakedown 0.4.2 and preflight 0.5.0.
 
 ### Fixed
 
