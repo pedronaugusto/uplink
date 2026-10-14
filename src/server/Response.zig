@@ -67,6 +67,8 @@ has_content_encoding: bool = false,
 compressible: bool = false,
 /// Private: a write failed; the connection is closed after.
 broken: bool = false,
+/// Private: a write failed for the writing task's cancelation.
+canceled: bool = false,
 /// Private: the trailer's fields, for a chunked body.
 trailer_buffer: []u8 = &.{},
 trailer_len: usize = 0,
@@ -121,6 +123,9 @@ pub const Error = error{
     BodyIncomplete,
     /// The connection failed, or a write waited past the activity timeout.
     WriteFailed,
+    /// The task writing was canceled, or the connection's: nothing more
+    /// goes out.
+    Canceled,
     OutOfMemory,
 };
 
@@ -223,7 +228,7 @@ pub fn end(r: *Response, io: Io) Error!void {
             // taken over closes.
             if (r.stream) |st| if (!st.ended) {
                 r.tunnel.flush() catch return r.fail();
-                st.writeData(io, "", true) catch return r.fail();
+                st.writeData(io, "", true) catch |err| return r.failStream(err);
             };
             return;
         },
@@ -268,10 +273,10 @@ fn endH2(r: *Response, st: *Session.Stream) Error!void {
     if (r.trailer_len != 0) {
         var list: [max_h2_fields]hpack.Field = undefined;
         const n = wire.h2.message.appendLines(&list, 0, r.trailer_buffer[0..r.trailer_len]) catch return error.HeadTooLarge;
-        st.writeHeaders(r.socket.io, list[0..n], true) catch return r.fail();
+        st.writeHeaders(r.socket.io, list[0..n], true) catch |err| return r.failStream(err);
         return;
     }
-    st.writeData(r.socket.io, "", true) catch return r.fail();
+    st.writeData(r.socket.io, "", true) catch |err| return r.failStream(err);
 }
 
 /// The client counts on a longer body: the connection ends short instead,
@@ -308,7 +313,7 @@ fn sendWhole(r: *Response, body: []const u8) Error!void {
         try r.sendHead(.length, c);
         r.remaining = 0;
         if (r.stream) |st| {
-            if (!st.ended) st.writeData(r.socket.io, coded, true) catch return r.fail();
+            if (!st.ended) st.writeData(r.socket.io, coded, true) catch |err| return r.failStream(err);
             r.state = .ended;
             return;
         }
@@ -324,7 +329,7 @@ fn sendWhole(r: *Response, body: []const u8) Error!void {
     if (r.stream) |st| {
         if (!st.ended and !r.head_only and body.len != 0) {
             r.remaining = 0;
-            st.writeData(r.socket.io, body, true) catch return r.fail();
+            st.writeData(r.socket.io, body, true) catch |err| return r.failStream(err);
         } else if (!st.ended) try r.endH2(st);
         r.state = .ended;
         return;
@@ -345,6 +350,8 @@ pub const Hijacked = struct {
     socket: *Socket,
     /// The HTTP/2 stream taken over, when it is one.
     stream: ?*Session.Stream = null,
+    /// Private: the response taken over, whose writes the stream's are.
+    response: *const Response,
 
     /// Push what was written to the peer.
     pub fn flush(h: Hijacked) Io.Writer.Error!void {
@@ -357,6 +364,15 @@ pub const Hijacked = struct {
     pub fn awaitReadable(h: Hijacked, io: Io, timeout: Io.Duration) Io.Cancelable!Timed.Readiness {
         if (h.stream) |st| return st.awaitReadable(io, timeout);
         return h.socket.awaitReadable(io, timeout);
+    }
+
+    /// Whether a read or write failed for a cancelation: the handler's
+    /// task's, or the connection's.
+    pub fn canceled(h: Hijacked) bool {
+        if (h.response.failure() == error.Canceled) return true;
+        const st = h.stream orelse return false;
+        const failed = st.read_failure orelse return false;
+        return failed == error.Canceled;
     }
 };
 
@@ -380,14 +396,14 @@ pub fn hijack(r: *Response, io: Io) Error!Hijacked {
         const in = st.reader(io);
         in.buffer = r.tunnel_in;
         r.state = .hijacked;
-        return .{ .reader = in, .writer = &r.tunnel, .socket = r.socket, .stream = st };
+        return .{ .reader = in, .writer = &r.tunnel, .socket = r.socket, .stream = st, .response = r };
     }
     try r.sendHead(.none, null);
     r.flushOut() catch return r.fail();
     r.state = .hijacked;
     r.socket.hijacked = true;
     r.socket.phase = .hijacked;
-    return .{ .reader = r.socket.reader(), .writer = r.socket.writer(), .socket = r.socket };
+    return .{ .reader = r.socket.reader(), .writer = r.socket.writer(), .socket = r.socket, .response = r };
 }
 
 /// Whether the head has gone out.
@@ -437,7 +453,31 @@ fn flushOut(r: *Response) Io.Writer.Error!void {
 
 fn fail(r: *Response) Error {
     r.broken = true;
+    return r.failure();
+}
+
+/// An HTTP/2 stream's write failed.
+fn failStream(r: *Response, err: Session.WriteError) Error {
+    r.noteStream(err);
+    return r.failure();
+}
+
+/// A taken-over stream's write failed, for its writer.
+fn tunnelFailed(r: *Response, err: Session.WriteError) error{WriteFailed} {
+    r.noteStream(err);
     return error.WriteFailed;
+}
+
+fn noteStream(r: *Response, err: Session.WriteError) void {
+    r.broken = true;
+    if (err == error.Canceled) r.canceled = true;
+}
+
+/// Why the last write failed, the body writer's included (it says
+/// `error.WriteFailed` alone): `error.Canceled` when the writing task was
+/// canceled, or the connection's task.
+pub fn failure(r: *const Response) error{ WriteFailed, Canceled } {
+    return if (r.canceled or r.socket.failed() == .canceled) error.Canceled else error.WriteFailed;
 }
 
 /// Whether the status carries a body at all.
@@ -544,7 +584,7 @@ fn sendHeadH2(r: *Response, st: *Session.Stream, want: Framing, coded: ?Encoder.
     }
     n = wire.h2.message.appendLines(&list, n, r.fields_buffer[0..r.fields_len]) catch return error.HeadTooLarge;
     const end_stream = r.framing == .none or r.head_only or (r.framing == .length and r.declared.? == 0);
-    st.writeHeaders(r.socket.io, list[0..n], end_stream) catch return r.fail();
+    st.writeHeaders(r.socket.io, list[0..n], end_stream) catch |err| return r.failStream(err);
     r.state = .streaming;
 }
 
@@ -587,8 +627,8 @@ fn bodyBytes(r: *Response, data: []const []const u8, splat: usize) Error!void {
 fn frame(r: *Response, data: []const []const u8, splat: usize, total: u64) Error!void {
     if (r.stream) |st| {
         const io = r.socket.io;
-        for (data[0 .. data.len - 1]) |d| st.writeData(io, d, false) catch return r.fail();
-        for (0..splat) |_| st.writeData(io, data[data.len - 1], false) catch return r.fail();
+        for (data[0 .. data.len - 1]) |d| st.writeData(io, d, false) catch |err| return r.failStream(err);
+        for (0..splat) |_| st.writeData(io, data[data.len - 1], false) catch |err| return r.failStream(err);
         return;
     }
     const w = r.out();
@@ -619,14 +659,14 @@ fn drainTunnel(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.
     const r: *Response = @alignCast(@fieldParentPtr("tunnel", w)); // safe: this vtable is installed only on a Response's `tunnel`
     const st = r.stream.?;
     const io = r.socket.io;
-    st.writeData(io, w.buffered(), false) catch return error.WriteFailed;
+    st.writeData(io, w.buffered(), false) catch |err| return r.tunnelFailed(err);
     var n: usize = 0;
     for (data[0 .. data.len - 1]) |d| {
-        st.writeData(io, d, false) catch return error.WriteFailed;
+        st.writeData(io, d, false) catch |err| return r.tunnelFailed(err);
         n += d.len;
     }
     for (0..splat) |_| {
-        st.writeData(io, data[data.len - 1], false) catch return error.WriteFailed;
+        st.writeData(io, data[data.len - 1], false) catch |err| return r.tunnelFailed(err);
         n += data[data.len - 1].len;
     }
     w.end = 0;

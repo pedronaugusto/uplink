@@ -47,7 +47,7 @@ pub const Options = struct {
     /// The largest zstd window decoded: a body asking for more is refused
     /// as it is read. A client keeps one window of this size, plus a
     /// block, once it has decoded zstd.
-    max_zstd_window: aegis.units.Bytes(u32) = .fromRaw(8 << 20),
+    max_zstd_window: aegis.units.Bytes(u32) = .literal("8MiB"),
     redirects: policy.Redirects = .default,
     retries: policy.Retries = .{},
     /// Where cookies are kept and sent from; null keeps none.

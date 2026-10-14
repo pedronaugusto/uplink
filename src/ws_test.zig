@@ -319,3 +319,47 @@ test "a WebSocket opens over HTTP/2 by an extended CONNECT, its frames the strea
     }
     try testing.expectEqual(@as(?u16, 1000), closeCode(got.items));
 }
+
+/// A transport whose stream failed: canceled, or broken.
+const Failed = struct {
+    canceled: bool,
+    in: [64]u8 = undefined,
+    reader: Io.Reader = .failing,
+    writer: Io.Writer = .failing,
+
+    fn transport(f: *Failed) ws.Conn.Transport {
+        f.reader.buffer = &f.in;
+        return .{ .reader = &f.reader, .writer = &f.writer, .context = f, .flushFn = flush, .readableFn = readable, .canceledFn = canceledFn };
+    }
+
+    fn flush(_: ?*anyopaque, _: Io) Io.Writer.Error!void {
+        return error.WriteFailed;
+    }
+
+    fn readable(_: ?*anyopaque, _: Io, _: Io.Duration) Io.Cancelable!@import("net/Timed.zig").Readiness {
+        return .ready;
+    }
+
+    fn canceledFn(context: ?*anyopaque) bool {
+        const f: *Failed = @ptrCast(@alignCast(context.?)); // safe: `transport` passes a Failed
+        return f.canceled;
+    }
+};
+
+test "a stream that failed for a cancelation says so on reads and writes, and one that broke does not" {
+    const io = test_io.io();
+    for ([_]bool{ true, false }) |canceled| {
+        var failed: Failed = .{ .canceled = canceled };
+        var conn: ws.Conn = .init(testing.allocator, .server, failed.transport(), .{}, null);
+        defer conn.deinit();
+        const want: anyerror = if (canceled) error.Canceled else error.ConnectionFailed;
+        var buffer: [64]u8 = undefined;
+        try testing.expectError(want, conn.next(io, &buffer));
+        try testing.expectError(want, conn.send(io, .text, "hello"));
+        // A message written in pieces keeps why a frame it drained failed.
+        var piece: [4]u8 = undefined;
+        var mw = conn.writer(io, .binary, &piece);
+        try testing.expectError(error.WriteFailed, mw.interface.writeAll("more than four bytes"));
+        try testing.expectError(want, mw.end());
+    }
+}

@@ -98,6 +98,9 @@ pub const Transport = struct {
     /// Wait up to the duration for something to read, without ending the
     /// stream when nothing comes.
     readableFn: *const fn (context: ?*anyopaque, io: Io, timeout: Io.Duration) Io.Cancelable!Timed.Readiness,
+    /// Whether the stream's read or write failed for a cancelation, after
+    /// the reader or writer reported a failure.
+    canceledFn: *const fn (context: ?*anyopaque) bool,
 };
 
 /// Why a read failed.
@@ -246,8 +249,23 @@ pub fn readMessage(c: *Conn, io: Io, gpa: Allocator, limit: Io.Limit) (ReadError
 }
 
 fn readError(c: *const Conn) ReadError {
-    if (c.failure) |code| return if (code == ws.Close.abnormal) error.ConnectionFailed else error.ProtocolError;
-    return error.ConnectionFailed;
+    if (c.failure) |code| return if (code == ws.Close.abnormal) c.streamFailed() else error.ProtocolError;
+    return c.streamFailed();
+}
+
+/// The stream failed under a read or write: `error.Canceled` when it was
+/// for a cancelation.
+fn streamFailed(c: *const Conn) error{ ConnectionFailed, Canceled } {
+    return if (c.transport.canceledFn(c.transport.context)) error.Canceled else error.ConnectionFailed;
+}
+
+/// A control frame's write failing under a read.
+fn answerFailed(err: WriteError) ReadError {
+    return switch (err) {
+        error.Canceled => error.Canceled,
+        error.OutOfMemory => error.OutOfMemory,
+        error.ConnectionFailed, error.Closed, error.PayloadTooLarge => error.ConnectionFailed,
+    };
 }
 
 /// Read a frame head, waiting with pings when `ping_interval` asks, and
@@ -277,7 +295,7 @@ fn waitForFrame(c: *Conn, io: Io) ReadError!void {
     const interval = c.options.ping_interval orelse return;
     // An `Io` that cannot wait a bounded time just reads.
     if (try c.transport.readableFn(c.transport.context, io, span.toIo(interval)) != .timed_out) return;
-    c.ping(io, "") catch return error.ConnectionFailed;
+    c.ping(io, "") catch |err| return answerFailed(err);
     if (try c.transport.readableFn(c.transport.context, io, span.toIo(interval)) != .timed_out) return;
     c.failure = ws.Close.going_away;
     // glint-ignore: Z026 -- the peer is gone or silent; the close is a courtesy
@@ -287,9 +305,13 @@ fn waitForFrame(c: *Conn, io: Io) ReadError!void {
 
 fn lost(c: *Conn, err: Io.Reader.Error) ReadError {
     return switch (err) {
-        error.EndOfStream, error.ReadFailed => {
+        error.EndOfStream => {
             if (c.failure == null) c.failure = ws.Close.abnormal;
             return error.ConnectionFailed;
+        },
+        error.ReadFailed => {
+            if (c.failure == null) c.failure = ws.Close.abnormal;
+            return c.streamFailed();
         },
     };
 }
@@ -319,7 +341,7 @@ fn control(c: *Conn, io: Io, h: ws.Header) ReadError!?u16 {
             c.pong(io, payload[0..n]) catch |err| switch (err) {
                 // A close already went: the pong is moot.
                 error.Closed => {},
-                else => return error.ConnectionFailed,
+                else => return answerFailed(err),
             };
             return null;
         },
@@ -340,7 +362,7 @@ fn control(c: *Conn, io: Io, h: ws.Header) ReadError!?u16 {
             const answer = if (peer.code == ws.Close.no_status) ws.Close.normal else peer.code;
             c.sendClose(io, answer, "") catch |err| switch (err) {
                 error.Closed => {},
-                else => return error.ConnectionFailed,
+                else => return answerFailed(err),
             };
             return peer.code;
         },
@@ -518,7 +540,7 @@ pub fn send(c: *Conn, io: Io, kind: Kind, payload: []const u8) WriteError!void {
     } else {
         try c.frame(io, w, .{ .opcode = opcode, .len = payload.len }, payload);
     }
-    c.transport.flushFn(c.transport.context, io) catch return error.ConnectionFailed;
+    c.transport.flushFn(c.transport.context, io) catch return c.streamFailed();
 }
 
 /// `input` compressed onto the message's stream into `w.compressed`; at
@@ -563,9 +585,14 @@ pub const MessageWriter = struct {
     io: Io,
     opcode: ws.Opcode,
     interface: Io.Writer,
+    /// Private: why a frame the writer drained failed; its writes say
+    /// `error.WriteFailed` alone.
+    failed: ?WriteError = null,
 
-    /// Send what is buffered as the message's last frame.
+    /// Send what is buffered as the message's last frame. After a write
+    /// failed, why it did.
     pub fn end(mw: *MessageWriter) WriteError!void {
+        if (mw.failed) |err| return err;
         try mw.conn.fragment(mw.io, mw, &.{mw.interface.buffered()}, 1, true);
         mw.interface.end = 0;
     }
@@ -578,7 +605,10 @@ pub const MessageWriter = struct {
         const n = @min(data.len, parts.len - 1);
         @memcpy(parts[1..][0..n], data[0..n]);
         const last_splat = if (n == data.len) splat else 1;
-        mw.conn.fragment(mw.io, mw, parts[0 .. n + 1], last_splat, false) catch return error.WriteFailed;
+        mw.conn.fragment(mw.io, mw, parts[0 .. n + 1], last_splat, false) catch |err| {
+            mw.failed = err;
+            return error.WriteFailed;
+        };
         var consumed: usize = 0;
         for (data[0..n], 0..) |d, i| consumed += if (i == n - 1) d.len * last_splat else d.len;
         io_w.end = 0;
@@ -612,7 +642,7 @@ fn fragment(c: *Conn, io: Io, mw: *MessageWriter, parts: []const []const u8, spl
         try c.frame(io, w, .{ .fin = last, .opcode = mw.opcode, .len = w.gathered.items.len }, w.gathered.items);
     }
     mw.opcode = .continuation;
-    if (last) c.transport.flushFn(c.transport.context, io) catch return error.ConnectionFailed;
+    if (last) c.transport.flushFn(c.transport.context, io) catch return c.streamFailed();
 }
 
 /// Close: send a close with `code` and `reason`, then wait up to
@@ -651,7 +681,7 @@ fn sendControl(c: *Conn, io: Io, opcode: ws.Opcode, payload: []const u8) WriteEr
     defer held.deinit(io);
     if (c.close_sent.load(.acquire)) return error.Closed;
     try c.frame(io, held.value(), .{ .opcode = opcode, .len = payload.len }, payload);
-    c.transport.flushFn(c.transport.context, io) catch return error.ConnectionFailed;
+    c.transport.flushFn(c.transport.context, io) catch return c.streamFailed();
 }
 
 fn sendClose(c: *Conn, io: Io, code: u16, reason: []const u8) WriteError!void {
@@ -663,7 +693,7 @@ fn sendClose(c: *Conn, io: Io, code: u16, reason: []const u8) WriteError!void {
     defer held.deinit(io);
     if (c.close_sent.swap(true, .acq_rel)) return error.Closed;
     try c.frame(io, held.value(), .{ .opcode = .close, .len = 2 + n }, payload[0 .. 2 + n]);
-    c.transport.flushFn(c.transport.context, io) catch return error.ConnectionFailed;
+    c.transport.flushFn(c.transport.context, io) catch return c.streamFailed();
 }
 
 /// Write one frame, masked when this end is a client.
@@ -676,14 +706,14 @@ fn frame(c: *Conn, io: Io, w: *Writing, head: ws.Header, payload: []const u8) Wr
         h.mask = key;
     }
     var head_buf: [ws.Header.max_len]u8 = undefined;
-    out.writeAll(ws.writeHeader(&head_buf, h)) catch return error.ConnectionFailed;
+    out.writeAll(ws.writeHeader(&head_buf, h)) catch return c.streamFailed();
     if (h.mask) |key| {
         // The caller's bytes stay as they were: a masked copy goes.
         w.scratch.clearRetainingCapacity();
         try w.scratch.appendSlice(c.gpa, payload);
         ws.mask(key, 0, w.scratch.items);
-        out.writeAll(w.scratch.items) catch return error.ConnectionFailed;
+        out.writeAll(w.scratch.items) catch return c.streamFailed();
     } else {
-        out.writeAll(payload) catch return error.ConnectionFailed;
+        out.writeAll(payload) catch return c.streamFailed();
     }
 }

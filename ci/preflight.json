@@ -49,11 +49,11 @@
       },
       {
         "id": "A001",
-        "level": "report"
+        "level": "gate"
       },
       {
         "id": "A002",
-        "level": "report"
+        "level": "gate"
       },
       {
         "id": "A003",

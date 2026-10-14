@@ -40,15 +40,19 @@ pub const Pairs = struct {
     }
 };
 
+/// A `Max-Age`, in whole seconds.
+pub const MaxAge = aegis.units.Duration(.second, u32);
+
 /// One `Set-Cookie` value, read. Every slice points into the text.
 pub const SetCookie = struct {
     name: []const u8,
     value: []const u8,
     /// `Expires`, in seconds since the epoch.
     expires: ?i64 = null,
-    /// `Max-Age`, in seconds from when the cookie arrived; zero or less
-    /// expires it at once. It wins over `Expires`.
-    max_age: ?i64 = null,
+    /// `Max-Age`, from when the cookie arrived: zero (written as zero or
+    /// less) expires it at once. Held to 2^31-1 seconds. It wins over
+    /// `Expires`.
+    max_age: ?MaxAge = null,
     /// `Domain`, its leading dot removed, as written: compare without case.
     domain: ?[]const u8 = null,
     /// `Path`, when it is one; null takes the request's default path.
@@ -128,20 +132,20 @@ fn attribute(c: *SetCookie, av: []const u8) void {
 }
 
 /// `Max-Age`: an optional `-` and digits; a huge one is clamped.
-fn parseMaxAge(text: []const u8) ?i64 {
+fn parseMaxAge(text: []const u8) ?MaxAge {
     if (text.len == 0) return null;
     const negative = text[0] == '-';
     const digits = if (negative) text[1..] else text;
     if (digits.len == 0) return null;
-    var n: i64 = 0;
+    const most = std.math.maxInt(i32);
+    var n: u32 = 0;
     for (digits) |d| {
         if (d < '0' or d > '9') return null;
-        n = (aegis.int.Checked(i64).init(n).mul(10) catch return std.math.maxInt(i32)).raw();
-        n = (aegis.int.Checked(i64).init(n).add(d - '0') catch return std.math.maxInt(i32)).raw();
+        // No cookie lives past a few hundred years; this keeps sums in range.
+        n = @min(n *| 10 +| (d - '0'), most);
     }
-    // No cookie lives past a few hundred years; this keeps sums in range.
-    n = @min(n, std.math.maxInt(i32));
-    return if (negative) -n else n;
+    // Zero or less expires the cookie at once (RFC 6265bis §5.6.2).
+    return .fromRaw(if (negative) 0 else n);
 }
 
 /// A cookie date (RFC 6265bis §5.1.1): the time, day, month and year found
@@ -282,7 +286,7 @@ test "a Set-Cookie value is read as a browser reads it" {
     try testing.expectEqualStrings("Example.com", c.domain.?);
     try testing.expectEqualStrings("/", c.path.?);
     try testing.expect(c.secure and c.http_only);
-    try testing.expectEqual(@as(?i64, 60), c.max_age);
+    try testing.expectEqual(MaxAge.literal("1m"), c.max_age.?);
     try testing.expectEqual(SameSite.lax, c.same_site);
     const bare = parse(" lone value ; path=relative; max-age=x; domain=; expires=never").?;
     try testing.expectEqualStrings("", bare.name);
@@ -293,8 +297,8 @@ test "a Set-Cookie value is read as a browser reads it" {
     try testing.expectEqual(null, bare.expires);
     const quoted = parse("q=\"a b\"; Max-Age=-5; Max-Age=99999999999999999999").?;
     try testing.expectEqualStrings("\"a b\"", quoted.value);
-    try testing.expectEqual(@as(?i64, std.math.maxInt(i32)), quoted.max_age);
-    try testing.expectEqual(@as(?i64, -5), parse("a=b; Max-Age=-5").?.max_age);
+    try testing.expectEqual(@as(u32, std.math.maxInt(i32)), quoted.max_age.?.raw());
+    try testing.expectEqual(MaxAge.literal("0"), parse("a=b; Max-Age=-5").?.max_age.?);
     try testing.expectEqual(null, parse(""));
     try testing.expectEqual(null, parse(" = ; Path=/"));
     try testing.expectEqual(null, parse("a=b\x00c"));

@@ -63,7 +63,7 @@ pub const Options = struct {
     /// The most of an unread body a finished response reads to keep its
     /// connection, within the activity timeout; past it, the connection is
     /// closed.
-    drain_limit: aegis.units.Bytes(u32) = .fromRaw(64 << 10),
+    drain_limit: aegis.units.Bytes(u32) = .literal("64KiB"),
 };
 
 /// A connection of whichever protocol it speaks: HTTP/1.1, held by one

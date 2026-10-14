@@ -22,6 +22,7 @@
 //! All memory is the caller's, given at `init`.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const h2 = @import("frame.zig");
 const hpack = @import("../hpack.zig");
@@ -82,9 +83,9 @@ pub const Limits = struct {
     /// Streams the peer may have open at once; one more is refused.
     max_concurrent_streams: u32 = 100,
     /// A header block's bytes, across its frames.
-    max_header_block: u32 = 64 << 10,
+    max_header_block: Bytes = .literal("64KiB"),
     /// The decoded header list's bytes (RFC 9113's SETTINGS_MAX_HEADER_LIST_SIZE).
-    max_header_list: u32 = 64 << 10,
+    max_header_list: Bytes = .literal("64KiB"),
     /// The frames over which the counts below are kept.
     window: u32 = 1000,
     /// Streams the peer may reset per window.
@@ -95,9 +96,14 @@ pub const Limits = struct {
     /// Frames that carry nothing (empty DATA without END_STREAM, empty
     /// CONTINUATION) per window.
     max_empty: u32 = 100,
-    /// The receive window each stream starts with, and the connection's.
-    stream_window: u31 = 1 << 21,
-    connection_window: u31 = 1 << 24,
+    /// The connection's receive window, raised to at `start`, at most
+    /// 2^31-1 bytes (RFC 9113 §6.9.1); a stream's is the local SETTINGS'
+    /// `initial_window_size`.
+    connection_window: Bytes = .literal("16MiB"),
+
+    pub const Bytes = aegis.units.Bytes(u32);
+    /// The largest flow-control window.
+    pub const max_window: Bytes = .fromRaw(std.math.maxInt(u31));
 };
 
 pub const StreamState = enum { idle, open, half_closed_local, half_closed_remote, closed };
@@ -166,6 +172,7 @@ pub const Memory = struct {
 /// A connection as `role`, advertising `local` (whose header table size
 /// sizes the decoder's table), within `limits`.
 pub fn init(role: Role, local: h2.Settings, limits: Limits, memory: Memory) Connection {
+    aegis.assert.pre(limits.connection_window.compare(Limits.max_window) != .gt, "a window is at most 2^31-1 bytes");
     return .{
         .role = role,
         .local = .{},
@@ -190,7 +197,7 @@ pub fn start(c: *Connection, w: *Io.Writer) Io.Writer.Error!void {
     var sw: Io.Writer = .fixed(&buf);
     c.local_pending.?.write(&sw) catch unreachable; // unreachable: the settings are under 64 bytes
     try h2.writeFrame(w, .{ .len = @intCast(sw.end), .type = .settings, .flags = 0, .stream = 0 }, &.{sw.buffered()});
-    const raise = @as(i64, c.limits.connection_window) - c.recv_window;
+    const raise = @as(i64, c.limits.connection_window.raw()) - c.recv_window;
     if (raise > 0) {
         try windowUpdate(w, 0, @intCast(raise));
         c.recv_window += raise;
@@ -450,7 +457,7 @@ fn headers(c: *Connection, w: *Io.Writer, h: Head, payload: []const u8) Error!?E
         error.FrameSizeError => .frame_size_error,
     });
     if (prio) |p| if (p.dependency == h.stream) return c.connectionError(w, .protocol_error);
-    if (fragment.len > c.block.len or fragment.len > c.limits.max_header_block) return c.connectionError(w, .enhance_your_calm);
+    if (fragment.len > c.block.len or past(fragment.len, c.limits.max_header_block)) return c.connectionError(w, .enhance_your_calm);
     @memcpy(c.block[0..fragment.len], fragment);
     c.block_len = fragment.len;
     c.continuing_end_stream = h.has(Flags.end_stream);
@@ -466,7 +473,7 @@ fn continuation(c: *Connection, w: *Io.Writer, h: Head, payload: []const u8) Err
         c.empty += 1;
         if (c.empty > c.limits.max_empty) return c.connectionError(w, .enhance_your_calm);
     }
-    if (c.block_len + payload.len > c.block.len or c.block_len + payload.len > c.limits.max_header_block) return c.connectionError(w, .enhance_your_calm);
+    if (c.block_len + payload.len > c.block.len or past(c.block_len + payload.len, c.limits.max_header_block)) return c.connectionError(w, .enhance_your_calm);
     @memcpy(c.block[c.block_len..][0..payload.len], payload);
     c.block_len += payload.len;
     if (!h.has(Flags.end_headers)) return null;
@@ -474,11 +481,16 @@ fn continuation(c: *Connection, w: *Io.Writer, h: Head, payload: []const u8) Err
     return c.headerBlock(w, h.stream);
 }
 
+/// Whether `n` bytes are past `limit`.
+fn past(n: usize, limit: Limits.Bytes) bool {
+    return aegis.units.Bytes(usize).fromRaw(n).compare(limit.convert(usize)) == .gt;
+}
+
 /// A whole header block for stream `id`: decoded, and the stream opened
 /// or moved on.
 fn headerBlock(c: *Connection, w: *Io.Writer, id: u31) Error!?Event {
     const end_stream = c.continuing_end_stream;
-    const list_limit = @min(c.field_bytes.len, c.limits.max_header_list);
+    const list_limit = @min(c.field_bytes.len, c.limits.max_header_list.raw());
     // The block is decoded whatever becomes of the stream: the decoder's
     // table must see every block (RFC 9113 §4.3).
     const decoded = c.decoder.decode(c.block[0..c.block_len], c.field_bytes[0..list_limit], c.fields);
@@ -532,7 +544,9 @@ fn localSettings(c: *const Connection) h2.Settings {
 /// window is owed.
 pub fn giveBack(c: *Connection, w: *Io.Writer, id: ?u31, n: usize) Error!void {
     c.recv_unacked += n;
-    if (c.recv_unacked >= c.limits.connection_window / 2) {
+    // Twice what is owed fits: it is within a window, under 2^31 bytes.
+    const owed_twice = aegis.units.Bytes(u64).fromRaw(c.recv_unacked).mul(2) catch unreachable; // unreachable: see above
+    if (owed_twice.compare(c.limits.connection_window.convert(u64)) != .lt) {
         windowUpdate(w, 0, @intCast(c.recv_unacked)) catch return error.WriteFailed;
         c.recv_window += @intCast(c.recv_unacked);
         c.recv_unacked = 0;

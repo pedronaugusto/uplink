@@ -61,7 +61,7 @@ pub const Failure = union(enum) {
 const idle_wait: Io.Duration = .fromSeconds(3600);
 
 /// The receive window each stream gets: what its buffer may hold.
-pub const stream_window: u31 = 1 << 20;
+pub const stream_window: h2.Connection.Limits.Bytes = .literal("1MiB");
 
 const Layout = struct {
     const streams = 128;
@@ -124,13 +124,12 @@ pub fn create(ctx: *Context, io: Io, conn: *Connection) (Allocator.Error || erro
         .shared = .init(.{
             .proto = .init(.client, .{
                 .enable_push = false,
-                .initial_window_size = stream_window,
+                .initial_window_size = stream_window.raw(),
                 .max_header_list_size = Layout.field_bytes,
             }, .{
                 .max_concurrent_streams = Layout.streams,
-                .stream_window = stream_window,
-                .max_header_block = Layout.block,
-                .max_header_list = Layout.field_bytes,
+                .max_header_block = .fromRaw(Layout.block),
+                .max_header_list = .fromRaw(Layout.field_bytes),
             }, mem),
             .scratch = scratch,
         }),
@@ -495,7 +494,7 @@ fn dispatch(h: *H2, io: Io, shared: *Shared, event: h2.Connection.Event) Allocat
         .data => |d| {
             const st = find(shared, d.stream) orelse return;
             if (d.bytes.len != 0) {
-                if (st.recv.len == 0) st.recv = try h.ctx.gpa.alloc(u8, stream_window);
+                if (st.recv.len == 0) st.recv = try h.ctx.gpa.alloc(u8, stream_window.raw());
                 var at = (st.recv_start + st.recv_len) % st.recv.len;
                 var rest = d.bytes;
                 while (rest.len != 0) {

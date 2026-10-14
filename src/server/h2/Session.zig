@@ -44,7 +44,7 @@ pub const Shared = struct {
 };
 
 /// The receive window a stream starts with: what its buffer holds.
-pub const stream_window: u31 = 256 << 10;
+pub const stream_window: h2.Connection.Limits.Bytes = .literal("256KiB");
 
 /// The memory a session takes, besides its streams' buffers.
 const Layout = struct {
@@ -97,14 +97,13 @@ pub fn init(context: *Context, socket: *Socket, max_concurrent: u32) Allocator.E
     const max = @min(max_concurrent, Layout.streams);
     const conn: h2.Connection = .init(.server, .{
         .max_concurrent_streams = max,
-        .initial_window_size = stream_window,
+        .initial_window_size = stream_window.raw(),
         .max_header_list_size = Layout.field_bytes,
         .enable_connect_protocol = true,
     }, .{
         .max_concurrent_streams = max,
-        .max_header_block = Layout.block,
-        .max_header_list = Layout.field_bytes,
-        .stream_window = stream_window,
+        .max_header_block = .fromRaw(Layout.block),
+        .max_header_list = .fromRaw(Layout.field_bytes),
     }, .{
         .streams = streams,
         .block = block,
@@ -205,6 +204,8 @@ pub const Stream = struct {
     }
 
     fn take(st: *Stream, w: *Io.Writer, limit: Io.Limit) (ReadError || error{ EndOfStream, WriteFailed })!usize {
+        // A read that failed stays failed.
+        if (st.read_failure) |err| return err;
         const s = st.session;
         const io = st.read_io;
         var held = s.shared.acquire(io) catch return error.Canceled;
@@ -231,7 +232,7 @@ pub const Stream = struct {
     /// into the ring, which the window bounds.
     pub fn deliver(st: *Stream, gpa: Allocator, bytes: []const u8, end: bool) Allocator.Error!void {
         if (bytes.len != 0) {
-            if (st.recv.len == 0) st.recv = try gpa.alloc(u8, stream_window);
+            if (st.recv.len == 0) st.recv = try gpa.alloc(u8, stream_window.raw());
             std.debug.assert(st.recv_len + bytes.len <= st.recv.len);
             var at = (st.recv_start + st.recv_len) % st.recv.len;
             var rest = bytes;

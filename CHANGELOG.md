@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- `wire.h2.Connection.Limits`: `max_header_block`, `max_header_list` and `connection_window` are aegis sizes (`.literal("64KiB")`), and `stream_window`, which nothing read, is gone: a stream's receive window is the local SETTINGS' `initial_window_size`.
+- `wire.dns.Config.timeout_seconds` is `timeout`, an aegis duration.
+- `wire.cookie.SetCookie.max_age` is a `wire.cookie.MaxAge`, whole seconds, zero for an age of zero or less.
+- `ws.Conn.Transport` has `canceledFn`, which tells a cancelation from a broken stream; `server.Response.Hijacked` has the response it came from.
+- `server.Response.Error` and `ws.AcceptError` have `Canceled`.
+
+### Fixed
+
+- Cancelation is returned as `error.Canceled` where it was taken for something else, and no socket operation follows it: a server response's write canceled says so (`Response.failure` names it after the body writer's `error.WriteFailed`), and a canceled handler gets no 500 written after it; a connection waiting idle for its next request whose task is canceled ends, where the wait was taken for a request coming; a file whose stat or open is canceled is no 404; a canceled HTTP/2 `100 Continue` fails the body's read at once; a WebSocket's read or write on a canceled stream returns `Canceled`, a ping or close answer's failure is not `ConnectionFailed` when it was a cancelation, and a message writer keeps why a frame it drained failed for `end`; the DNS stub's socket canceled at its bind or send ends the query instead of moving to the next server. A lookup or Unix-socket dial with no task to spare for its time limit is waited for, where it was canceled and returned `Canceled` to a caller no one canceled. Setting a socket option on Windows is no cancelation point.
+
+### Changed
+
+- glint's A001 and A002 gated (glint 0.2.7 decides every site); pins preflight 0.5.4 for development.
+
 ## [0.5.0] - 2026-10-14
 
 ### Breaking

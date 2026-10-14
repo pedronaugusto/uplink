@@ -162,7 +162,7 @@ fn storeAt(jar: *CookieJar, io: Io, url: url_mod.Url, set_cookie: []const u8, no
     if (sc.secure and !url.secure) return;
     if (!prefixKept(sc, host_only, path)) return;
     var expires: ?i64 = sc.expires;
-    if (sc.max_age) |age| expires = if (age <= 0) std.math.minInt(i64) else now +| age;
+    if (sc.max_age) |age| expires = expiry(now, age);
 
     var held = jar.state.acquireUncancelable(io);
     defer held.deinit(io);
@@ -201,6 +201,14 @@ fn storeAt(jar: *CookieJar, io: Io, url: url_mod.Url, set_cookie: []const u8, no
 }
 
 /// The rules of the `__Secure-` and `__Host-` name prefixes.
+/// When a cookie that arrives at `now` with `age` expires, in seconds since
+/// the epoch: a zero age at once, one past the clock's range never.
+fn expiry(now: i64, age: cookie.MaxAge) i64 {
+    if (age.eql(.fromRaw(0))) return std.math.minInt(i64);
+    const sum = aegis.int.Checked(i64).init(now).add(age.raw()) catch return std.math.maxInt(i64);
+    return sum.raw();
+}
+
 fn prefixKept(sc: cookie.SetCookie, host_only: bool, path: []const u8) bool {
     const text = if (sc.name.len != 0) sc.name else sc.value;
     if (std.ascii.startsWithIgnoreCase(text, "__Secure-")) return sc.name.len != 0 and sc.secure;

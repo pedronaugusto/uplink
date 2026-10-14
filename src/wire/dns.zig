@@ -11,6 +11,7 @@
 //! loop or leave its bytes.
 
 const std = @import("std");
+const aegis = @import("aegis");
 
 /// A record type.
 pub const Type = enum(u16) {
@@ -498,8 +499,8 @@ pub const Config = struct {
     /// A name with fewer dots than this is tried under the search domains
     /// first.
     ndots: u8 = 1,
-    /// Seconds a server is waited for, and the rounds over the servers.
-    timeout_seconds: u8 = 5,
+    /// How long a server is waited for, and the rounds over the servers.
+    timeout: aegis.units.Duration(.nanosecond, u64) = .literal("5s"),
     attempts: u8 = 2,
     /// Start at a different server each query.
     rotate: bool = false,
@@ -539,7 +540,7 @@ pub const Config = struct {
                     } else if (number(o, "ndots:", 15)) |n| {
                         c.ndots = n;
                     } else if (number(o, "timeout:", 30)) |n| {
-                        c.timeout_seconds = @max(n, 1);
+                        c.timeout = aegis.units.Duration(.second, u8).fromRaw(@max(n, 1)).convert(.nanosecond, u64, .exact);
                     } else if (number(o, "attempts:", 5)) |n| {
                         c.attempts = @max(n, 1);
                     }
@@ -756,7 +757,7 @@ test "resolv.conf is read as the C library reads it, and names are tried in its 
     try testing.expectEqualStrings("2001:db8::1", c.serverList()[1]);
     try testing.expectEqual(2, c.searchList().len);
     try testing.expectEqual(2, c.ndots);
-    try testing.expectEqual(3, c.timeout_seconds);
+    try testing.expectEqual(aegis.units.Duration(.nanosecond, u64).literal("3s"), c.timeout);
     try testing.expectEqual(5, c.attempts);
     try testing.expect(c.rotate);
     var buf: [max_name]u8 = undefined;

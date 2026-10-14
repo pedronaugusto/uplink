@@ -65,6 +65,8 @@ pub const AcceptError = error{
     UnsupportedVersion,
     /// Writing the answer failed.
     WriteFailed,
+    /// The task answering was canceled, or the connection's.
+    Canceled,
     OutOfMemory,
 };
 
@@ -111,7 +113,7 @@ pub fn accept(out: *Accepted, gpa: Allocator, io: Io, request: *ServerRequest, r
             response.header("Sec-WebSocket-Extensions", w.buffered()) catch break :headers;
         }
     }
-    const stream = response.hijack(io) catch return error.WriteFailed;
+    const stream = response.hijack(io) catch |err| return answerFailed(err);
     out.* = .{ .stream = stream, .protocol = protocol, .conn = undefined };
     out.conn = .init(gpa, .server, .{
         .reader = stream.reader,
@@ -119,6 +121,7 @@ pub fn accept(out: *Accepted, gpa: Allocator, io: Io, request: *ServerRequest, r
         .context = out,
         .flushFn = flushAccepted,
         .readableFn = readableAccepted,
+        .canceledFn = canceledAccepted,
     }, options.conn, agreed);
 }
 
@@ -132,11 +135,25 @@ fn readableAccepted(context: ?*anyopaque, io: Io, timeout: Io.Duration) Io.Cance
     return a.stream.awaitReadable(io, timeout);
 }
 
+fn canceledAccepted(context: ?*anyopaque) bool {
+    const a: *Accepted = @ptrCast(@alignCast(context.?)); // safe: `accept` passes its Accepted
+    return a.stream.canceled();
+}
+
 fn refuse(io: Io, response: *ServerResponse, status: std.http.Status, err: AcceptError) AcceptError {
     response.status = status;
     response.closeAfter();
-    response.send(io, "") catch return error.WriteFailed;
+    response.send(io, "") catch |e| return answerFailed(e);
     return err;
+}
+
+/// The handshake's answer failed to go.
+fn answerFailed(err: ServerResponse.Error) AcceptError {
+    return switch (err) {
+        error.Canceled => error.Canceled,
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.WriteFailed,
+    };
 }
 
 /// The permessage-deflate parameters to answer the client's offers with:
@@ -287,6 +304,7 @@ pub fn connect(out: *Opened, client: *Client, gpa: Allocator, io: Io, url: []con
         .context = out,
         .flushFn = flushOpened,
         .readableFn = readableOpened,
+        .canceledFn = canceledOpened,
     }, options.conn, agreed);
 }
 
@@ -298,6 +316,11 @@ fn flushOpened(context: ?*anyopaque, io: Io) Io.Writer.Error!void {
 fn readableOpened(context: ?*anyopaque, io: Io, timeout: Io.Duration) Io.Cancelable!Timed.Readiness {
     const o: *Opened = @ptrCast(@alignCast(context.?)); // safe: `connect` passes its Opened
     return o.stream.awaitReadable(io, timeout);
+}
+
+fn canceledOpened(context: ?*anyopaque) bool {
+    const o: *Opened = @ptrCast(@alignCast(context.?)); // safe: `connect` passes its Opened
+    return o.stream.readFailure() == error.Canceled;
 }
 
 /// `url` with `ws` made `http` and `wss` made `https`, in `buffer`.

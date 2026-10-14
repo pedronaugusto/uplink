@@ -67,8 +67,15 @@ fn setAfd(io: Io, handle: Io.net.Socket.Handle, level: i32, name: u32, value: u3
         .code = windows.IOCTL.AFD.SOCKOPT,
         .in = std.mem.asBytes(&info),
     } };
-    // glint-ignore: Z026 -- as on POSIX, a refused option leaves a working socket
-    _ = io.operate(operation) catch {};
+    // Setting an option is done at once: no point to stop at, so a
+    // cancelation waits for the caller's next.
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
+    // As on POSIX, a refused option leaves a working socket: the status is
+    // not looked at.
+    _ = io.operate(operation) catch |err| switch (err) {
+        error.Canceled => unreachable, // unreachable: cancelation is blocked above
+    };
 }
 
 /// What a look at an idle socket finds.

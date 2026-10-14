@@ -277,7 +277,7 @@ pub const Stub = struct {
     /// The options `config` names.
     pub fn optionsOf(config: *const dns.Config) Options {
         return .{
-            .timeout = Duration.fromRaw(std.time.ns_per_s).mul(config.timeout_seconds) catch unreachable, // unreachable: at most 30 seconds
+            .timeout = config.timeout,
             .attempts = config.attempts,
             .rotate = config.rotate,
         };
@@ -325,9 +325,15 @@ pub const Stub = struct {
             .ip4 => .{ .ip4 = .unspecified(0) },
             .ip6 => .{ .ip6 = .unspecified(0) },
         };
-        const socket = any.bind(io, .{ .mode = .dgram }) catch return error.Failed;
+        const socket = any.bind(io, .{ .mode = .dgram }) catch |err| return switch (err) {
+            error.Canceled => error.Canceled,
+            else => error.Failed,
+        };
         defer socket.close(io);
-        socket.send(io, &server, query) catch return error.Failed;
+        socket.send(io, &server, query) catch |err| return switch (err) {
+            error.Canceled => error.Canceled,
+            else => error.Failed,
+        };
         var timed: Timed = .init(socket.handle);
         defer timed.deinit(io, s.keeper());
         const deadline = Io.Clock.awake.now(io).addDuration(span.toIo(s.timeout));
@@ -494,6 +500,30 @@ test "a stub asks a server over UDP, and over TCP when the answer is truncated" 
     var protocols = service.alpn();
     try testing.expectEqualStrings("h2", (try protocols.next()).?);
     try testing.expectEqual(8443, service.port().?);
+}
+
+test "a stub canceled at its socket returns error.Canceled, not the next server's answer" {
+    const testing = std.testing;
+    const shakedown = @import("shakedown");
+    const base = @import("../testing/io.zig").io();
+    var fake: FakeServer = undefined;
+    try fake.start(base);
+    defer fake.stop(base);
+    // The same server twice: a failure moves on to the second, a cancelation ends the query.
+    const servers = [_]IpAddress{ fake.address, fake.address };
+    var stub: Stub = .init(&servers, .{ .timeout = .literal("2s"), .attempts = 1 });
+    defer stub.deinit(base);
+    var query_buf: [dns.max_name + 64]u8 = undefined;
+    const query = try dns.writeQuery(&query_buf, 7, "small.test", .a);
+    var answer: [dns.max_message]u8 = undefined;
+    for ([_]shakedown.IoPlan.Entry{
+        .{ .at = .{ .nth = .{ .call = .netBindIp, .n = 1 } }, .fault = .cancel },
+        .{ .at = .{ .nth = .{ .call = .net_send, .n = 1 } }, .fault = .cancel },
+    }) |entry| {
+        const fio = try shakedown.FaultIo.init(testing.allocator, base, .{ .plan = &.{entry} });
+        defer fio.deinit();
+        try testing.expectError(error.Canceled, stub.transport().exchange(fio.io(), query, &answer));
+    }
 }
 
 test "search domains are tried as resolv.conf orders them" {

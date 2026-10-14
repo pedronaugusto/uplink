@@ -625,6 +625,34 @@ fn upgrading(io: Io, _: *Request, response: *Response) anyerror!void {
     try taken.flush();
 }
 
+test "a file request whose task is canceled at its stat ends with no answer, not a 404" {
+    const gpa = testing.allocator;
+    const base = test_io.io();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(base, .{ .sub_path = "a.txt", .data = "text" });
+    const plan = [_]@import("shakedown").IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .dirStatFile, .n = 1 } }, .fault = .cancel }};
+    const fio = try @import("shakedown").FaultIo.init(gpa, base, .{ .plan = &plan });
+    defer fio.deinit();
+    var files: server_ns.Files = .init(tmp.dir, .{});
+    const r = try gpa.create(Running);
+    defer gpa.destroy(r);
+    r.listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(base, .{ .reuse_address = true });
+    defer r.listener.deinit(base);
+    r.port = r.listener.socket.address.getPort();
+    r.server = .init(gpa, .{}, files.handler());
+    defer r.server.deinit(base);
+    r.task = base.concurrent(Server.serve, .{ &r.server, fio.io(), &r.listener }) catch return error.SkipZigTest;
+    defer r.halt();
+    const answer = try r.raw(gpa, "GET /a.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    defer gpa.free(answer);
+    try testing.expectEqualStrings("", answer);
+    // The next request is answered.
+    const again = try r.raw(gpa, "GET /a.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    defer gpa.free(again);
+    try testing.expect(std.mem.endsWith(u8, again, "\r\n\r\ntext"));
+}
+
 test "a handler takes the connection over after a 101, and speaks its own protocol" {
     const gpa = testing.allocator;
     const io = test_io.io();

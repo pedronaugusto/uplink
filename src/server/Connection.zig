@@ -80,7 +80,14 @@ fn awaitRequest(c: *Connection, first: bool) bool {
     // An idle connection past its time is closed cleanly where the `Io`
     // can wait without a deadline that aborts the socket: a FIN, not a
     // reset that could take the last response's bytes with it.
-    if (s.options.timeouts.idle) |idle| switch (c.socket.awaitReadable(io, span.toIo(idle)) catch .ready) {
+    if (s.options.timeouts.idle) |idle| switch (c.socket.awaitReadable(io, span.toIo(idle)) catch |err| switch (err) {
+        // The task serving the connection was canceled: it ends here.
+        error.Canceled => {
+            _ = s.setIdle(io, &c.socket.entry, false);
+            c.socket.noteCanceled();
+            return false;
+        },
+    }) {
         .ready, .unbounded => {},
         .timed_out => {
             _ = s.setIdle(io, &c.socket.entry, false);
@@ -183,6 +190,11 @@ fn serveOne(c: *Connection) bool {
 
     c.handler.handle(io, &request, &response) catch |err| {
         if (options.observer) |o| o.emit(.{ .failed = .{ .method = rh.method.name, .path = target.path, .error_name = @errorName(err), .head_sent = response.headSent() } });
+        // A canceled task answers nothing more.
+        if (err == error.Canceled) {
+            c.socket.noteCanceled();
+            return false;
+        }
         if (response.headSent()) {
             // What went out stays out, cut where the handler stopped: the
             // client sees a truncation, never a short success.

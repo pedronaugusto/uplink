@@ -59,7 +59,10 @@ pub fn serve(f: *Files, io: Io, request: *Request, response: *Response) anyerror
     const name = Pattern.unescape(rest, scratch) orelse return Router.plain(io, response, .bad_request, "bad request\n");
     if (!safe(name)) return Router.plain(io, response, .not_found, "not found\n");
     const relative = if (name.len == 0) "." else std.mem.trimEnd(u8, name, "/");
-    const stat = f.root.statFile(io, if (relative.len == 0) "." else relative, .{}) catch return Router.plain(io, response, .not_found, "not found\n");
+    const stat = f.root.statFile(io, if (relative.len == 0) "." else relative, .{}) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return Router.plain(io, response, .not_found, "not found\n"),
+    };
     if (stat.kind == .directory) {
         if (path[path.len - 1] != '/') return redirectTo(io, request, response, "/");
         const index = f.options.index orelse return Router.plain(io, response, .not_found, "not found\n");
@@ -101,7 +104,10 @@ fn redirectTo(io: Io, request: *const Request, response: *Response, suffix: []co
 }
 
 fn serveFile(f: *Files, io: Io, request: *Request, response: *Response, relative: []const u8) anyerror!void {
-    const file = f.root.openFile(io, relative, .{}) catch return Router.plain(io, response, .not_found, "not found\n");
+    const file = f.root.openFile(io, relative, .{}) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return Router.plain(io, response, .not_found, "not found\n"),
+    };
     defer file.close(io);
     const stat = try file.stat(io);
     if (stat.kind != .file) return Router.plain(io, response, .not_found, "not found\n");

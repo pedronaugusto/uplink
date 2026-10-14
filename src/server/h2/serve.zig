@@ -274,6 +274,8 @@ fn answer(session: *Session, handler: Handler, st: *Stream) void {
     handler.handle(io, &request, &response) catch |err| {
         if (context.options.observer) |o| o.emit(.{ .failed = .{ .method = head.method.name, .path = target.path, .error_name = @errorName(err), .head_sent = response.headSent() } });
         if (response.headSent()) return st.reset(io, .internal_error);
+        // A canceled task answers nothing more: the stream is reset.
+        if (err == error.Canceled) return st.reset(io, .cancel);
         response.reset(io);
         response.stream = st;
         response.status = request.bodyFault() orelse .internal_server_error;

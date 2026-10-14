@@ -134,6 +134,11 @@ pub fn awaitReadable(c: *Socket, io: Io, timeout: Io.Duration) Io.Cancelable!Tim
     return Timed.awaitReadable(io, c.stream.socket.handle, &c.input.interface, timeout);
 }
 
+/// The task serving the connection was canceled: no operation follows.
+pub fn noteCanceled(c: *Socket) void {
+    c.note(.canceled);
+}
+
 /// Tell the observer a wait ran out.
 pub fn noteTimeout(c: *Socket, phase: Context.Timeout) void {
     if (c.context.options.observer) |o| o.emit(.{ .timed_out = .{ .phase = phase } });
@@ -260,8 +265,11 @@ fn activityDeadline(c: *Socket) ?Io.Timestamp {
     return Io.Clock.awake.now(c.io).addDuration(span.toIo(a));
 }
 
-/// One socket operation within the deadline of the wait at hand.
+/// One socket operation within the deadline of the wait at hand. None
+/// after a cancelation: the task was asked to stop, and a second
+/// cancelation point would not say so again.
 fn perform(c: *Socket, op: Io.Operation) error{Failed}!Io.Operation.Result {
+    if (c.failed() == .canceled) return error.Failed;
     return c.timed.perform(c.io, c.context.keeper(), op, c.deadline(op)) catch |err| {
         c.note(switch (err) {
             error.TimedOut => .timed_out,

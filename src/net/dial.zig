@@ -120,15 +120,14 @@ pub fn dialUnix(io: Io, path: []const u8, options: Options) DialError!Dialed {
     };
     race.concurrent(.expired, Io.sleep, .{ io, span.toIo(limit), .awake }) catch {
         // The attempt runs already; wait for it, unbounded.
-        while (race.cancel()) |late| switch (late) {
+        switch (try race.await()) {
             .connected => |result| {
                 var d = try result;
                 d.timeout_enforced = false;
                 return d;
             },
-            .expired => {},
-        };
-        unreachable; // unreachable: the connecting task was started above
+            .expired => unreachable, // unreachable: no delay was started
+        }
     };
     return switch (try race.await()) {
         .connected => |result| result,

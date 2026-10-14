@@ -153,8 +153,13 @@ pub fn reader(r: *Request, io: Io) *Io.Reader {
         if (r.expects_continue and !r.continued) {
             r.continued = true;
             if (r.stream) |st| {
-                // glint-ignore: Z026 -- a client that cannot hear the 100 sends its body after its own wait, or the read that follows names the failure
-                st.writeHeaders(io, &.{.{ .name = ":status", .value = "100" }}, false) catch {};
+                // A client that cannot hear the 100 sends its body after its
+                // own wait, or the read that follows names the failure; a
+                // canceled task's read fails at once.
+                st.writeHeaders(io, &.{.{ .name = ":status", .value = "100" }}, false) catch |err| switch (err) {
+                    error.Canceled => st.read_failure = error.Canceled,
+                    error.StreamClosed, error.WriteFailed => {},
+                };
             } else r.socket.sendContinue();
         }
         if (r.decoder) |*d| r.decoded = d.start(raw, &r.socket.context.zstd);

@@ -545,8 +545,11 @@ fn nearer(best: *?Limit, candidate: Limit) void {
 }
 
 /// Perform one socket operation within the connection's deadline. A failure
-/// is recorded in `failure`, and `error.Failed` returned.
+/// is recorded in `failure`, and `error.Failed` returned. None after a
+/// cancelation: the task was asked to stop, and a second cancelation point
+/// would not say so again.
 fn perform(conn: *Connection, op: Io.Operation) error{Failed}!Io.Operation.Result {
+    if (conn.failed() == .canceled) return error.Failed;
     const io = conn.io;
     const limit = conn.operationLimit(io, op == .net_read);
     if (limit) |l| conn.armed.store(l.kind, .monotonic);

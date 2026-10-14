@@ -64,12 +64,12 @@ pub fn lookupWithin(r: Resolver, io: Io, host: []const u8, port: u16, family: ?I
         return r.lookupMapped(io, host, port, family, out);
     };
     race.concurrent(.expired, Io.sleep, .{ io, span.toIo(limit), .awake }) catch {
+        // The lookup runs already; wait for it, unbounded.
         bounded.* = false;
-        while (race.cancel()) |late| switch (late) {
-            .found => |result| return result,
-            .expired => {},
+        return switch (try race.await()) {
+            .found => |result| result,
+            .expired => unreachable, // unreachable: no delay was started
         };
-        unreachable; // unreachable: the lookup task was started above
     };
     return switch (try race.await()) {
         .found => |result| result,
@@ -321,6 +321,32 @@ const Counting = struct {
         return out[0..n];
     }
 };
+
+/// A resolver that waits a moment, a point a cancelation would end it at,
+/// and answers 10.0.0.1.
+const Slow = struct {
+    fn resolver() Resolver {
+        return .{ .context = null, .lookupFn = answer };
+    }
+
+    fn answer(io: Io, _: ?*anyopaque, _: []const u8, port: u16, _: ?IpAddress.Family, out: []IpAddress) LookupError![]IpAddress {
+        try io.sleep(.fromMilliseconds(20), .awake);
+        out[0] = .{ .ip4 = .{ .bytes = .{ 10, 0, 0, 1 }, .port = port } };
+        return out[0..1];
+    }
+};
+
+test "a lookup with no task for its limit is waited for, never canceled" {
+    // The lookup's task starts; the limit's does not.
+    const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .groupConcurrent, .n = 2 } }, .fault = .{ .fail = error.ConcurrencyUnavailable } }};
+    const fio = try shakedown.FaultIo.init(testing.allocator, test_io.io(), .{ .plan = &plan });
+    defer fio.deinit();
+    var out: [4]IpAddress = undefined;
+    var bounded = true;
+    const found = try Slow.resolver().lookupWithin(fio.io(), "slow.example", 80, null, &out, .literal("5s"), &bounded);
+    try testing.expectEqual(@as(usize, 1), found.len);
+    try testing.expect(!bounded);
+}
 
 test "static entries answer their names on their ports, and pass the rest on" {
     const io = test_io.io();

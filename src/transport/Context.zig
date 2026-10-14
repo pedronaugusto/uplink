@@ -54,7 +54,7 @@ pub const Options = struct {
     dns_cache: ?Resolver.Cache.Options = .{},
     observer: ?Observer = null,
     /// The largest window a zstd body may ask for.
-    max_zstd_window: aegis.units.Bytes(u32) = .fromRaw(8 << 20),
+    max_zstd_window: aegis.units.Bytes(u32) = .literal("8MiB"),
     /// The most free buffers of each size kept.
     max_free_buffers: u32,
 };
