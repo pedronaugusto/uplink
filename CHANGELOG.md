@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-14
+
 ### Breaking
 
 - `wire.h2.Connection.Limits`: `max_header_block`, `max_header_list` and `connection_window` are aegis sizes (`.literal("64KiB")`), and `stream_window`, which nothing read, is gone: a stream's receive window is the local SETTINGS' `initial_window_size`.
