@@ -347,7 +347,7 @@ environment itself.
   activity timeout kept: no `sendfile`, which no `Io` bounds by a deadline yet.
 - No Brotli decoding: such a body is handed over as it came, with its
   `Content-Encoding`.
-- No NTLM, Negotiate, PAC files, OCSP or `.netrc`, and no HTTP cache.
+- No NTLM, Negotiate, PAC files or OCSP, and no HTTP cache.
 - No local address or interface to bind a connection to.
 - No public suffix list: a `CookieJar` takes one through
   `Options.public_suffix`, and without one refuses a cookie for a domain of

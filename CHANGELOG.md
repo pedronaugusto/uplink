@@ -22,7 +22,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - The server reads a request strictly where Http11Probe found it lenient: a chunked body's line ends and extensions as RFC 9112 writes them, a target with a raw byte past 0x7f or a `#` refused, a `Host` that is empty or not a URI's host refused; a body the client got wrong is answered 400 (or 413 past `max_body`) rather than 500, and a request line past `max_head` 414 or 400 rather than 431.
-- TLS 1.3, and TLS 1.2 (ECDHE, AEAD suites, extended master secret) for servers that speak nothing newer, both cloak's; a client answers a request for its certificate with RSA keys too.
 - Pins aegis 0.1.6, reactor 0.3.1, cloak 0.4.0, shakedown 0.4.1, warp 0.3.1 and preflight 0.4.5.
 - `Router` answers `OPTIONS *` 200 and a `CONNECT` to a host and port 405, and routes an extended `CONNECT` by its path.
 
@@ -42,6 +41,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `conformance/h1.zig` (`zig build h1`): an HTTP/1.1 conformance tool run against the server, as h1spec and Http11Probe are.
 - Fuzz properties for HPACK blocks, HTTP/2 frame sequences, WebSocket frame heads and `--resolve` entries.
 - `wire.range` (`Range` and `Content-Range`), `wire.ws` (frames, masking, keys, close codes, incremental UTF-8, extension parameters), `wire.multipart.Reader` (parts read as they arrive), `wire.coding.negotiate` (`Accept-Encoding`), `wire.h1.writeStatusLine`, `wire.fields.ListIterator.contains`.
+
+## [0.3.1] - 2026-10-13
+
+### Added
+
+- TLS 1.2 through cloak for servers that speak nothing newer: ECDHE with AEAD suites and the extended master secret. TLS 1.2 with RSA key exchange, CBC or without the extended master secret is refused.
+- A client answers a server's request for a certificate with an RSA key too, signed by cloak (RSA-PSS in TLS 1.3, PSS or PKCS#1 v1.5 in TLS 1.2).
+
+### Changed
+
+- Pins cloak 0.4.0 and aegis 0.1.6.
 
 ## [0.3.0] - 2026-10-13
 
