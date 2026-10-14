@@ -8,6 +8,11 @@
 //! The client's connections and the server's share it: what differs is
 //! which deadline an operation gets, which each finds for itself. A
 //! deadline that fires poisons the socket, which `fired` then says.
+//!
+//! Reads and writes keep their deadlines apart, so one read and one write
+//! may be under way at once, from two tasks: an HTTP/2 connection reads in
+//! one while its streams write in others. Two reads at once, or two
+//! writes, are not allowed.
 
 const std = @import("std");
 const reactor = @import("reactor");
@@ -16,10 +21,21 @@ const Deadlines = reactor.net.Deadlines;
 
 const Timed = @This();
 
-/// Private: the operation deadline `Deadlines` keeps.
-watch: Deadlines.Watch,
-/// Private: how deadlines are kept.
-mode: Mode = .unwatched,
+/// Private: the reads' deadline.
+reads: Side,
+/// Private: the writes' deadline.
+writes: Side,
+/// Private: the socket is counted among those whose deadlines nothing
+/// could keep.
+counted: std.atomic.Value(bool) = .init(false),
+
+/// One direction's operations: the deadline `Deadlines` keeps for the one
+/// under way, and how deadlines are kept. Only the task doing that
+/// direction's operation touches it.
+const Side = struct {
+    watch: Deadlines.Watch,
+    mode: Mode = .unwatched,
+};
 
 const Mode = enum {
     /// No deadline kept yet: the first operation with one decides.
@@ -49,30 +65,38 @@ pub const Error = error{
 
 /// Operations on `handle`.
 pub fn init(handle: Io.net.Socket.Handle) Timed {
-    return .{ .watch = .init(handle) };
+    return .{ .reads = .{ .watch = .init(handle) }, .writes = .{ .watch = .init(handle) } };
 }
 
 /// Stop keeping deadlines; nothing may be under way.
 pub fn deinit(t: *Timed, io: Io, keeper: Keeper) void {
-    if (t.mode == .deadlines) keeper.deadlines.remove(io, &t.watch);
-    t.mode = .unwatched;
+    for ([_]*Side{ &t.reads, &t.writes }) |side| {
+        if (side.mode == .deadlines) keeper.deadlines.remove(io, &side.watch);
+        side.mode = .unwatched;
+    }
 }
 
 /// Whether a deadline fired on the socket, which is then never to be used
 /// again.
 pub fn fired(t: *const Timed) bool {
-    return t.watch.fired.load(.acquire);
+    return t.reads.watch.fired.load(.acquire) or t.writes.watch.fired.load(.acquire);
 }
 
 /// Perform `op`, ended at `deadline` on the awake clock when there is one.
 /// A deadline already past ends it before it starts.
 pub fn perform(t: *Timed, io: Io, keeper: Keeper, op: Io.Operation, deadline: ?Io.Timestamp) Error!Io.Operation.Result {
     const at = deadline orelse return io.operate(op);
-    if (t.mode == .unenforced) return io.operate(op);
+    const side = switch (op) {
+        .net_read, .net_receive, .file_read_streaming => &t.reads,
+        else => &t.writes,
+    };
+    if (side.mode == .unenforced) return io.operate(op);
     if (at.nanoseconds <= Io.Clock.awake.now(io).nanoseconds) return error.TimedOut;
-    if (t.mode == .unwatched) t.mode = if (keeper.deadlines.add(io, &t.watch)) .deadlines else .operate;
-    switch (t.mode) {
-        .deadlines => return keeper.deadlines.operate(io, &t.watch, op, .{ .raw = at, .clock = .awake }) catch |err| switch (err) {
+    // A deadline that fired on the other side has aborted the socket.
+    if (t.fired()) return error.TimedOut;
+    if (side.mode == .unwatched) side.mode = if (keeper.deadlines.add(io, &side.watch)) .deadlines else .operate;
+    switch (side.mode) {
+        .deadlines => return keeper.deadlines.operate(io, &side.watch, op, .{ .raw = at, .clock = .awake }) catch |err| switch (err) {
             error.Timeout => error.TimedOut,
             error.Canceled => error.Canceled,
         },
@@ -81,9 +105,9 @@ pub fn perform(t: *Timed, io: Io, keeper: Keeper, op: Io.Operation, deadline: ?I
             error.Canceled => error.Canceled,
             error.ConcurrencyUnavailable => {
                 // This `Io` cannot bound a socket operation: from here on
-                // the socket runs unbounded, counted once.
-                t.mode = .unenforced;
-                _ = keeper.unenforced.fetchAdd(1, .monotonic);
+                // this side runs unbounded, the socket counted once.
+                side.mode = .unenforced;
+                if (!t.counted.swap(true, .monotonic)) _ = keeper.unenforced.fetchAdd(1, .monotonic);
                 return io.operate(op);
             },
         },
@@ -121,4 +145,52 @@ pub fn awaitReadable(io: Io, handle: Io.net.Socket.Handle, r: *Io.Reader, timeou
     const n = (result.net_read catch return .ready).data_len;
     r.end = n;
     return .ready;
+}
+
+const testing = std.testing;
+const test_io = @import("../testing/io.zig");
+
+fn readUntil(t: *Timed, io: Io, keeper: Keeper, handle: Io.net.Socket.Handle, deadline: Io.Timestamp, done: *std.atomic.Value(bool)) Error!Io.Operation.Result {
+    defer done.store(true, .release);
+    var buf: [16]u8 = undefined;
+    var data: [1][]u8 = .{&buf};
+    return t.perform(io, keeper, .{ .net_read = .{ .socket_handle = handle, .data = &data } }, deadline);
+}
+
+test "a read and a write under way at once each end at their own deadline" {
+    const io = test_io.io();
+    var listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    const client = try listener.socket.address.connect(io, .{ .mode = .stream });
+    defer client.close(io);
+    const server = try listener.accept(io);
+    defer server.close(io);
+    var deadlines: Deadlines = .init(.fromMilliseconds(20));
+    defer deadlines.deinit(io);
+    var unenforced: std.atomic.Value(u64) = .init(0);
+    const keeper: Keeper = .{ .deadlines = &deadlines, .unenforced = &unenforced };
+    var timed: Timed = .init(client.socket.handle);
+    defer timed.deinit(io, keeper);
+
+    // A read waits for bytes that never come, until its deadline; a write
+    // with a far one starts and ends while it waits. The write's deadline
+    // neither replaces the read's nor, once the write is done, unarms it.
+    var done: std.atomic.Value(bool) = .init(false);
+    const read_by = Io.Clock.awake.now(io).addDuration(.fromMilliseconds(300));
+    var reading = try io.concurrent(readUntil, .{ &timed, io, keeper, client.socket.handle, read_by, &done });
+    try io.sleep(.fromMilliseconds(50), .awake);
+    const far = Io.Clock.awake.now(io).addDuration(.fromSeconds(60));
+    const wrote = try timed.perform(io, keeper, .{ .net_write = .{ .socket_handle = client.socket.handle, .header = "", .data = &.{"x"}, .splat = 1 } }, far);
+    try testing.expectEqual(@as(usize, 1), try wrote.net_write);
+
+    // Ten times the read's deadline, then the test stops waiting.
+    var waited: u32 = 0;
+    while (!done.load(.acquire) and waited < 300) : (waited += 1) try io.sleep(.fromMilliseconds(10), .awake);
+    if (!done.load(.acquire)) {
+        // glint-ignore: Z026 -- the read is stopped only so the test ends; it has failed already
+        _ = reading.cancel(io) catch {};
+        return error.TestUnexpectedResult;
+    }
+    try testing.expectError(error.TimedOut, reading.await(io));
+    try testing.expect(timed.fired());
 }

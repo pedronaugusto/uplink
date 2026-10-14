@@ -19,6 +19,7 @@ const Socket = @This();
 /// Private: what the server's connections share.
 context: *Context,
 /// Private: the `Io` the connection's task runs on, for the adapters.
+/// Moved only by the task that has the connection to itself (`adopt`).
 io: Io,
 /// Private: the socket.
 stream: Io.net.Stream,
@@ -32,13 +33,17 @@ output: SocketWriter,
 session: cloak.tls.Session = undefined,
 secure: bool = false,
 session_buffers: [2][]u8 = .{ &.{}, &.{} },
-/// Which wait the next operation is part of.
+/// Which wait the next operation is part of; on a multiplexed connection,
+/// the next read.
 phase: Phase = .head,
 /// The end of the handshake, the idle wait or the head, on the awake
 /// clock.
 until: ?Io.Timestamp = null,
-/// Why the last operation failed.
-failure: Failure = .none,
+/// Why the first operation that failed did; `failed` reads it.
+failure: std.atomic.Value(Failure) = .init(.none),
+/// HTTP/2: one task reads while the streams' tasks write, each write
+/// within the activity timeout whatever the reading task waits for.
+multiplexed: bool = false,
 /// The handler took the connection over.
 hijacked: bool = false,
 
@@ -49,13 +54,12 @@ pub const Phase = enum {
     answer,
     /// The handler took the connection over: it keeps its own time.
     hijacked,
-    /// HTTP/2 with streams open: a read waits as long as they take, each
-    /// write the activity timeout.
+    /// HTTP/2 with streams open: a read waits as long as they take.
     h2,
 };
 
 /// Why an operation failed.
-pub const Failure = enum { none, timed_out, canceled, broken };
+pub const Failure = enum(u8) { none, timed_out, canceled, broken };
 
 /// Why a read failed.
 pub const ReadError = error{
@@ -91,6 +95,18 @@ pub fn startIdle(c: *Socket, io: Io) void {
     c.until = if (c.context.options.timeouts.idle) |d| Io.Clock.awake.now(io).addDuration(span.toIo(d)) else null;
 }
 
+/// From here on the connection is HTTP/2: one task reads and others write.
+/// Called before any other task has the socket.
+pub fn multiplex(c: *Socket) void {
+    c.multiplexed = true;
+}
+
+/// Run the connection's adapters on `io` from here on. A no-op on a
+/// multiplexed connection, whose tasks share the `Io` it started on.
+pub fn adopt(c: *Socket, io: Io) void {
+    if (!c.multiplexed) c.io = io;
+}
+
 /// Serve HTTP/2 streams: reads wait as long as the streams take.
 pub fn startH2(c: *Socket) void {
     c.phase = .h2;
@@ -112,7 +128,7 @@ pub fn startAnswer(c: *Socket) void {
 /// Wait up to `timeout` for the peer to send something; the wait ends
 /// nothing when nothing comes.
 pub fn awaitReadable(c: *Socket, io: Io, timeout: Io.Duration) Io.Cancelable!Timed.Readiness {
-    c.io = io;
+    c.adopt(io);
     if (c.reader().bufferedLen() != 0) return .ready;
     return Timed.awaitReadable(io, c.stream.socket.handle, &c.input.interface, timeout);
 }
@@ -128,7 +144,7 @@ pub fn close(c: *Socket) void {
     const io = c.io;
     const pool = &c.context.buffers;
     if (c.secure) {
-        if (c.failure == .none and !c.timed.fired()) {
+        if (c.failed() == .none and !c.timed.fired()) {
             // glint-ignore: Z026 -- the close_notify is a courtesy; the socket closes whether or not the peer heard it
             c.session.finish() catch {};
             // glint-ignore: Z026 -- as above
@@ -170,7 +186,7 @@ pub fn handshake(c: *Socket, options: tls.ServerOptions) error{Failed}!void {
         pool.release(io, read_buffer);
         pool.release(io, write_buffer);
         if (s.options.observer) |o| o.emit(.{ .handshake_failed = .{ .error_name = @errorName(err) } });
-        if (c.failure == .timed_out) c.noteTimeout(.handshake);
+        if (c.failed() == .timed_out) c.noteTimeout(.handshake);
         return error.Failed;
     };
     c.session_buffers = .{ read_buffer, write_buffer };
@@ -214,21 +230,33 @@ pub fn flush(c: *Socket) Io.Writer.Error!void {
 
 /// Why a read failed, by name.
 pub fn readError(c: *const Socket) ReadError {
-    return switch (c.failure) {
+    return switch (c.failed()) {
         .timed_out => error.TimedOut,
         .canceled => error.Canceled,
         .none, .broken => error.ConnectionFailed,
     };
 }
 
-/// The deadline of an operation starting now.
+/// Why the first operation that failed did.
+pub fn failed(c: *const Socket) Failure {
+    return c.failure.load(.monotonic);
+}
+
+/// The deadline of an operation starting now. The phase belongs to the
+/// reading task: a multiplexed connection's writes, from any task, keep
+/// the activity timeout alone.
 fn deadline(c: *Socket, op: Io.Operation) ?Io.Timestamp {
+    if (c.multiplexed and op != .net_read) return c.activityDeadline();
     return switch (c.phase) {
         .handshake, .idle, .head => c.until,
-        .hijacked => null,
-        .h2 => if (op == .net_read) null else if (c.context.options.timeouts.activity) |a| Io.Clock.awake.now(c.io).addDuration(span.toIo(a)) else null,
-        .answer => if (c.context.options.timeouts.activity) |a| Io.Clock.awake.now(c.io).addDuration(span.toIo(a)) else null,
+        .hijacked, .h2 => null,
+        .answer => c.activityDeadline(),
     };
+}
+
+fn activityDeadline(c: *Socket) ?Io.Timestamp {
+    const a = c.context.options.timeouts.activity orelse return null;
+    return Io.Clock.awake.now(c.io).addDuration(span.toIo(a));
 }
 
 /// One socket operation within the deadline of the wait at hand.
@@ -243,7 +271,7 @@ fn perform(c: *Socket, op: Io.Operation) error{Failed}!Io.Operation.Result {
 }
 
 fn note(c: *Socket, failure: Failure) void {
-    if (c.failure == .none) c.failure = failure;
+    _ = c.failure.cmpxchgStrong(.none, failure, .monotonic, .monotonic);
 }
 
 const SocketReader = struct {

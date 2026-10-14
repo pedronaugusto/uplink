@@ -39,7 +39,7 @@ pub const Stage = enum { none, wait, connect, proxy_tls, tunnel, tls, write, hea
 
 /// `low_speed` is `Timeouts.low_speed`; `deadline` the request's own
 /// `timeout`.
-pub const Timeout = enum { connect, handshake, activity, low_speed, deadline };
+pub const Timeout = enum(u8) { connect, handshake, activity, low_speed, deadline };
 
 /// Scheme names, `, `-joined, in a fixed buffer: cut, and `truncated` set,
 /// when they do not fit.

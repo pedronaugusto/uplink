@@ -32,6 +32,9 @@ pub fn serve(context: *Context, handler: Handler, socket: *Socket) void {
     if (socket.input.interface.buffer.len < h2.head_len + 16384 and !socket.secure) {
         if (!grow(context, socket)) return;
     }
+    // Before any stream's task: from here on the streams write while this
+    // task reads.
+    socket.multiplex();
     var tasks: Io.Group = .init;
     const concurrent = probeConcurrency(io);
     var session = Session.init(context, socket, if (concurrent) 100 else 1) catch return;
@@ -235,6 +238,9 @@ fn answer(session: *Session, handler: Handler, st: *Stream) void {
     const target_text = if (head.method.eql(.CONNECT) and head.protocol == null) head.authority.? else head.path;
     const parsed = if (head.protocol != null) Request.Target.parseExtended(target_text) else Request.Target.parse(head.method, target_text);
     const target = parsed catch return st.reset(io, .protocol_error);
+    // Whether the request's data is still to come, as the reading task left
+    // it by now; the stream's state is read under the session's lock.
+    const body_coming = !st.dataEnded();
     var request: Request = .{
         .method = head.method,
         .target = target_text,
@@ -249,10 +255,10 @@ fn answer(session: *Session, handler: Handler, st: *Stream) void {
         .socket = session.socket,
         .body = .init(Io.Reader.ending, .none, &.{}),
         .stream = st,
-        .expects_continue = std.ascii.eqlIgnoreCase(std.mem.trim(u8, requestExpect(head.fields), " \t"), "100-continue") and !st.recv_end,
+        .expects_continue = std.ascii.eqlIgnoreCase(std.mem.trim(u8, requestExpect(head.fields), " \t"), "100-continue") and body_coming,
     };
     defer request.release(io);
-    if (context.options.decompress and !st.recv_end) {
+    if (context.options.decompress and body_coming) {
         const headers: wire.fields.Headers = .init(head.fields);
         if (wire.coding.Codings.of(&headers)) |codings| {
             if (codings.len != 0 and Decoder.decodes(codings.slice()))
@@ -278,7 +284,7 @@ fn answer(session: *Session, handler: Handler, st: *Stream) void {
     response.end(io) catch return st.reset(io, .internal_error);
     if (context.options.observer) |o| o.emit(.{ .answered = .{ .method = head.method.name, .path = target.path, .status = @backingInt(response.status), .took = span.of(arrived.durationTo(Io.Clock.awake.now(io))) } });
     // A request body the handler left: the client is told to stop sending.
-    if (!st.recv_end and st.reset_code == null) st.reset(io, .no_error);
+    st.refuseRest(io);
 }
 
 fn requestExpect(fields: []const Field) []const u8 {

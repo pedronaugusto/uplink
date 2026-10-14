@@ -307,13 +307,49 @@ pub const Stream = struct {
         return .ready;
     }
 
+    /// Whether the request's data has ended, all of it delivered (some
+    /// perhaps not yet read).
+    pub fn dataEnded(st: *Stream) bool {
+        const io = st.session.socket.io;
+        var held = st.session.shared.acquireUncancelable(io);
+        defer held.deinit(io);
+        return st.recv_end;
+    }
+
+    /// Whether the request's data has ended and been read to its end.
+    pub fn drained(st: *Stream) bool {
+        const io = st.session.socket.io;
+        var held = st.session.shared.acquireUncancelable(io);
+        defer held.deinit(io);
+        return st.recv_end and st.recv_len == 0;
+    }
+
+    /// The request's trailer fields, once they came.
+    pub fn trailerFields(st: *Stream) ?[]Field {
+        const io = st.session.socket.io;
+        var held = st.session.shared.acquireUncancelable(io);
+        defer held.deinit(io);
+        return st.trailers;
+    }
+
     /// Reset the stream with `code`.
     pub fn reset(st: *Stream, io: Io, code: h2.ErrorCode) void {
+        st.resetIf(io, code, false);
+    }
+
+    /// The response ended with the request's data still coming: tell the
+    /// client to stop sending it (`NO_ERROR`, RFC 9113 §8.1).
+    pub fn refuseRest(st: *Stream, io: Io) void {
+        st.resetIf(io, .no_error, true);
+    }
+
+    fn resetIf(st: *Stream, io: Io, code: h2.ErrorCode, only_unended: bool) void {
         const s = st.session;
         var held = s.shared.acquireUncancelable(io);
         defer held.deinit(io);
         const shared = held.value();
         if (shared.closed or st.reset_code != null) return;
+        if (only_unended and st.recv_end) return;
         // A reset that cannot be written: the connection has failed, which ends the stream too.
         shared.conn.reset(s.socket.writer(), st.id, code) catch {
             shared.closed = true;

@@ -146,7 +146,7 @@ pub fn param(r: *const Request, name: []const u8) ?[]const u8 {
 /// over as it came. The first call sends `100 Continue` to a client
 /// waiting for it.
 pub fn reader(r: *Request, io: Io) *Io.Reader {
-    r.socket.io = io;
+    r.socket.adopt(io);
     const raw = if (r.stream) |st| st.reader(io) else &r.body.interface;
     if (!r.started) {
         r.started = true;
@@ -223,7 +223,7 @@ pub fn decodingFailure(r: *const Request) ?Decoder.Error {
 pub fn trailers(r: *Request) ?fields.Headers {
     if (r.trailer_fields) |t| return t;
     if (r.stream) |st| {
-        const t = st.trailers orelse return null;
+        const t = st.trailerFields() orelse return null;
         r.trailer_fields = .init(t);
         return r.trailer_fields;
     }
@@ -237,7 +237,7 @@ pub fn trailers(r: *Request) ?fields.Headers {
 
 /// Whether the body was read to its end.
 pub fn bodyComplete(r: *const Request) bool {
-    if (r.stream) |st| return st.recv_end and st.recv_len == 0;
+    if (r.stream) |st| return st.drained();
     return r.body.complete();
 }
 

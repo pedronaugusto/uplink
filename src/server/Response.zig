@@ -187,7 +187,7 @@ pub fn closeAfter(r: *Response) void {
 /// The body's writer. Its buffer is the server's, a few KiB: a body that
 /// fits goes out with its length counted.
 pub fn writer(r: *Response, io: Io) Error!*Io.Writer {
-    r.socket.io = io;
+    r.socket.adopt(io);
     if (r.state == .hijacked or r.state == .ended) return error.HeadSent;
     if (r.body_buffer.len == 0) {
         r.body_buffer = try r.socket.context.buffers.acquire(io, .small);
@@ -198,7 +198,7 @@ pub fn writer(r: *Response, io: Io) Error!*Io.Writer {
 
 /// Send `body` whole, and end the response.
 pub fn send(r: *Response, io: Io, body: []const u8) Error!void {
-    r.socket.io = io;
+    r.socket.adopt(io);
     if (r.state != .open) return error.HeadSent;
     if (r.declared) |n| if (n != body.len) return error.BodyNotAllowed;
     return r.sendWhole(body);
@@ -215,7 +215,7 @@ pub fn trailer(r: *Response, name: []const u8, value: []const u8) Error!void {
 /// buffer holds, a chunked body's last chunk and trailer, and everything
 /// pushed to the client.
 pub fn end(r: *Response, io: Io) Error!void {
-    r.socket.io = io;
+    r.socket.adopt(io);
     switch (r.state) {
         .ended => return,
         .hijacked => {
@@ -365,7 +365,7 @@ pub const Hijacked = struct {
 /// `CONNECT` (RFC 8441), the stream is what is taken over: its data both
 /// ways, until either end ends it.
 pub fn hijack(r: *Response, io: Io) Error!Hijacked {
-    r.socket.io = io;
+    r.socket.adopt(io);
     if (r.state != .open) return error.HeadSent;
     if (r.stream) |st| {
         if (@backingInt(r.status) / 100 != 2) return error.HeadSent;

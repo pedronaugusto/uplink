@@ -136,9 +136,9 @@ pub fn create(ctx: *Context, io: Io, conn: *Connection) (Allocator.Error || erro
         }),
     };
     conn.io = io;
-    // The connection is shared: no exchange's deadline bounds its socket.
-    conn.deadline = null;
-    conn.diagnostics = null;
+    // The connection is shared: no exchange's deadline bounds its socket,
+    // and its `Io` stays this one.
+    conn.share();
     var held = h.shared.acquireUncancelable(io);
     defer held.deinit(io);
     held.value().proto.start(conn.writer()) catch return error.ConnectionFailed;
@@ -291,7 +291,6 @@ pub fn open(h: *H2, io: Io, fields: []const hpack.Field, end_stream: bool, head:
     defer held.deinit(io);
     const shared = held.value();
     if (shared.failure != null) return error.ConnectionFailed;
-    h.conn.io = io;
     const id = shared.proto.open() catch return error.Refused;
     const st = try h.ctx.gpa.create(Stream);
     errdefer h.ctx.gpa.destroy(st);
@@ -310,7 +309,6 @@ pub fn open(h: *H2, io: Io, fields: []const hpack.Field, end_stream: bool, head:
 pub fn send(h: *H2, io: Io, st: *Stream, bytes: []const u8, end_stream: bool, deadline: ?Io.Timestamp) Error!void {
     var held = h.shared.acquire(io) catch return error.Canceled;
     defer held.deinit(io);
-    h.conn.io = io;
     var until = h.waitUntil(io, deadline);
     var rest = bytes;
     while (true) {
@@ -415,7 +413,6 @@ fn pump(h: *H2, io: Io, held: anytype, deadline: ?Io.Timestamp) Error!void {
 /// start, and leave it in the reader's buffer.
 fn readFrame(h: *H2, io: Io, deadline: ?Io.Timestamp) Error!struct { h2.Head, []const u8 } {
     const conn = h.conn;
-    conn.io = io;
     const r = conn.reader();
     // Wait for the frame to start without a read that ends the socket on
     // cancelation or time: either leaves the connection whole for the
@@ -551,7 +548,6 @@ pub fn finish(h: *H2, io: Io, st: *Stream) void {
         var held = h.shared.acquireUncancelable(io);
         defer held.deinit(io);
         const shared = held.value();
-        h.conn.io = io;
         if (shared.failure == null and st.reset_code == null and !(st.recv_end and st.sent_end)) {
             // glint-ignore: Z026 -- a reset that cannot be written leaves a failed connection, which ends the stream too
             shared.proto.reset(h.conn.writer(), st.id, .cancel) catch {};

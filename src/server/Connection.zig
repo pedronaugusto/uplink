@@ -92,7 +92,7 @@ fn awaitRequest(c: *Connection, first: bool) bool {
     const more = if (r.bufferedLen() != 0) {} else r.fillMore();
     const stopping = !s.setIdle(io, &c.socket.entry, false);
     more catch |err| {
-        if (err == error.ReadFailed and c.socket.failure == .timed_out) c.socket.noteTimeout(.idle);
+        if (err == error.ReadFailed and c.socket.failed() == .timed_out) c.socket.noteTimeout(.idle);
         return false;
     };
     if (stopping) return false;
@@ -113,7 +113,7 @@ fn serveOne(c: *Connection) bool {
         error.NoStartLine => c.refuse(.bad_request, "no request line"),
         error.EndOfStream => false,
         error.ReadFailed => {
-            if (c.socket.failure == .timed_out) c.socket.noteTimeout(.head);
+            if (c.socket.failed() == .timed_out) c.socket.noteTimeout(.head);
             return false;
         },
         error.OutOfMemory => c.refuse(.service_unavailable, "out of memory"),
@@ -201,7 +201,7 @@ fn serveOne(c: *Connection) bool {
     // A handler that did not end its response has it ended now.
     response.end(io) catch return false;
     if (options.observer) |o| o.emit(.{ .answered = .{ .method = rh.method.name, .path = target.path, .status = @backingInt(response.status), .took = span.of(arrived.durationTo(Io.Clock.awake.now(io))) } });
-    if (!response.keepsConnection() or c.socket.failure != .none or c.socket.timed.fired()) return false;
+    if (!response.keepsConnection() or c.socket.failed() != .none or c.socket.timed.fired()) return false;
     return c.finishBody(&request);
 }
 

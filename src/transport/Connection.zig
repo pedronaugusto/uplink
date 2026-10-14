@@ -42,7 +42,8 @@ const Connection = @This();
 /// Private: the client's shared state.
 ctx: *Context,
 /// Private: the current exchange's `Io`, for the reader and writer
-/// adapters, which cannot take one per call.
+/// adapters, which cannot take one per call. A shared connection's stays
+/// the one it was made shared with.
 io: Io,
 /// Private: the socket.
 stream: Io.net.Stream,
@@ -69,9 +70,14 @@ deadline: ?Io.Timestamp = null,
 /// Private: the low-speed window.
 speed: Speed = .{},
 /// Private: which limit the deadline last armed is.
-armed: Diagnostics.Timeout = .activity,
-/// Why the last operation failed.
-failure: Failure = .none,
+armed: std.atomic.Value(Diagnostics.Timeout) = .init(.activity),
+/// Why the first operation that failed did; `failed` reads it.
+failure: std.atomic.Value(Failure) = .init(.none),
+/// Private: HTTP/2: exchanges read and write it at once, one reading
+/// while others write. No exchange's deadline bounds it, a write keeps
+/// the activity timeout alone, and the low-speed window counts what is
+/// read.
+shared: bool = false,
 /// The exchange this connection serves, for its failure details; null
 /// between exchanges.
 diagnostics: ?*Diagnostics = null,
@@ -79,7 +85,7 @@ diagnostics: ?*Diagnostics = null,
 unbound: bool = false,
 
 /// Why an operation failed.
-pub const Failure = enum { none, timed_out, canceled, broken };
+pub const Failure = enum(u8) { none, timed_out, canceled, broken };
 
 /// Errors from `open`.
 pub const OpenError = error{
@@ -251,7 +257,7 @@ fn observeTunnel(conn: *Connection, at: ?Io.Timestamp) void {
 /// Close politely: TLS close_notify, within the activity timeout, unless an
 /// operation already failed; then the socket. Everything is released.
 pub fn close(conn: *Connection, io: Io) void {
-    conn.teardown(io, conn.failure == .none);
+    conn.teardown(io, conn.failed() == .none);
 }
 
 fn teardown(conn: *Connection, io: Io, polite: bool) void {
@@ -355,7 +361,7 @@ pub fn readable(conn: *Connection, io: Io, timeout: Io.Duration) Io.Cancelable!b
 /// Wait up to `timeout` for the peer to send something, keeping it for
 /// the reader, and say what the wait found; it ends nothing.
 pub fn awaitReadable(conn: *Connection, io: Io, timeout: Io.Duration) Io.Cancelable!Timed.Readiness {
-    conn.io = io;
+    if (!conn.shared) conn.io = io;
     if (conn.reader().bufferedLen() != 0) return .ready;
     return Timed.awaitReadable(io, conn.stream.socket.handle, &conn.input.interface, timeout);
 }
@@ -378,7 +384,7 @@ pub fn speaksH2(conn: *const Connection) bool {
 /// Whether the connection may carry another exchange: no operation failed
 /// and no deadline fired.
 pub fn reusable(conn: *const Connection) bool {
-    return conn.failure == .none and !conn.timed.fired();
+    return conn.failed() == .none and !conn.timed.fired();
 }
 
 /// The reader of the top layer.
@@ -425,12 +431,12 @@ fn flushFrom(conn: *Connection, top: usize) Io.Writer.Error!void {
 
 /// Why a read failed, by name.
 pub fn readError(conn: *Connection) IoError {
-    switch (conn.failure) {
+    switch (conn.failed()) {
         .timed_out => return error.TimedOut,
         .canceled => return error.Canceled,
         .none, .broken => {},
     }
-    if (conn.timed.fired()) return conn.timedOut(conn.armed);
+    if (conn.timed.fired()) return conn.timedOut(conn.armed.load(.monotonic));
     for (&conn.sessions, conn.session_on) |*s, on| {
         if (!on) continue;
         const err = s.failure orelse continue;
@@ -456,12 +462,12 @@ pub fn readError(conn: *Connection) IoError {
 
 /// Why a write failed, by name.
 pub fn writeError(conn: *Connection) IoError {
-    switch (conn.failure) {
+    switch (conn.failed()) {
         .timed_out => return error.TimedOut,
         .canceled => return error.Canceled,
         .none, .broken => {},
     }
-    if (conn.timed.fired()) return conn.timedOut(conn.armed);
+    if (conn.timed.fired()) return conn.timedOut(conn.armed.load(.monotonic));
     // A server that refused the client's certificate after a TLS 1.3
     // handshake the client thinks is done has sent its alert and closed:
     // the write that failed is the request, and the alert is there to read.
@@ -480,8 +486,21 @@ fn timedOut(conn: *Connection, kind: Diagnostics.Timeout) IoError {
     return error.TimedOut;
 }
 
+/// Why the first operation that failed did.
+pub fn failed(conn: *const Connection) Failure {
+    return conn.failure.load(.monotonic);
+}
+
+/// Carry exchanges at once from here on (HTTP/2). Called before a second
+/// task has the connection.
+pub fn share(conn: *Connection) void {
+    conn.shared = true;
+    conn.deadline = null;
+    conn.diagnostics = null;
+}
+
 fn noteTimedOut(conn: *Connection, kind: Diagnostics.Timeout) void {
-    conn.failure = .timed_out;
+    conn.failure.store(.timed_out, .monotonic);
     if (conn.diagnostics) |d| d.timeout = kind;
 }
 
@@ -498,11 +517,18 @@ fn missingCertificateReset(conn: *Connection) bool {
 /// A deadline, and which limit it is.
 const Limit = struct { at: Io.Timestamp, kind: Diagnostics.Timeout };
 
+/// Whether the low-speed window counts an operation: every one, but on a
+/// shared connection only reads, which one task does at a time.
+fn paced(conn: *const Connection, reading: bool) bool {
+    return reading or !conn.shared;
+}
+
 /// The deadline of an operation starting now, or null when none applies,
 /// found without reading the clock.
-fn operationLimit(conn: *Connection, io: Io) ?Limit {
+fn operationLimit(conn: *Connection, io: Io, reading: bool) ?Limit {
     if (conn.unbound) return null;
-    const t = conn.ctx.timeouts;
+    var t = conn.ctx.timeouts;
+    if (!conn.paced(reading)) t.low_speed = null;
     if (conn.handshake_until == null and t.activity == null and conn.deadline == null and t.low_speed == null) return null;
     const now = Io.Clock.awake.now(io);
     var best: ?Limit = null;
@@ -521,8 +547,8 @@ fn nearer(best: *?Limit, candidate: Limit) void {
 /// is recorded in `failure`, and `error.Failed` returned.
 fn perform(conn: *Connection, op: Io.Operation) error{Failed}!Io.Operation.Result {
     const io = conn.io;
-    const limit = conn.operationLimit(io);
-    if (limit) |l| conn.armed = l.kind;
+    const limit = conn.operationLimit(io, op == .net_read);
+    if (limit) |l| conn.armed.store(l.kind, .monotonic);
     return conn.timed.perform(io, conn.ctx.keeper(), op, if (limit) |l| l.at else null) catch |err| switch (err) {
         error.TimedOut => {
             conn.noteTimedOut(limit.?.kind);
@@ -533,8 +559,8 @@ fn perform(conn: *Connection, op: Io.Operation) error{Failed}!Io.Operation.Resul
 }
 
 /// `n` bytes moved, for the low-speed window.
-fn moved(conn: *Connection, n: usize) void {
-    if (conn.ctx.timeouts.low_speed != null) conn.speed.bytes = conn.speed.bytes.add(.fromRaw(n)) catch .fromRaw(std.math.maxInt(u64));
+fn moved(conn: *Connection, n: usize, reading: bool) void {
+    if (conn.ctx.timeouts.low_speed != null and conn.paced(reading)) conn.speed.bytes = conn.speed.bytes.add(.fromRaw(n)) catch .fromRaw(std.math.maxInt(u64));
 }
 
 /// The low-speed window: bytes moved since it started. A window counts
@@ -565,7 +591,7 @@ fn fail(conn: *Connection, failure: Failure) error{Failed} {
 }
 
 fn note(conn: *Connection, failure: Failure) void {
-    if (conn.failure == .none) conn.failure = failure;
+    _ = conn.failure.cmpxchgStrong(.none, failure, .monotonic, .monotonic);
 }
 
 const SocketReader = struct {
@@ -598,7 +624,7 @@ const SocketReader = struct {
             return error.ReadFailed;
         }).data_len;
         if (n == 0) return error.EndOfStream;
-        conn.moved(n);
+        conn.moved(n, true);
         if (n > data_size) {
             r.end += n - data_size;
             return data_size;
@@ -627,7 +653,7 @@ const SocketWriter = struct {
             conn.note(.broken);
             return error.WriteFailed;
         };
-        conn.moved(n);
+        conn.moved(n, false);
         return w.consume(n);
     }
 };
@@ -684,11 +710,11 @@ fn systemTrust(conn: *Connection) OpenError!cloak.Trust.Snapshot {
 }
 
 fn handshakeFailed(conn: *Connection, err: cloak.tls.Session.OpenError, report: cloak.tls.Session.Diagnostics) OpenError {
-    if (conn.failure == .timed_out or conn.timed.fired()) {
-        if (conn.failure != .timed_out) conn.noteTimedOut(conn.armed);
+    if (conn.failed() == .timed_out or conn.timed.fired()) {
+        if (conn.failed() != .timed_out) conn.noteTimedOut(conn.armed.load(.monotonic));
         return error.TimedOut;
     }
-    if (conn.failure == .canceled) return error.Canceled;
+    if (conn.failed() == .canceled) return error.Canceled;
     const alert = report.alert_received orelse report.alert_sent;
     if (conn.diagnostics) |d| {
         d.tls_error = err;
