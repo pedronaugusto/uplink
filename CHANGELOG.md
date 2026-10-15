@@ -6,6 +6,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- `Dns.https` returns the name's usable HTTPS records owned by an allocator, as a `net.Resolver.Binding`, the most preferred first and each with its effective target (the record's own name for "."); `Dns.ServiceCopy` is gone.
+
+### Added
+
+- HTTPS records when dialing (RFC 9460): with a resolver that reads them (`Dns`, over the stub or DoH), a client dials an `https` origin as its records say, each endpoint that speaks a protocol the client offers in turn, at its target and port, the target's addresses or else its hints, offering by ALPN only the protocols both speak; when every endpoint fails, the origin as it is, unless one publishes ECH. Records live under `_port._https.host` off port 443. `Resolver` has `serviceFn` and `service`; the cache keeps records, none included, beside the addresses; a `Static` name has none.
+- Encrypted Client Hello (RFC 9849), `tls.ClientOptions.ech`: from the config an endpoint's HTTPS record publishes, the connection then TLS 1.3 only; a server that refuses a stale config with new ones is tried once more with them, one with ECH off once more without it. `.grease` sends GREASE to every other server. A server takes `tls.ServerOptions.ech_keys`.
+- TLS session resumption, on by default: a client resumes TLS 1.3 sessions from a ticket cache of its own (`tls.ClientOptions.resumption`: its bounds, the longest a session lives, TLS 1.2 tickets when asked), keeping the tickets of connections through a proxy apart from direct ones; a server issues tickets from keys of its own, a fresh one drawn whenever none issues, or from a ring the caller rotates (`tls.ServerOptions.tickets`, `tls12_tickets`).
+- Certificate compression (RFC 8879), `tls.ClientOptions.certificate_compression`: a client offers zstd and zlib, decoded by warp (`tls.decoder`), or the caller's codecs.
+- `Observer.Event.tls` says whether a handshake `resumed` and whether it used `ech`; `dial.Dialed.peer`.
+- `wire.h2.Lifecycle`, an HTTP/2 stream's states and the edges between them (RFC 9113 §5.1) as an aegis typestate machine, validated whole when analyzed, with `wire.h2.StreamEvent`; a stream receives where its end can still come and sends where its own can, read off the one table.
+
+### Fixed
+
+- `Diagnostics.peer` and `Observer.Event.connected.peer` name the address connected to, where they named the connection's own local end.
+
+### Changed
+
+- Pins cloak 0.10.1 and warp 0.4.0.
+
 ## [0.6.0] - 2026-10-14
 
 ### Breaking

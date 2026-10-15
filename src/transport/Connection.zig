@@ -30,6 +30,7 @@ const h1 = wire.h1;
 const fields = wire.fields;
 const socks = wire.socks;
 const dial = @import("../net/dial.zig");
+const Resolver = @import("../net/Resolver.zig");
 const sys = @import("../net/sys.zig");
 const Context = @import("Context.zig");
 const span = @import("../span.zig");
@@ -132,16 +133,47 @@ pub fn open(ctx: *Context, io: Io, route: Context.Route, options: OpenOptions) O
     // connection, with the answer; and once more for a Digest nonce gone
     // stale.
     var attempts: u8 = 0;
+    var ech: Ech = .published;
+    // After a refused ECH: what the server gave for a retry, which cloak
+    // writes over `untouched` only when the server authenticated as the
+    // config's public name (RFC 9849 §6.1.6).
+    var untouched: [1]u8 = undefined;
+    var retry: []u8 = &untouched;
+    defer if (retry.ptr != &untouched) ctx.gpa.free(retry);
     while (true) : (attempts += 1) {
         var again = false;
-        return openOnce(ctx, io, route, options, &again) catch |err| switch (err) {
-            error.ProxyAuthenticationRequired => if (attempts < 2 and again) continue else err,
-            else => err,
+        return openOnce(ctx, io, route, options, &again, ech, if (ech == .published) &retry else null) catch |err| switch (err) {
+            error.ProxyAuthenticationRequired => if (attempts < 2 and again) continue else error.ProxyAuthenticationRequired,
+            // Tried once more on a new connection: with the configs the
+            // server gave, or with ECH off when it gave none.
+            error.EchRejected => if (ech == .published and retry.ptr != &untouched) {
+                ech = if (retry.len == 0) .off else .{ .retry = retry };
+                continue;
+            } else error.TlsFailed,
+            else => |e| e,
         };
     }
 }
 
-fn openOnce(ctx: *Context, io: Io, route: Context.Route, options: OpenOptions, again: *bool) OpenError!*Connection {
+/// Where a target's ECH config comes from.
+const Ech = union(enum) {
+    /// The endpoint's HTTPS record, as the client's options say.
+    published,
+    /// A server's retry configs.
+    retry: []const u8,
+    /// None: the server turned ECH off.
+    off,
+};
+
+/// What the target's handshake offers.
+const Offer = struct {
+    alpn: []const []const u8,
+    ech: cloak.tls.ech.Mode = .off,
+    /// Where cloak writes a refusing server's retry configs.
+    ech_retry: ?*[]u8 = null,
+};
+
+fn openOnce(ctx: *Context, io: Io, route: Context.Route, options: OpenOptions, again: *bool, ech: Ech, ech_retry: ?*[]u8) (OpenError || error{EchRejected})!*Connection {
     const diagnostics = options.diagnostics;
     const proxy: ?Proxy = if (route.proxy) |slot| slot.proxy else null;
     const first_host = if (proxy) |p| p.host else route.host();
@@ -167,7 +199,20 @@ fn openOnce(ctx: *Context, io: Io, route: Context.Route, options: OpenOptions, a
         .resolver = ctx.resolve(),
         .attempt_delay = ctx.dial.attempt_delay,
     };
-    const dialed = (if (ctx.dial.unix_socket) |path| dial.dialUnix(io, path, dial_options) else dial.dial(io, first_host, first_port, dial_options)) catch |err| {
+    const protocols = if (route.protocol == .negotiate) tls.client_protocols else tls.client_protocols_h1;
+    // A direct `https` origin is dialed as its HTTPS records say; a proxy
+    // looks the target up itself, so its records are not asked for here.
+    var binding: ?Resolver.Binding = null;
+    defer if (binding) |*b| b.deinit(ctx.gpa);
+    var record: ?*const Resolver.Binding.Record = null;
+    const dialed = (if (ctx.dial.unix_socket) |path|
+        dial.dialUnix(io, path, dial_options)
+    else if (route.secure and proxy == null) found: {
+        const d = try dial.dialHttps(io, ctx.gpa, first_host, first_port, .{ .protocols = protocols, .ech = ctx.tls.ech != .off and ech == .published }, dial_options);
+        binding = d.binding;
+        record = d.record;
+        break :found d.dialed;
+    } else dial.dial(io, first_host, first_port, dial_options)) catch |err| {
         if (err == error.TimedOut) if (diagnostics) |d| {
             d.timeout = limit_kind;
         };
@@ -178,12 +223,11 @@ fn openOnce(ctx: *Context, io: Io, route: Context.Route, options: OpenOptions, a
     };
     if (!dialed.timeout_enforced) _ = ctx.counters.timeouts_unenforced.fetchAdd(1, .monotonic);
     _ = ctx.counters.opened.fetchAdd(1, .monotonic);
-    const unix = ctx.dial.unix_socket != null;
-    if (diagnostics) |d| d.peer = if (unix) null else dialed.stream.socket.address;
+    if (diagnostics) |d| d.peer = dialed.peer;
     if (ctx.observer) |o| o.emit(.{ .connected = .{
         .host = first_host,
         .port = first_port,
-        .peer = if (unix) null else dialed.stream.socket.address,
+        .peer = dialed.peer,
         .lookup = dialed.lookup,
         .took = span.of(started.durationTo(Io.Clock.awake.now(io))),
     } });
@@ -192,7 +236,16 @@ fn openOnce(ctx: *Context, io: Io, route: Context.Route, options: OpenOptions, a
         return err;
     };
     conn.deadline = options.deadline;
-    conn.establish(proxy, started, again) catch |err| {
+    const offer: Offer = .{
+        .alpn = if (record) |r| meet(protocols, r.service) else protocols,
+        .ech = switch (ech) {
+            .published => if (ctx.tls.ech == .off) .off else if (record) |r| (if (r.service.ech()) |list| .{ .config_list = list } else ctx.greaseOr()) else ctx.greaseOr(),
+            .retry => |list| .{ .config_list = list },
+            .off => .off,
+        },
+        .ech_retry = ech_retry,
+    };
+    conn.establish(proxy, started, again, offer) catch |err| {
         conn.teardown(io, false);
         return err;
     };
@@ -224,15 +277,25 @@ fn create(ctx: *Context, io: Io, route: Context.Route, stream: Io.net.Stream, di
     return conn;
 }
 
+/// The protocols of `protocols` an endpoint speaks, the client's order
+/// kept; the dial took only an endpoint that speaks one.
+fn meet(protocols: []const []const u8, s: wire.dns.Service) []const []const u8 {
+    const two = protocols.len == 2 and s.speaks("h2");
+    const one = s.speaks("http/1.1");
+    if (two and one) return tls.client_protocols;
+    if (two) return tls.client_protocols_h2;
+    return tls.client_protocols_h1;
+}
+
 /// Start the proxy's layers and the target's TLS.
-fn establish(conn: *Connection, proxy: ?Proxy, started: Io.Timestamp, again: *bool) OpenError!void {
+fn establish(conn: *Connection, proxy: ?Proxy, started: Io.Timestamp, again: *bool, offer: Offer) (OpenError || error{EchRejected})!void {
     if (proxy) |p| {
         if (p.kind.socks()) {
             const at = conn.observeStart();
             try conn.socksTunnel(p, started);
             conn.observeTunnel(at);
         } else {
-            if (p.kind == .https) try conn.startTls(0, p.host);
+            if (p.kind == .https) try conn.startTls(0, p.host, .{ .alpn = tls.client_protocols_h1, .ech = conn.ctx.greaseOr() });
             if (conn.route.secure) {
                 const at = conn.observeStart();
                 try conn.tunnel(p, again);
@@ -240,7 +303,7 @@ fn establish(conn: *Connection, proxy: ?Proxy, started: Io.Timestamp, again: *bo
             } else conn.absolute_form = true;
         }
     }
-    if (conn.route.secure) try conn.startTls(1, conn.route.host());
+    if (conn.route.secure) try conn.startTls(1, conn.route.host(), offer);
 }
 
 /// The time now, when an observer will want a step's duration.
@@ -662,7 +725,7 @@ const SocketWriter = struct {
     }
 };
 
-fn startTls(conn: *Connection, slot: usize, host: []const u8) OpenError!void {
+fn startTls(conn: *Connection, slot: usize, host: []const u8, offer: Offer) (OpenError || error{EchRejected})!void {
     const ctx = conn.ctx;
     const io = conn.io;
     if (conn.diagnostics) |d| d.stage = if (slot == 0) .proxy_tls else .tls;
@@ -676,12 +739,27 @@ fn startTls(conn: *Connection, slot: usize, host: []const u8) OpenError!void {
     defer conn.handshake_until = null;
     const session = &conn.sessions[slot];
     var report: cloak.tls.Session.Diagnostics = .{};
+    var codecs = [_]cloak.tls.certificate_compression.Codec{ tls.decoder(.zstd, &ctx.gpa), tls.decoder(.zlib, &ctx.gpa) };
+    var namespace_buf: [Io.net.HostName.max_len + 32]u8 = undefined;
     session.open(ctx.gpa, io, conn.readerBelow(slot), conn.writerBelow(slot), read_buffer, write_buffer, .{
         .identity = tls.reference(host),
         .trust = if (trust) |snapshot| .{ .snapshot = snapshot } else .none,
         .auth = if (slot == 0) conn.route.proxy.?.proxy.tls.client_auth else ctx.tls.client_auth,
         .key_log = if (ctx.tls.key_log) |sink| tls.keyLog(sink) else null,
-        .alpn = if (slot == 1 and conn.route.protocol == .negotiate) tls.client_protocols else tls.client_protocols_h1,
+        .alpn = offer.alpn,
+        .resumption = if (ctx.tls.resumption) |r| .{
+            .cache = try ctx.sessions.get(ctx.gpa, io, r),
+            .namespace = conn.ticketNamespace(slot, &namespace_buf),
+            .max_age = span.toIo(r.max_age),
+            .tls12 = r.tls12,
+        } else null,
+        .certificate_compression = switch (ctx.tls.certificate_compression) {
+            .zstd_zlib => &codecs,
+            .none => &.{},
+            .codecs => |c| c,
+        },
+        .ech = offer.ech,
+        .ech_retry = offer.ech_retry,
         // HTTP says where a body ends, so an end without close_notify is
         // not a truncation it cannot see.
         .eof = .allow,
@@ -689,7 +767,19 @@ fn startTls(conn: *Connection, slot: usize, host: []const u8) OpenError!void {
     }) catch |err| return conn.handshakeFailed(err, report);
     conn.session_buffers[slot] = .{ read_buffer, write_buffer };
     conn.session_on[slot] = true;
-    if (ctx.observer) |o| o.emit(.{ .tls = .{ .host = host, .proxy = slot == 0, .took = span.of(started.?.durationTo(Io.Clock.awake.now(io))) } });
+    if (ctx.observer) |o| {
+        const info = session.info().?;
+        o.emit(.{ .tls = .{ .host = host, .proxy = slot == 0, .took = span.of(started.?.durationTo(Io.Clock.awake.now(io))), .resumed = info.resumed, .ech = info.ech_accepted } });
+    }
+}
+
+/// What keeps a session's tickets apart from others with the same name:
+/// the proxy a target is reached through, so a server cannot link a
+/// client's connections through a proxy to its direct ones by a ticket.
+fn ticketNamespace(conn: *const Connection, slot: usize, buf: []u8) []const u8 {
+    if (slot == 0) return "";
+    const p = (conn.route.proxy orelse return "").proxy;
+    return std.mem.print(buf, "via {t} {s}:{d}", .{ p.kind, p.host, p.port }) catch unreachable; // unreachable: the buffer holds a host name and 32 bytes more, past the longest kind and port
 }
 
 /// The authorities a session in `slot` checks its server against, or null
@@ -713,7 +803,7 @@ fn systemTrust(conn: *Connection) OpenError!cloak.Trust.Snapshot {
     };
 }
 
-fn handshakeFailed(conn: *Connection, err: cloak.tls.Session.OpenError, report: cloak.tls.Session.Diagnostics) OpenError {
+fn handshakeFailed(conn: *Connection, err: cloak.tls.Session.OpenError, report: cloak.tls.Session.Diagnostics) (OpenError || error{EchRejected}) {
     if (conn.failed() == .timed_out or conn.timed.fired()) {
         if (conn.failed() != .timed_out) conn.noteTimedOut(conn.armed.load(.monotonic));
         return error.TimedOut;
@@ -729,6 +819,7 @@ fn handshakeFailed(conn: *Connection, err: cloak.tls.Session.OpenError, report: 
         error.OutOfMemory => error.OutOfMemory,
         // A client key cloak does not sign with yet.
         error.SignerRequired => error.ClientCertificateSchemeUnsupported,
+        error.EchRejected => error.EchRejected,
         error.ReadFailed => conn.readError(),
         error.WriteFailed => conn.writeError(),
         else => if (conn.missingCertificateReset()) error.ClientCertificateRejected else error.TlsFailed,

@@ -204,7 +204,13 @@ servers of `resolv.conf` (the adapters' on Windows, `Dns.System`) over UDP
 and over TCP when an answer is truncated, each wait bounded, or DNS over
 HTTPS (`Doh`, RFC 8484) through a client of its own. It asks for AAAA and A
 at once, follows CNAMEs, tries the search domains in the C library's order,
-and reads HTTPS records (RFC 9460) with `Dns.https`. The messages are
+and reads HTTPS records (RFC 9460). With it a client dials an `https`
+origin as its records say: each endpoint that speaks a protocol the client
+offers, most preferred first, at its target and port, the target's addresses
+or else its hints, offering only the protocols both speak; then the origin
+as it is, unless an endpoint publishes ECH, whose name a bare dial would
+show. The cache keeps the records beside the addresses, none included; the
+system's lookup reads none. The messages are
 `wire.dns`'s, read with every name and pointer bounded, and fuzzed. A name's
 addresses are raced by Happy Eyeballs (RFC 8305): one at a time, the families
 alternating, each a quarter second after the last or at once when it failed,
@@ -238,6 +244,18 @@ authorities, which clients may share; without one the client reads the system's
 once, at its first verifying handshake. Each handshake checks certificates at
 the current real time, and a handshake that fails says why in
 `Diagnostics.tls_error` and `tls_alert`.
+
+Sessions resume (TLS 1.3, a fresh key exchange each time) from a ticket cache
+each client keeps, bounded by `tls.ClientOptions.resumption`, with the
+tickets of connections through a proxy kept apart from direct ones; TLS 1.2
+tickets only when asked. A server issues tickets from keys of its own, drawn
+fresh whenever none issues, or from a ring the caller rotates and may share
+(`tls.ServerOptions.tickets`). A client offers certificate compression (RFC
+8879) with warp's zstd and zlib decoders, or the caller's. Encrypted Client
+Hello (RFC 9849) hides the server's name when its HTTPS record publishes a
+config: a server that refuses a stale config with new ones is tried once
+more with them, one that has ECH off once more without it, and `ech =
+.grease` sends GREASE to every other server. A server takes ECH keys.
 
 **The server.** `Server.serve` accepts on a listener until `shutdown`, each
 connection a task of its own; on an `Io` with no task to spare it serves one
@@ -335,8 +353,7 @@ environment itself.
 
 ## Scope
 
-- HTTP/2 over TLS waits for cloak's full-duplex `tls.Session`. No server
-  push, which browsers dropped. The client does not open a WebSocket over
+- No server push, which browsers dropped. The client does not open a WebSocket over
   HTTP/2 (RFC 8441), only the server accepts one, so a server that speaks
   HTTP/2 alone, with no HTTP/1.1 beside it, takes no WebSocket from uplink's
   client. There is no TLS engine of uplink's own (TLS is
@@ -346,7 +363,11 @@ environment itself.
 - A file is sent through the response's writer, read and written with the
   activity timeout kept: no `sendfile`, which no `Io` bounds by a deadline yet.
 - No Brotli decoding: such a body is handed over as it came, with its
-  `Content-Encoding`.
+  `Content-Encoding`, and a client offers no Brotli for certificates unless
+  given a decoder of its own. A server compresses no certificates.
+- HTTPS records are read for an `https` origin dialed directly: an `http`
+  URL is not upgraded by one (RFC 9460 §9.5), and through a proxy, which
+  finds the target itself, none is asked for.
 - No NTLM, Negotiate, PAC files or OCSP, and no HTTP cache.
 - No local address or interface to bind a connection to.
 - No public suffix list: a `CookieJar` takes one through

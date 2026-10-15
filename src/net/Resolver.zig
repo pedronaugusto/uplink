@@ -3,6 +3,10 @@
 //! passes the rest on; `Cache` keeps answers for a while. Each wraps another
 //! resolver, so they stack.
 //!
+//! A resolver that reads DNS itself (`Dns`) also answers a name's HTTPS
+//! service binding (RFC 9460), which says where and how an `https` origin
+//! is reached: `service`. The system's lookup reads none.
+//!
 //! An address literal never reaches a resolver: `lookup` answers it itself.
 
 const std = @import("std");
@@ -10,6 +14,7 @@ const aegis = @import("aegis");
 const reactor = @import("reactor");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const dns = @import("uplink.wire").dns;
 const span = @import("../span.zig");
 const Duration = span.Duration;
 const IpAddress = Io.net.IpAddress;
@@ -20,8 +25,90 @@ context: ?*anyopaque,
 /// Answer `host`, a name, with up to `out.len` addresses on `port`, of
 /// `family` when one is given.
 lookupFn: *const fn (io: Io, context: ?*anyopaque, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress) LookupError![]IpAddress,
+/// Answer the HTTPS records of `name`, the DNS name asked (a port's prefix
+/// included), owned by `gpa`; null when it has none or they could not be
+/// had. Null for a resolver that reads none.
+serviceFn: ?*const fn (io: Io, context: ?*anyopaque, gpa: Allocator, name: []const u8) ServiceError!?Binding = null,
 
 pub const LookupError = reactor.net.ResolveError;
+
+/// Why `service` could not answer. A name whose records could not be had
+/// (no answer, a server failure) has none: a client then connects as it
+/// would without them (RFC 9460 §3).
+pub const ServiceError = error{ OutOfMemory, Canceled };
+
+/// An origin's HTTPS service binding: the ServiceMode records a client can
+/// use (every key they make mandatory known), the most preferred first,
+/// held past the answer they came in.
+pub const Binding = struct {
+    records: []Record,
+    /// Private: the records' targets and parameters.
+    bytes: []u8,
+
+    /// One endpoint of the binding.
+    pub const Record = struct {
+        /// The name to connect to: the record's target, or the name its
+        /// owner when it names none.
+        target: []const u8,
+        /// Its priority and parameters; its target is `target`.
+        service: dns.Service,
+    };
+
+    /// A binding of copies of `records`, each with its effective target.
+    pub fn init(gpa: Allocator, records: []const Record) Allocator.Error!Binding {
+        var len: usize = 0;
+        for (records) |r| len += r.target.len + r.service.params.len;
+        const bytes = try gpa.alloc(u8, len);
+        errdefer gpa.free(bytes);
+        const copies = try gpa.alloc(Record, records.len);
+        var at: usize = 0;
+        for (records, copies) |r, *c| {
+            const target = bytes[at..][0..r.target.len];
+            @memcpy(target, r.target);
+            at += target.len;
+            const params = bytes[at..][0..r.service.params.len];
+            @memcpy(params, r.service.params);
+            at += params.len;
+            c.* = .{ .target = target, .service = .{ .priority = r.service.priority, .target = target, .params = params } };
+        }
+        return .{ .records = copies, .bytes = bytes };
+    }
+
+    /// A copy owned by `gpa`.
+    pub fn clone(b: Binding, gpa: Allocator) Allocator.Error!Binding {
+        return init(gpa, b.records);
+    }
+
+    pub fn deinit(b: *Binding, gpa: Allocator) void {
+        gpa.free(b.records);
+        gpa.free(b.bytes);
+        b.* = undefined;
+    }
+};
+
+/// The DNS name an `https` origin's records are under: the host itself on
+/// port 443, else under its port's prefix, `_8443._https.host` (RFC 9460
+/// §9.1).
+pub fn serviceName(host: []const u8, port: u16, out: *[dns.max_name]u8) error{InvalidHostName}![]const u8 {
+    const trimmed = if (host.len != 0 and host[host.len - 1] == '.') host[0 .. host.len - 1] else host;
+    if (port == 443) {
+        if (trimmed.len > out.len) return error.InvalidHostName;
+        @memcpy(out[0..trimmed.len], trimmed);
+        return out[0..trimmed.len];
+    }
+    return std.mem.print(out, "_{d}._https.{s}", .{ port, trimmed }) catch error.InvalidHostName;
+}
+
+/// The HTTPS service binding of the `https` origin `host` on `port`, owned
+/// by `gpa`; null when it has none, when `host` is an address, or when the
+/// resolver reads no such records.
+pub fn service(r: Resolver, io: Io, gpa: Allocator, host: []const u8, port: u16) ServiceError!?Binding {
+    const answer = r.serviceFn orelse return null;
+    if (reactor.net.literal(host, port) != null) return null;
+    var name_buf: [dns.max_name]u8 = undefined;
+    const name = serviceName(host, port, &name_buf) catch return null;
+    return answer(io, r.context, gpa, name);
+}
 
 /// `host`'s addresses on `port`: the address itself when `host` is one,
 /// else the resolver's answer.
@@ -106,7 +193,15 @@ pub const Static = struct {
     };
 
     pub fn resolver(s: *const Static) Resolver {
-        return .{ .context = @constCast(s), .lookupFn = staticLookup }; // safe: the lookup only reads through the pointer
+        return .{ .context = @constCast(s), .lookupFn = staticLookup, .serviceFn = if (s.fallback.serviceFn != null) staticService else null }; // safe: the lookups only read through the pointer
+    }
+
+    /// A name listed is reached at the addresses given, so it has no
+    /// binding to send it elsewhere; the rest are the fallback's.
+    fn staticService(io: Io, context: ?*anyopaque, gpa: Allocator, name: []const u8) ServiceError!?Binding {
+        const s: *const Static = @ptrCast(@alignCast(context.?)); // safe: `resolver` passes a Static
+        for (s.entries) |e| if (std.ascii.eqlIgnoreCase(e.host, originOf(name))) return null;
+        return s.fallback.serviceFn.?(io, s.fallback.context, gpa, name);
     }
 
     fn staticLookup(io: Io, context: ?*anyopaque, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress) LookupError![]IpAddress {
@@ -155,6 +250,13 @@ pub const Static = struct {
     }
 };
 
+/// The host a service name is for: past a port's prefix.
+fn originOf(name: []const u8) []const u8 {
+    if (name.len == 0 or name[0] != '_') return name;
+    const https = std.mem.find(u8, name, "._https.") orelse return name;
+    return name[https + "._https.".len ..];
+}
+
 /// Answers kept for `ttl`, per name, the system's lookup having no time to
 /// live to give. Shared by every task of a client; a name is looked up by
 /// whichever task first misses it.
@@ -165,13 +267,24 @@ pub const Cache = struct {
     /// Private: names, lower-cased and owned, to their answers, reached
     /// only through the lock beside them.
     entries: aegis.BlockingGuarded(std.StringHashMapUnmanaged(Entry)),
+    /// Private: service names, lower-cased and owned, to their bindings,
+    /// none included, reached only through the lock beside them.
+    services: aegis.BlockingGuarded(std.StringHashMapUnmanaged(ServiceEntry)),
 
     pub const Options = struct {
         /// How long an answer is kept.
         ttl: Duration = .literal("60s"),
-        /// The most names kept; past it, expired answers go, then the one
-        /// closest to expiring.
+        /// The most names kept, and apart from them the most service
+        /// names; past it, expired answers go, then the one closest to
+        /// expiring.
         max_entries: u32 = 256,
+    };
+
+    const ServiceEntry = struct {
+        /// Null: the name has none.
+        binding: ?Binding,
+        /// On the awake clock.
+        expires: Io.Timestamp,
     };
 
     /// The most addresses kept for one name.
@@ -185,7 +298,7 @@ pub const Cache = struct {
     };
 
     pub fn init(gpa: Allocator, inner: Resolver, options: Options) Cache {
-        return .{ .gpa = gpa, .inner = inner, .options = options, .entries = .init(.empty) };
+        return .{ .gpa = gpa, .inner = inner, .options = options, .entries = .init(.empty), .services = .init(.empty) };
     }
 
     /// Free every answer. No task may be looking a name up.
@@ -196,21 +309,113 @@ pub const Cache = struct {
         while (it.next()) |k| c.gpa.free(k.*);
         entries.deinit(c.gpa);
         held.deinit(io);
+        c.clearServices(io);
+        var services = c.services.acquireUncancelable(io);
+        services.value().deinit(c.gpa);
+        services.deinit(io);
         c.* = undefined;
     }
 
     pub fn resolver(c: *Cache) Resolver {
-        return .{ .context = c, .lookupFn = cacheLookup };
+        return .{ .context = c, .lookupFn = cacheLookup, .serviceFn = if (c.inner.serviceFn != null) cacheService else null };
     }
 
     /// Forget every answer.
     pub fn clear(c: *Cache, io: Io) void {
-        var held = c.entries.acquireUncancelable(io);
+        {
+            var held = c.entries.acquireUncancelable(io);
+            defer held.deinit(io);
+            const entries = held.value();
+            var it = entries.keyIterator();
+            while (it.next()) |k| c.gpa.free(k.*);
+            entries.clearRetainingCapacity();
+        }
+        c.clearServices(io);
+    }
+
+    fn clearServices(c: *Cache, io: Io) void {
+        var held = c.services.acquireUncancelable(io);
         defer held.deinit(io);
-        const entries = held.value();
-        var it = entries.keyIterator();
-        while (it.next()) |k| c.gpa.free(k.*);
-        entries.clearRetainingCapacity();
+        const services = held.value();
+        var it = services.iterator();
+        while (it.next()) |kv| c.freeService(kv.key_ptr.*, kv.value_ptr);
+        services.clearRetainingCapacity();
+    }
+
+    fn freeService(c: *Cache, key: []const u8, e: *ServiceEntry) void {
+        c.gpa.free(key);
+        if (e.binding) |*b| b.deinit(c.gpa);
+    }
+
+    fn cacheService(io: Io, context: ?*anyopaque, gpa: Allocator, name: []const u8) ServiceError!?Binding {
+        const c: *Cache = @ptrCast(@alignCast(context.?)); // safe: `resolver` passes a Cache
+        var key_buf: [dns.max_name]u8 = undefined;
+        if (name.len > key_buf.len) return null;
+        const key = std.ascii.lowerString(&key_buf, name);
+        const now = Io.Clock.awake.now(io);
+        {
+            var held = c.services.acquireUncancelable(io);
+            defer held.deinit(io);
+            if (held.value().getPtr(key)) |e| if (now.nanoseconds < e.expires.nanoseconds) {
+                const b = e.binding orelse return null;
+                return try b.clone(gpa);
+            };
+        }
+        const fresh = try c.inner.serviceFn.?(io, c.inner.context, gpa, name);
+        c.keepService(io, key, now, fresh);
+        return fresh;
+    }
+
+    /// Keep `binding`, or that there is none, for `key`. One that cannot be
+    /// kept for want of memory is simply not kept.
+    fn keepService(c: *Cache, io: Io, key: []const u8, now: Io.Timestamp, binding: ?Binding) void {
+        var entry: ServiceEntry = .{ .binding = null, .expires = now.addDuration(span.toIo(c.options.ttl)) };
+        if (binding) |b| entry.binding = b.clone(c.gpa) catch return;
+        var held = c.services.acquireUncancelable(io);
+        defer held.deinit(io);
+        const services = held.value();
+        if (services.getPtr(key)) |e| {
+            if (e.binding) |*old| old.deinit(c.gpa);
+            e.* = entry;
+            return;
+        }
+        if (services.count() >= c.options.max_entries) c.evictService(services, now);
+        if (services.count() >= c.options.max_entries or !c.putService(services, key, entry)) if (entry.binding) |*b| b.deinit(c.gpa);
+    }
+
+    fn putService(c: *Cache, services: *std.StringHashMapUnmanaged(ServiceEntry), key: []const u8, entry: ServiceEntry) bool {
+        const owned = c.gpa.dupe(u8, key) catch return false;
+        services.put(c.gpa, owned, entry) catch {
+            c.gpa.free(owned);
+            return false;
+        };
+        return true;
+    }
+
+    /// Drop every expired service answer, or else the one expiring first.
+    fn evictService(c: *Cache, services: *std.StringHashMapUnmanaged(ServiceEntry), now: Io.Timestamp) void {
+        var soonest: ?[]const u8 = null;
+        var soonest_at: i96 = std.math.maxInt(i96);
+        var it = services.iterator();
+        while (it.next()) |kv| {
+            const at = kv.value_ptr.expires.nanoseconds;
+            if (at <= now.nanoseconds) {
+                c.dropService(services, kv.key_ptr.*);
+                it = services.iterator();
+                continue;
+            }
+            if (at < soonest_at) {
+                soonest_at = at;
+                soonest = kv.key_ptr.*;
+            }
+        }
+        if (services.count() < c.options.max_entries) return;
+        if (soonest) |k| c.dropService(services, k);
+    }
+
+    fn dropService(c: *Cache, services: *std.StringHashMapUnmanaged(ServiceEntry), key: []const u8) void {
+        var kv = services.fetchRemove(key) orelse return;
+        c.freeService(kv.key, &kv.value);
     }
 
     fn cacheLookup(io: Io, context: ?*anyopaque, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress) LookupError![]IpAddress {
@@ -463,4 +668,12 @@ test "fuzz: any entry is read or refused, and one read has its host and addresse
             try std.testing.expect(std.mem.findScalar(u8, entry.host, ':') == null);
         }
     }.one, .{});
+}
+
+test "an origin's records are under its name on 443, and under its port's prefix elsewhere" {
+    var buf: [dns.max_name]u8 = undefined;
+    try testing.expectEqualStrings("example.com", try serviceName("example.com.", 443, &buf));
+    try testing.expectEqualStrings("_8443._https.example.com", try serviceName("example.com", 8443, &buf));
+    try testing.expectEqualStrings("example.com", originOf("_8443._https.example.com"));
+    try testing.expectEqualStrings("example.com", originOf("example.com"));
 }

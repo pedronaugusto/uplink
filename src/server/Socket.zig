@@ -177,6 +177,13 @@ pub fn handshake(c: *Socket, options: tls.ServerOptions) error{Failed}!void {
     };
     c.phase = .handshake;
     c.until = if (s.options.timeouts.handshake) |t| Io.Clock.awake.now(io).addDuration(span.toIo(t)) else null;
+    const tickets = s.ticketKeys(io) catch |err| {
+        if (err == error.Canceled) c.note(.canceled);
+        pool.release(io, read_buffer);
+        pool.release(io, write_buffer);
+        if (s.options.observer) |o| o.emit(.{ .handshake_failed = .{ .error_name = @errorName(err) } });
+        return error.Failed;
+    };
     var report: cloak.tls.Session.Diagnostics = .{};
     c.session.accept(s.gpa, io, &c.input.interface, &c.output.interface, read_buffer, write_buffer, .{
         .credentials = options.credentials,
@@ -184,6 +191,9 @@ pub fn handshake(c: *Socket, options: tls.ServerOptions) error{Failed}!void {
         .client_auth = options.client_certificate,
         .client_trust = if (options.client_trust) |t| .{ .snapshot = t } else .none,
         .key_log = if (options.key_log) |w| tls.keyLog(w) else null,
+        .tickets = tickets,
+        .tls12_tickets = options.tls12_tickets,
+        .ech_keys = options.ech_keys,
         // HTTP says where a message ends: a bare end of the transport is
         // the end of the connection, not an attack on a body.
         .eof = .allow,

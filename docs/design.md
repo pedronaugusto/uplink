@@ -423,6 +423,31 @@ the lock, and say so where they are declared.
   one task while others write; cloak's `tls.Session` (0.5.0 on) keeps the two
   halves apart, so both ends offer `h2` first by ALPN.
 
+### HTTPS records
+
+- **An `https` origin is dialed as its HTTPS records say** (RFC 9460), when the
+  resolver reads them: `Resolver.serviceFn`, which `Dns` fills and the
+  system's lookup leaves null. The records live under the host on 443 and
+  under `_port._https.host` elsewhere; AliasMode is followed, ServiceMode
+  records beside an alias are ignored, and those a client can use (every
+  mandatory key known) come back most preferred first, a target of "." being
+  the record's own name. The dialer (`dial.dialHttps`) takes each endpoint
+  that speaks a protocol the connection offers, at its target and port, the
+  target's addresses or else its hints, all within the `connect` budget, and
+  the connection offers by ALPN only the protocols both speak. When every
+  endpoint fails the origin is dialed as it is (SVCB-optional), unless one of
+  them publishes ECH: that bare dial would put the hidden name on the wire.
+  Records that cannot be had are none (RFC 9460 §3); a failed allocation is
+  an error.
+- **The cache keeps records beside addresses**, none included, for its TTL,
+  so a client asks once per name per minute rather than once per
+  connection. A `Static` name is reached at its addresses alone: it has no
+  binding to send it elsewhere.
+- **Through a proxy no record is asked for**: the proxy finds the target, and
+  a local lookup would show the name a SOCKS5h proxy is chosen to hide. An
+  `http` URL is not upgraded by a record (§9.5): that would change the
+  request's scheme under the caller.
+
 ### TLS
 
 - **TLS is cloak's, and uplink owns only its HTTP side.** The engine, the
@@ -438,6 +463,26 @@ the lock, and say so where they are declared.
 - **TLS 1.2 is cloak's too.** A server that speaks nothing newer is answered
   in TLS 1.2 with ECDHE, AEAD suites and the extended master secret; RSA key
   exchange, CBC and legacy suites are refused by cloak, not filtered here.
+- **Resumption is on by default, both ends.** A client keeps one
+  `cloak.tls.SessionCache`, made at its first handshake that can use it and
+  keyed as cloak keys it (server name, identity, ALPN, the verification
+  policy and trust generation, the client certificate), with a namespace
+  naming the proxy a target is reached through, so a ticket never links a
+  client's proxied connections to its direct ones. A server's own keys
+  (`tickets = .own`) are a `cloak.tls.TicketKeys` ring with a fresh key drawn
+  at the first handshake that finds none issuing; a ring the caller rotates
+  (`.keys`) serves servers that share tickets. TLS 1.2 tickets give up forward
+  secrecy between a session's connections and are off unless asked for.
+- **Certificate decoders are warp's**, zstd then zlib, their tables (under
+  96 KiB, about 11 KiB) allocated for each compressed certificate, since a
+  codec has no allocator of its own and two handshakes may decode at once.
+  The certificate must fill exactly the length the server declared.
+- **ECH comes from the endpoint's record.** Its config list is the
+  handshake's `ech`; a refusal by a server that authenticated as the
+  config's public name gives retry configs, and the connection is made once
+  more on a new socket with them, or with ECH off when there were none (RFC
+  9849 §6.1.6). A second refusal is a failure. `.grease` sends GREASE where
+  no record gives a config.
 - **Authorities are cloak's snapshots.** An immutable `Trust.Snapshot` is
   shared by any number of clients; a client without one builds the system's
   once, at its first verifying handshake, and keeps it until it is deinitialized.

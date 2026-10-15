@@ -32,6 +32,9 @@ deadlines: reactor.net.Deadlines,
 proxies: Proxies,
 tls: tls_mod.ClientOptions,
 system_trust: SystemTrust = .init,
+/// The tickets of sessions to resume, made at the first handshake that
+/// can use them.
+sessions: Sessions = .init,
 timeouts: Timeouts,
 dial: Dial,
 /// What looks names up: the cache when there is one, around the caller's
@@ -62,6 +65,11 @@ pub const Options = struct {
 /// A context; it must not move once `resolve` has been called, since the
 /// resolver points at its cache.
 pub fn init(gpa: Allocator, options: Options) Context {
+    if (options.tls.resumption) |r| {
+        aegis.assert.pre(r.max_tickets >= 1 and r.max_tickets <= 1 << 20, "a ticket cache keeps 1 to 2^20 tickets");
+        aegis.assert.pre(r.per_server >= 1 and r.per_server <= 16, "a server keeps 1 to 16 tickets");
+        aegis.assert.pre(r.max_bytes.compare(.literal("4KiB")) != .lt, "a ticket cache holds at least 4 KiB");
+    }
     return .{
         .gpa = gpa,
         .buffers = .init(gpa, options.max_free_buffers),
@@ -75,6 +83,11 @@ pub fn init(gpa: Allocator, options: Options) Context {
         .observer = options.observer,
         .zstd = .init(options.max_zstd_window),
     };
+}
+
+/// GREASE for a handshake with no ECH config, when the options ask for it.
+pub fn greaseOr(ctx: *const Context) cloak.tls.ech.Mode {
+    return if (ctx.tls.ech == .grease) .grease else .off;
 }
 
 /// What keeps the deadlines of the context's connections.
@@ -93,6 +106,7 @@ pub fn deinit(ctx: *Context, io: Io) void {
     ctx.deadlines.deinit(io);
     ctx.proxies.deinit(io);
     ctx.system_trust.deinit(io);
+    ctx.sessions.deinit(ctx.gpa, io);
     if (ctx.dns_cache) |*c| c.deinit(io);
     ctx.zstd.deinit(ctx.gpa);
     ctx.buffers.deinit(io);
@@ -340,6 +354,44 @@ pub const Counters = struct {
 
 /// The system's authorities, read once, at the first verifying handshake
 /// that needs them.
+/// The client's ticket cache, made at the first handshake that can use
+/// it, so a client allocates nothing until its first request.
+pub const Sessions = struct {
+    cache: aegis.BlockingGuarded(?*cloak.tls.SessionCache),
+
+    pub const init: Sessions = .{ .cache = .init(null) };
+
+    pub fn deinit(s: *Sessions, gpa: Allocator, io: Io) void {
+        var held = s.cache.acquireUncancelable(io);
+        if (held.value().*) |cache| {
+            cache.deinit();
+            gpa.destroy(cache);
+        }
+        held.deinit(io);
+        s.* = undefined;
+    }
+
+    /// The cache, made now if it was not yet, bounded by `options`.
+    pub fn get(s: *Sessions, gpa: Allocator, io: Io, options: tls_mod.ClientOptions.Resumption) Allocator.Error!*cloak.tls.SessionCache {
+        var held = s.cache.acquireUncancelable(io);
+        defer held.deinit(io);
+        const slot = held.value();
+        if (slot.*) |cache| return cache;
+        const cache = try gpa.create(cloak.tls.SessionCache);
+        errdefer gpa.destroy(cache);
+        cache.* = cloak.tls.SessionCache.init(gpa, .{
+            .max_entries = options.max_tickets,
+            .max_bytes = options.max_bytes.raw(),
+            .per_key = options.per_server,
+        }) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.InvalidOptions => unreachable, // unreachable: `Context.init` checked the bounds
+        };
+        slot.* = cache;
+        return cache;
+    }
+};
+
 pub const SystemTrust = struct {
     trust: aegis.BlockingGuarded(?cloak.Trust.Snapshot),
 

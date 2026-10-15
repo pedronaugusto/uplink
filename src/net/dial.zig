@@ -8,6 +8,10 @@
 //! host whose IPv6 path is broken costs a quarter second, not a timeout,
 //! and a healthy one is not hit with a connection per address.
 //!
+//! An `https` origin is dialed as its HTTPS records say, when the resolver
+//! reads them (`dialHttps`): the endpoints they name, in their order, then
+//! the origin itself.
+//!
 //! The deadline is reactor's: every attempt is a `net.connect` that ends at
 //! it. A runtime keeps it in the kernel, so one address is dialed on the
 //! caller's own task with nothing beside it. Any other `Io` races the
@@ -19,6 +23,7 @@ const reactor = @import("reactor");
 const Io = std.Io;
 const IpAddress = Io.net.IpAddress;
 const sys = @import("sys.zig");
+const Allocator = std.mem.Allocator;
 const Resolver = @import("Resolver.zig");
 const span = @import("../span.zig");
 const Duration = span.Duration;
@@ -44,6 +49,9 @@ pub const Options = struct {
 /// A connected stream, and what it took.
 pub const Dialed = struct {
     stream: Io.net.Stream,
+    /// The address connected to; null for a Unix socket. (A connected
+    /// stream's own `socket.address` is the local end.)
+    peer: ?IpAddress = null,
     /// False when a timeout was asked for and no task could keep it.
     timeout_enforced: bool = true,
     /// How long the name's lookup took; zero for an address.
@@ -70,18 +78,24 @@ pub const DialError = error{
 
 /// Connect to `host` on `port`.
 pub fn dial(io: Io, host: []const u8, port: u16, options: Options) DialError!Dialed {
+    return dialBy(io, host, port, &.{}, options, Io.Clock.awake.now(io));
+}
+
+/// Connect to `host` on `port`, within what is left of `options.timeout`
+/// counted from `started`; `hints` are tried when the name has no address.
+fn dialBy(io: Io, host: []const u8, port: u16, hints: []const IpAddress, options: Options, started: Io.Timestamp) DialError!Dialed {
     var storage: [max_addresses]IpAddress = undefined;
     const literal = reactor.net.literal(host, port) != null;
-    const started = Io.Clock.awake.now(io);
+    const looking = Io.Clock.awake.now(io);
     var bounded = true;
-    const addresses = options.resolver.lookupWithin(io, host, port, null, &storage, options.timeout, &bounded) catch |err| return switch (err) {
-        error.InvalidHostName => error.InvalidHostName,
-        error.NameNotResolved => error.NameNotResolved,
-        error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
-        error.TimedOut => error.TimedOut,
-        error.Canceled => error.Canceled,
+    const addresses = options.resolver.lookupWithin(io, host, port, null, &storage, remaining(io, options.timeout, started), &bounded) catch |err| switch (err) {
+        error.NameNotResolved => if (hints.len != 0) hints else return error.NameNotResolved,
+        error.InvalidHostName => return error.InvalidHostName,
+        error.ConcurrencyUnavailable => return error.ConcurrencyUnavailable,
+        error.TimedOut => return error.TimedOut,
+        error.Canceled => return error.Canceled,
     };
-    const lookup: Duration = if (literal) .fromRaw(0) else span.of(started.durationTo(Io.Clock.awake.now(io)));
+    const lookup: Duration = if (literal) .fromRaw(0) else span.of(looking.durationTo(Io.Clock.awake.now(io)));
     // The lookup took its share of the one limit; the attempts end at what
     // is left.
     const deadline: Io.Timeout = if (options.timeout) |t| .{ .deadline = .{ .raw = started.addDuration(span.toIo(t)), .clock = .awake } } else .none;
@@ -90,10 +104,142 @@ pub fn dial(io: Io, host: []const u8, port: u16, options: Options) DialError!Dia
     sys.tune(io, connected.stream.socket.handle, .{ .nodelay = options.nodelay, .keepalive = options.keepalive });
     return .{
         .stream = connected.stream,
+        .peer = connected.address,
         .timeout_enforced = bounded and connected.timeout_enforced,
         .lookup = lookup,
         .addresses = @intCast(addresses.len), // safe: a lookup keeps at most `max_addresses`, 32
     };
+}
+
+/// What is left of `timeout` counted from `started`; null for no limit.
+fn remaining(io: Io, timeout: ?Duration, started: Io.Timestamp) ?Duration {
+    const t = timeout orelse return null;
+    return span.of(Io.Clock.awake.now(io).durationTo(started.addDuration(span.toIo(t))));
+}
+
+/// What an `https` origin's dial needs to know of the connection.
+pub const Https = struct {
+    /// The protocols the connection may offer by ALPN: an endpoint that
+    /// speaks none of them is passed over.
+    protocols: []const []const u8,
+    /// Whether the connection takes an endpoint's ECH config. When one an
+    /// endpoint the connection can use publishes cannot be reached, the
+    /// origin is not dialed bare in its place, which would show the name
+    /// ECH hides.
+    ech: bool,
+};
+
+/// A connection to an `https` origin, and the endpoint it reached.
+pub const DialedHttps = struct {
+    dialed: Dialed,
+    /// The origin's records, which the caller frees; null when it has none.
+    binding: ?Resolver.Binding,
+    /// The record whose endpoint was reached, in `binding`; null when the
+    /// origin was dialed as it is.
+    record: ?*const Resolver.Binding.Record,
+};
+
+/// Connect to the `https` origin `host` on `port` as its HTTPS records say,
+/// when the resolver reads them (RFC 9460 §3, §7): each record in turn that
+/// speaks one of `https.protocols`, at its target and port, the target's
+/// addresses or else its hints; then, when every one failed and none of
+/// them publishes ECH, the origin as it is. The records' lookup and every
+/// attempt share `options.timeout`.
+pub fn dialHttps(io: Io, gpa: Allocator, host: []const u8, port: u16, https: Https, options: Options) HttpsError!DialedHttps {
+    const started = Io.Clock.awake.now(io);
+    var bounded = true;
+    var binding = try serviceWithin(options.resolver, io, gpa, host, port, options.timeout, &bounded);
+    errdefer if (binding) |*b| b.deinit(gpa);
+    const looked: Duration = span.of(started.durationTo(Io.Clock.awake.now(io)));
+    var reliant = false;
+    var last: HttpsError = error.ConnectionFailed;
+    if (binding) |b| for (b.records) |*record| {
+        if (!speaksAny(record.service, https.protocols)) continue;
+        if (https.ech and record.service.ech() != null) reliant = true;
+        var hints: [max_addresses]IpAddress = undefined;
+        const target_port = record.service.port() orelse port;
+        var dialed = dialBy(io, record.target, target_port, hintsOf(record.service, target_port, &hints), options, started) catch |err| switch (err) {
+            error.Canceled, error.TimedOut => return err,
+            else => {
+                last = err;
+                continue;
+            },
+        };
+        dialed.lookup = looked.add(dialed.lookup) catch dialed.lookup;
+        dialed.timeout_enforced = dialed.timeout_enforced and bounded;
+        return .{ .dialed = dialed, .binding = binding, .record = record };
+    };
+    if (reliant) return last;
+    var dialed = try dialBy(io, host, port, &.{}, options, started);
+    dialed.lookup = looked.add(dialed.lookup) catch dialed.lookup;
+    dialed.timeout_enforced = dialed.timeout_enforced and bounded;
+    if (binding) |*b| b.deinit(gpa);
+    return .{ .dialed = dialed, .binding = null, .record = null };
+}
+
+/// Why an `https` origin could not be reached.
+pub const HttpsError = DialError || Allocator.Error;
+
+fn speaksAny(s: @import("uplink.wire").dns.Service, protocols: []const []const u8) bool {
+    for (protocols) |p| if (s.speaks(p)) return true;
+    return false;
+}
+
+/// A record's address hints on `port`, IPv6 first, as many as fit.
+fn hintsOf(s: @import("uplink.wire").dns.Service, port: u16, out: *[max_addresses]IpAddress) []const IpAddress {
+    var n: usize = 0;
+    const six = s.ipv6Hints();
+    var at: usize = 0;
+    while (at + 16 <= six.len and n < out.len) : (at += 16) {
+        out[n] = .{ .ip6 = .{ .bytes = six[at..][0..16].*, .port = port } };
+        n += 1;
+    }
+    const four = s.ipv4Hints();
+    at = 0;
+    while (at + 4 <= four.len and n < out.len) : (at += 4) {
+        out[n] = .{ .ip4 = .{ .bytes = four[at..][0..4].*, .port = port } };
+        n += 1;
+    }
+    return out[0..n];
+}
+
+/// `resolver.service`, given up once `timeout` runs out, as
+/// `Resolver.lookupWithin` is.
+fn serviceWithin(r: Resolver, io: Io, gpa: Allocator, host: []const u8, port: u16, timeout: ?Duration, bounded: *bool) HttpsError!?Resolver.Binding {
+    if (r.serviceFn == null) return null;
+    const limit = timeout orelse return serviceNow(r, io, gpa, host, port);
+    const Race = union(enum) {
+        found: HttpsError!?Resolver.Binding,
+        expired: Io.Cancelable!void,
+    };
+    var buffer: [2]Race = undefined;
+    var race: Io.Select(Race) = .init(io, &buffer);
+    defer while (race.cancel()) |late| switch (late) {
+        .found => |result| {
+            var found = result catch null;
+            if (found) |*b| b.deinit(gpa);
+        },
+        .expired => {},
+    };
+    race.concurrent(.found, serviceNow, .{ r, io, gpa, host, port }) catch {
+        bounded.* = false;
+        return serviceNow(r, io, gpa, host, port);
+    };
+    race.concurrent(.expired, Io.sleep, .{ io, span.toIo(limit), .awake }) catch {
+        bounded.* = false;
+        return switch (try race.await()) {
+            .found => |result| result,
+            .expired => unreachable, // unreachable: no delay was started
+        };
+    };
+    return switch (try race.await()) {
+        .found => |result| result,
+        .expired => |result| if (result) |_| error.TimedOut else |err| err,
+    };
+}
+
+fn serviceNow(r: Resolver, io: Io, gpa: Allocator, host: []const u8, port: u16) HttpsError!?Resolver.Binding {
+    return r.service(io, gpa, host, port);
 }
 
 /// Connect to the Unix socket at `path`, within `options.timeout`; the
@@ -170,7 +316,14 @@ pub fn interleave(addresses: []const IpAddress, out: []IpAddress) []IpAddress {
 /// `delay` after the one before or at once when it failed, every attempt
 /// ending at `deadline`. Those no task could be found for are tried one
 /// after another once the racing ones have failed.
-fn connectAny(io: Io, addresses: []const IpAddress, delay: Io.Duration, deadline: Io.Timeout) DialError!reactor.net.Connected {
+/// A connection, and the address it went to.
+const Won = struct {
+    stream: Io.net.Stream,
+    address: IpAddress,
+    timeout_enforced: bool,
+};
+
+fn connectAny(io: Io, addresses: []const IpAddress, delay: Io.Duration, deadline: Io.Timeout) DialError!Won {
     std.debug.assert(addresses.len <= max_addresses);
     if (addresses.len == 1) return connectOne(io, addresses[0], deadline) catch |err| return mapConnect(err);
     const Event = Attempts.Event;
@@ -223,7 +376,7 @@ const Attempts = struct {
     spare: bool = true,
 
     const Event = union(enum) {
-        connected: reactor.net.ConnectError!reactor.net.Connected,
+        connected: reactor.net.ConnectError!Won,
         /// The delay armed when this many attempts had started.
         waited: Io.Cancelable!usize,
     };
@@ -249,8 +402,9 @@ fn waitFor(io: Io, delay: Io.Duration, armed_at: usize) Io.Cancelable!usize {
     return armed_at;
 }
 
-fn connectOne(io: Io, address: IpAddress, deadline: Io.Timeout) reactor.net.ConnectError!reactor.net.Connected {
-    return reactor.net.connect(io, &address, .{ .timeout = deadline });
+fn connectOne(io: Io, address: IpAddress, deadline: Io.Timeout) reactor.net.ConnectError!Won {
+    const c = try reactor.net.connect(io, &address, .{ .timeout = deadline });
+    return .{ .stream = c.stream, .address = address, .timeout_enforced = c.timeout_enforced };
 }
 
 fn mapConnect(err: reactor.net.ConnectError) DialError {
@@ -406,6 +560,8 @@ test "a dial with a timeout is bounded, on a runtime by the kernel with no fallb
     const dialed = try dial(io, "127.0.0.1", listener.socket.address.getPort(), .{ .timeout = .literal("5s") });
     dialed.stream.close(io);
     try testing.expect(dialed.timeout_enforced);
+    // The peer is the listener, not the stream's own end.
+    try testing.expect(dialed.peer.?.eql(&listener.socket.address));
     if (test_io.evented) try testing.expectEqual(before, reactor.fallbacks());
 }
 
@@ -533,4 +689,50 @@ test "a Unix socket is connected by its path, and a missing one named" {
     var missing_buf: [Io.Dir.max_path_bytes]u8 = undefined;
     const missing = try std.mem.print(&missing_buf, "{s}/none.sock", .{dir});
     try testing.expectError(error.NameNotResolved, dialUnix(io, missing, .{}));
+}
+
+test "an origin is dialed as it is when its endpoints fail, unless one publishes ECH" {
+    const zone = @import("../testing/zone.zig");
+    const Dns = @import("Dns.zig");
+    const io = test_io.io();
+    const gpa = testing.allocator;
+    var listener = try (try IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    const port = listener.socket.address.getPort();
+    var name_buf: [64]u8 = undefined;
+    const name = try std.mem.print(&name_buf, "_{d}._https.origin.test", .{port});
+    // The endpoint's name has no address and the record no hints.
+    const entries = [_]zone.Entry{
+        .{ .name = "origin.test", .a = &.{.{ 127, 0, 0, 1 }} },
+        .{ .name = name, .https = &.{.{ .target = "gone.test", .params = &.{.{ .key = .ech, .value = "\x00\x00" }} }} },
+    };
+    var z: zone.Zone = .{ .entries = &entries };
+    const d: Dns = .{ .transport = z.transport() };
+    const options: Options = .{ .resolver = d.resolver(), .timeout = .literal("5s") };
+    const protocols: []const []const u8 = &.{"http/1.1"};
+    var plain = try dialHttps(io, gpa, "origin.test", port, .{ .protocols = protocols, .ech = false }, options);
+    plain.dialed.stream.close(io);
+    try testing.expectEqual(null, plain.binding);
+    try testing.expectEqual(null, plain.record);
+    try testing.expectError(error.NameNotResolved, dialHttps(io, gpa, "origin.test", port, .{ .protocols = protocols, .ech = true }, options));
+}
+
+test "an endpoint's hints are dialed when its name has no address" {
+    const zone = @import("../testing/zone.zig");
+    const Dns = @import("Dns.zig");
+    const io = test_io.io();
+    const gpa = testing.allocator;
+    var listener = try (try IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    var port_value = zone.port(listener.socket.address.getPort());
+    const entries = [_]zone.Entry{.{ .name = "hinted.test", .https = &.{.{ .target = "nameless.test", .params = &.{
+        .{ .key = .port, .value = &port_value },
+        .{ .key = .ipv4hint, .value = "\x7f\x00\x00\x01" },
+    } }} }};
+    var z: zone.Zone = .{ .entries = &entries };
+    const d: Dns = .{ .transport = z.transport() };
+    var got = try dialHttps(io, gpa, "hinted.test", 443, .{ .protocols = &.{"http/1.1"}, .ech = false }, .{ .resolver = d.resolver(), .timeout = .literal("5s") });
+    defer got.binding.?.deinit(gpa);
+    got.dialed.stream.close(io);
+    try testing.expectEqualStrings("nameless.test", got.record.?.target);
 }

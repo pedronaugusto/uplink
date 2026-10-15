@@ -46,7 +46,7 @@ pub const ExchangeError = error{
 };
 
 pub fn resolver(d: *const Dns) Resolver {
-    return .{ .context = @constCast(d), .lookupFn = lookupFn }; // safe: a lookup only reads through the pointer
+    return .{ .context = @constCast(d), .lookupFn = lookupFn, .serviceFn = serviceFn }; // safe: a lookup only reads through the pointer
 }
 
 /// The ids of queries: random, so an answer cannot be guessed.
@@ -175,10 +175,11 @@ fn collect(bytes: []const u8, m: *const dns.Message, name: []const u8, kind: dns
     return 0;
 }
 
-/// A name's service binding: the HTTPS record of the lowest priority a
-/// client can use, its target and parameters copied into `out`, AliasMode
-/// records followed; null when the name has none.
-pub fn https(d: *const Dns, io: Io, host: []const u8, out: *ServiceCopy) NameError!?dns.Service {
+/// A name's HTTPS records (RFC 9460): the ServiceMode records a client can
+/// use, the most preferred first, each target the name it is for when it
+/// names none, AliasMode records followed; owned by `gpa`. Null when the
+/// name has none.
+pub fn https(d: *const Dns, io: Io, gpa: Allocator, host: []const u8) (NameError || Allocator.Error)!?Resolver.Binding {
     var name_buf: [dns.max_name]u8 = undefined;
     const trimmed = if (host.len != 0 and host[host.len - 1] == '.') host[0 .. host.len - 1] else host;
     if (trimmed.len > name_buf.len) return error.InvalidName;
@@ -201,23 +202,33 @@ pub fn https(d: *const Dns, io: Io, host: []const u8, out: *ServiceCopy) NameErr
             .name_error => return error.NoName,
             else => return error.NoAnswer,
         }
-        var best: ?dns.Service = null;
+        var kept: [max_records]Resolver.Binding.Record = undefined;
+        var targets: [max_records][dns.max_name]u8 = undefined;
+        var n: usize = 0;
         var alias: ?[]const u8 = null;
         var records = m.records();
-        var target_buf: [dns.max_name]u8 = undefined;
         var alias_buf: [dns.max_name]u8 = undefined;
         while (records.next() catch return error.NoAnswer) |r| {
             if (r.kind != .https or r.class != dns.class_in) continue;
+            var target_buf: [dns.max_name]u8 = undefined;
             const s = dns.Service.parse(r, &target_buf) catch continue;
             if (s.priority == 0) {
                 @memcpy(alias_buf[0..s.target.len], s.target);
                 alias = alias_buf[0..s.target.len];
                 continue;
             }
-            if (!s.usable()) continue;
-            if (best == null or s.priority < best.?.priority) best = out.keep(s);
+            if (!s.usable() or n == max_records) continue;
+            // A target of "." is the record's own name (§2.5.2).
+            const target = if (s.target.len == 0) name else s.target;
+            @memcpy(targets[n][0..target.len], target);
+            // In order of priority; equal ones in the answer's order.
+            var at = n;
+            while (at > 0 and kept[at - 1].service.priority > s.priority) : (at -= 1) kept[at] = kept[at - 1];
+            kept[at] = .{ .target = targets[n][0..target.len], .service = s };
+            n += 1;
         }
-        if (best) |b| return b;
+        // RFC 9460 §2.4.2: ServiceMode records beside an alias are ignored.
+        if (n != 0 and alias == null) return try Resolver.Binding.init(gpa, kept[0..n]);
         // An alias to the root, or to nowhere new, means no service.
         const next = alias orelse return null;
         if (next.len == 0 or std.ascii.eqlIgnoreCase(next, name)) return null;
@@ -227,21 +238,21 @@ pub fn https(d: *const Dns, io: Io, host: []const u8, out: *ServiceCopy) NameErr
     return null;
 }
 
+fn serviceFn(io: Io, context: ?*anyopaque, gpa: Allocator, name: []const u8) Resolver.ServiceError!?Resolver.Binding {
+    const d: *const Dns = @ptrCast(@alignCast(context.?)); // safe: `resolver` passes a Dns
+    return d.https(io, gpa, name) catch |err| switch (err) {
+        error.Canceled => error.Canceled,
+        error.OutOfMemory => error.OutOfMemory,
+        // RFC 9460 §3: records that cannot be had are none.
+        error.InvalidName, error.NoName, error.NoAnswer => null,
+    };
+}
+
 /// How many AliasMode records `https` follows.
 pub const max_aliases = 8;
 
-/// Where a service record found by `https` is kept: its target and its
-/// parameters, past the answer it came in.
-pub const ServiceCopy = struct {
-    target: [dns.max_name]u8 = undefined,
-    params: [dns.max_message]u8 = undefined,
-
-    fn keep(c: *ServiceCopy, s: dns.Service) dns.Service {
-        @memcpy(c.target[0..s.target.len], s.target);
-        @memcpy(c.params[0..s.params.len], s.params);
-        return .{ .priority = s.priority, .target = c.target[0..s.target.len], .params = c.params[0..s.params.len] };
-    }
-};
+/// The most ServiceMode records `https` keeps for one name.
+pub const max_records = 16;
 
 /// The configured name servers, asked over UDP and over TCP when an answer
 /// is truncated: each in turn, `attempts` rounds, each wait `timeout`.
@@ -494,8 +505,12 @@ test "a stub asks a server over UDP, and over TCP when the answer is truncated" 
     const big = try r.lookup(io, "big.test", 80, .ip4, &out);
     try testing.expectEqual(3, big.len);
     try testing.expectError(error.NameNotResolved, r.lookup(io, "missing.test", 80, null, &out));
-    var copy: ServiceCopy = .{};
-    const service = (try d.https(io, "small.test", &copy)).?;
+    var binding = (try d.https(io, testing.allocator, "small.test")).?;
+    defer binding.deinit(testing.allocator);
+    try testing.expectEqual(1, binding.records.len);
+    const service = binding.records[0].service;
+    // The record names no target: its own name is.
+    try testing.expectEqualStrings("small.test", binding.records[0].target);
     try testing.expectEqual(1, service.priority);
     var protocols = service.alpn();
     try testing.expectEqualStrings("h2", (try protocols.next()).?);
@@ -666,3 +681,42 @@ const FakeServer = struct {
         return out[0..at];
     }
 };
+
+test "service answers are kept for their time, none included, and a static name has none" {
+    const testing = std.testing;
+    const shakedown = @import("shakedown");
+    const test_io = @import("../testing/io.zig");
+    const zone = @import("../testing/zone.zig");
+    const Cache = Resolver.Cache;
+    const Static = Resolver.Static;
+    var clock: shakedown.Clock = .init(test_io.io(), .{});
+    const io = clock.io();
+    const gpa = testing.allocator;
+    const entries = [_]zone.Entry{.{ .name = "svc.example", .https = &.{ .{ .priority = 2, .target = "b.example" }, .{ .priority = 1 } } }};
+    var z: zone.Zone = .{ .entries = &entries };
+    const d: Dns = .{ .transport = z.transport() };
+    var cache: Cache = .init(gpa, d.resolver(), .{ .ttl = .literal("60s") });
+    defer cache.deinit(io);
+    const r = cache.resolver();
+    for (0..2) |_| {
+        var b = (try r.service(io, gpa, "svc.example", 443)).?;
+        defer b.deinit(gpa);
+        // The most preferred first; "." is the record's own name.
+        try testing.expectEqual(2, b.records.len);
+        try testing.expectEqualStrings("svc.example", b.records[0].target);
+        try testing.expectEqualStrings("b.example", b.records[1].target);
+        try testing.expectEqual(null, try r.service(io, gpa, "none.example", 443));
+    }
+    // One question each for the two names, the second round from the cache.
+    try testing.expectEqual(@as(u32, 2), z.asked.load(.monotonic));
+    clock.advance(.fromSeconds(61));
+    var again = (try r.service(io, gpa, "svc.example", 443)).?;
+    again.deinit(gpa);
+    try testing.expectEqual(@as(u32, 3), z.asked.load(.monotonic));
+    // A name a static entry answers is reached at its addresses alone.
+    const pinned = [_]Static.Entry{.{ .host = "svc.example", .addresses = &.{.{ .ip4 = .loopback(0) }} }};
+    const s: Static = .{ .entries = &pinned, .fallback = d.resolver() };
+    try testing.expectEqual(null, try s.resolver().service(io, gpa, "svc.example", 8443));
+    try testing.expect(s.resolver().serviceFn != null);
+    try testing.expectEqual(null, try Resolver.system.service(io, gpa, "svc.example", 443));
+}

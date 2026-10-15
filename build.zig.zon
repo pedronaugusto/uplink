@@ -27,16 +27,17 @@
         },
 
         .cloak = .{
-            .url = "git+https://github.com/pedronaugusto/cloak?ref=v0.6.0#e6e15f01e9e7281afa74233d4d96b4bce979a116",
-            .hash = "cloak-0.6.0-9onwcRNKEgMTQePo6o1j-jeXFPNeodqPnVCN0FeUzSVX",
+            .url = "git+https://github.com/pedronaugusto/cloak?ref=v0.10.1#e1f1c9a38d98f32191e8eeec74d4b5ce148684bc",
+            .hash = "cloak-0.10.1-9onwcav4GwPMmsNG3K6-P5BEwUlvVn5xKpxhUV9sz9yI",
             .lazy = true,
         },
 
         .warp = .{
-            .url = "git+https://github.com/pedronaugusto/warp?ref=v0.3.1#943b5188d31dacdd2a2d8cef4f6312e85a76d89a",
-            .hash = "warp-0.3.1-JASxFdFEEQDaCNoyxHxZKBAO9tlBpaFG_1p_tu2Udfmi",
+            .url = "git+https://github.com/pedronaugusto/warp?ref=v0.4.0#874a05a5cd94e9a76001cef2420cb8213464abf1",
+            .hash = "warp-0.4.0-JASxFYVYEQCFzy2g8yp2DD60kAUM687eHI6yIp8dW6uK",
             .lazy = true,
         },
+
         .xenoglyph = .{
             .url = "git+https://github.com/pedronaugusto/xenoglyph?ref=v0.3.2#f6166e8ba5108cc169663ed46e78eb422087b38c",
             .hash = "xenoglyph-0.3.2-YKXZlXUoGwAmNSZEy8Y4yr3zUTGRuODke6HR6iXGLYBs",

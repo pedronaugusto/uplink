@@ -7,6 +7,7 @@ const aegis = @import("aegis");
 const reactor = @import("reactor");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const cloak = @import("cloak");
 const wire = @import("uplink.wire");
 const h1 = wire.h1;
 const tls = @import("../tls.zig");
@@ -30,6 +31,9 @@ zstd: ZstdBuffer,
 /// The encoders compressed responses are written through, when
 /// compression is on.
 encoders: ?Encoder.Pool,
+/// Private: the server's own ticket keys, when its TLS options ask for
+/// them.
+tickets: ?cloak.tls.TicketKeys,
 /// Private: the connections being served.
 live: aegis.BlockingGuarded(Live),
 /// Private: set by `stop`.
@@ -199,6 +203,15 @@ pub const Entry = struct {
 pub fn init(gpa: Allocator, options: Options) Context {
     aegis.assert.pre(options.limits.max_head.compare(.literal("64KiB")) != .gt, "a request head is at most 64 KiB");
     if (options.compression) |c| aegis.assert.pre(c.codings.len <= 3, "each coding is offered once");
+    const own: ?tls.ServerOptions.Rotation = if (options.tls) |t| switch (t.tickets) {
+        .own => |r| r,
+        .none, .keys => null,
+    } else null;
+    if (own) |r| {
+        const week: Duration = .literal("7d");
+        aegis.assert.pre(r.lifetime.compare(.literal("1s")) != .lt and r.lifetime.compare(week) != .gt, "a ticket lives one second to seven days");
+        aegis.assert.pre(r.rotation.compare(.literal("1s")) != .lt and r.rotation.compare(week) != .gt, "a ticket key issues one second to seven days");
+    }
     return .{
         .gpa = gpa,
         .options = options,
@@ -206,8 +219,38 @@ pub fn init(gpa: Allocator, options: Options) Context {
         .deadlines = .init(span.toIo(options.timeouts.shortest())),
         .zstd = .init(options.max_zstd_window),
         .encoders = if (options.compression) |c| .init(gpa, c.settings, options.max_free_buffers) else null,
+        .tickets = if (own) |r| cloak.tls.TicketKeys.init(gpa, .{ .lifetime = span.toIo(r.lifetime), .rotation = span.toIo(r.rotation) }) catch unreachable else null, // unreachable: both spans were checked above
         .live = .init(.{}),
     };
+}
+
+/// The ticket keys a handshake issues and resumes with: the server's own,
+/// a fresh key drawn when none issues now; the caller's; or none.
+pub fn ticketKeys(c: *Context, io: Io) error{ OutOfMemory, EntropyUnavailable, Canceled }!?*cloak.tls.TicketKeys {
+    const options = c.options.tls orelse return null;
+    switch (options.tickets) {
+        .none => return null,
+        .keys => |keys| return keys,
+        .own => {},
+    }
+    const keys = &c.tickets.?;
+    const now = Io.Clock.real.now(io);
+    const seconds: i64 = @intCast(@divFloor(now.nanoseconds, std.time.ns_per_s)); // safe: the calendar clock's seconds fit an i64 for billions of years
+    var snapshot = keys.acquire();
+    const issuing = if (snapshot) |*s| s.ring().issuing(seconds) != null else false;
+    if (snapshot) |*s| s.release();
+    if (issuing) return keys;
+    // Two handshakes that both find no key draw one each: the first is
+    // replaced at once and opens the tickets it issued until they expire.
+    var material: [32]u8 = undefined;
+    defer std.crypto.secureZero(u8, &material);
+    try io.randomSecure(&material);
+    keys.rotate(&material, now) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        // 32 fresh bytes are neither all zeros nor a key the ring holds.
+        error.InvalidKey, error.DuplicateKey => error.EntropyUnavailable,
+    };
+    return keys;
 }
 
 /// Release what the connections shared; every one must have ended.
@@ -215,6 +258,7 @@ pub fn deinit(c: *Context, io: Io) void {
     c.deadlines.deinit(io);
     c.zstd.deinit(c.gpa);
     if (c.encoders) |*e| e.deinit(io);
+    if (c.tickets) |*t| t.deinit();
     c.buffers.deinit(io);
     c.* = undefined;
 }

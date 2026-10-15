@@ -421,6 +421,16 @@ pub const Service = struct {
     pub fn ech(s: Service) ?[]const u8 {
         return s.param(.ech);
     }
+
+    /// Whether the endpoint speaks `protocol`, an ALPN id: one `alpn`
+    /// names, or HTTP/1.1, an HTTPS record's default unless
+    /// `no-default-alpn` takes it away (RFC 9460 §7.1.1).
+    pub fn speaks(s: Service, protocol: []const u8) bool {
+        if (std.mem.eql(u8, protocol, "http/1.1") and !s.noDefaultAlpn()) return true;
+        var it = s.alpn();
+        while (it.next() catch return false) |p| if (std.mem.eql(u8, p, protocol)) return true;
+        return false;
+    }
 };
 
 /// One parameter of a service record.

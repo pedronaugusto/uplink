@@ -106,7 +106,42 @@ pub const Limits = struct {
     pub const max_window: Bytes = .fromRaw(std.math.maxInt(u31));
 };
 
+/// A stream's states (RFC 9113 §5.1; no push, so no reserved ones).
 pub const StreamState = enum { idle, open, half_closed_local, half_closed_remote, closed };
+/// What moves a stream: its head going either way, its end sent or
+/// received, a reset either way.
+pub const StreamEvent = enum { opened, end_local, end_remote, reset };
+/// The edges a stream's state takes, checked whole when analyzed: a stream
+/// receives where its end can still come, and sends where its own can.
+pub const Lifecycle = aegis.state.Machine(StreamState, StreamEvent, .{
+    .initial = .idle,
+    .terminal = &.{.closed},
+    .edges = &.{
+        .{ .from = .idle, .on = .opened, .to = .open },
+        .{ .from = .open, .on = .end_local, .to = .half_closed_local },
+        .{ .from = .open, .on = .end_remote, .to = .half_closed_remote },
+        .{ .from = .open, .on = .reset, .to = .closed },
+        .{ .from = .half_closed_local, .on = .end_remote, .to = .closed },
+        .{ .from = .half_closed_local, .on = .reset, .to = .closed },
+        .{ .from = .half_closed_remote, .on = .end_local, .to = .closed },
+        .{ .from = .half_closed_remote, .on = .reset, .to = .closed },
+    },
+});
+
+/// Whether a stream in `state` may still receive frames of its own.
+fn receives(state: StreamState) bool {
+    return Lifecycle.next(state, .end_remote) != null;
+}
+
+/// Whether a stream in `state` may still send.
+fn sends(state: StreamState) bool {
+    return Lifecycle.next(state, .end_local) != null;
+}
+
+/// Move `s` along `event`'s edge, which its caller found there.
+fn move(s: *Stream, event: StreamEvent) void {
+    s.state = Lifecycle.next(s.state, event) orelse aegis.assert.never("a stream moves only along an edge its state has");
+}
 
 pub const Stream = struct {
     id: u31 = 0,
@@ -254,7 +289,7 @@ fn connectionError(c: *Connection, w: *Io.Writer, code: ErrorCode) Error {
 /// Reset stream `id` for the peer's error with `code`, as an event.
 fn streamError(c: *Connection, w: *Io.Writer, id: u31, code: ErrorCode) Error!?Event {
     try c.rstWrite(w, id, code);
-    if (c.stream(id)) |s| s.state = .closed;
+    if (c.stream(id)) |s| if (s.state != .closed) move(s, .reset);
     return .{ .reset_sent = .{ .stream = id, .code = code } };
 }
 
@@ -390,7 +425,7 @@ fn rstStream(c: *Connection, w: *Io.Writer, h: Head, payload: []const u8) Error!
     if (c.resets > c.limits.max_resets) return c.connectionError(w, .enhance_your_calm);
     const s = c.stream(h.stream) orelse return null;
     if (s.state == .closed) return null;
-    s.state = .closed;
+    move(s, .reset);
     return .{ .reset = .{ .stream = h.stream, .code = code } };
 }
 
@@ -419,12 +454,9 @@ fn data(c: *Connection, w: *Io.Writer, h: Head, payload: []const u8) Error!?Even
         try c.giveBack(w, null, payload.len);
         return c.streamError(w, h.stream, .stream_closed);
     };
-    switch (s.state) {
-        .open, .half_closed_local => {},
-        else => {
-            try c.giveBack(w, null, payload.len);
-            return c.streamError(w, h.stream, .stream_closed);
-        },
+    if (!receives(s.state)) {
+        try c.giveBack(w, null, payload.len);
+        return c.streamError(w, h.stream, .stream_closed);
     }
     if (!s.headers_received) return c.streamError(w, h.stream, .protocol_error);
     s.recv_window -= @intCast(payload.len); // safe: a frame is under 2^24 bytes
@@ -443,11 +475,7 @@ fn data(c: *Connection, w: *Io.Writer, h: Head, payload: []const u8) Error!?Even
 
 fn endRemote(c: *Connection, s: *Stream) void {
     _ = c;
-    s.state = switch (s.state) {
-        .open => .half_closed_remote,
-        .half_closed_local => .closed,
-        else => s.state,
-    };
+    move(s, .end_remote);
 }
 
 fn headers(c: *Connection, w: *Io.Writer, h: Head, payload: []const u8) Error!?Event {
@@ -501,11 +529,7 @@ fn headerBlock(c: *Connection, w: *Io.Writer, id: u31) Error!?Event {
     };
     if (c.stream(id)) |s| {
         // Trailers, or a response after its interim ones.
-        switch (s.state) {
-            .open, .half_closed_local => {},
-            .closed => return c.streamError(w, id, .stream_closed),
-            else => return c.connectionError(w, .stream_closed),
-        }
+        if (!receives(s.state)) return if (s.state == .closed) c.streamError(w, id, .stream_closed) else c.connectionError(w, .stream_closed);
         if (s.headers_received and c.role == .server and !end_stream) return c.streamError(w, id, .protocol_error);
         const f = fields orelse return c.streamError(w, id, .refused_stream);
         s.headers_received = true;
@@ -525,11 +549,12 @@ fn headerBlock(c: *Connection, w: *Io.Writer, id: u31) Error!?Event {
     const s = c.freeSlot() orelse return c.streamError(w, id, .refused_stream);
     s.* = .{
         .id = id,
-        .state = if (end_stream) .half_closed_remote else .open,
         .send_window = c.remote.initial_window_size,
         .recv_window = c.localSettings().initial_window_size,
         .headers_received = true,
     };
+    move(s, .opened);
+    if (end_stream) c.endRemote(s);
     return .{ .headers = .{ .stream = id, .fields = f, .end_stream = end_stream } };
 }
 
@@ -553,7 +578,7 @@ pub fn giveBack(c: *Connection, w: *Io.Writer, id: ?u31, n: usize) Error!void {
     }
     const s = c.stream(id orelse return) orelse return;
     s.recv_unacked += n;
-    if (s.state == .half_closed_remote or s.state == .closed) return;
+    if (!receives(s.state)) return;
     if (s.recv_unacked >= c.localSettings().initial_window_size / 2) {
         windowUpdate(w, s.id, @intCast(s.recv_unacked)) catch return error.WriteFailed;
         s.recv_window += @intCast(s.recv_unacked);
@@ -580,8 +605,8 @@ pub fn open(c: *Connection) WriteError!u31 {
     const id = c.next_stream;
     c.next_stream += 2;
     s.* = .{ .id = id, .state = .idle, .send_window = c.remote.initial_window_size, .recv_window = c.localSettings().initial_window_size };
-    // Idle until its headers go; marked open so `stream` finds it.
-    s.state = .open;
+    // Open before its headers go, so `stream` finds it.
+    move(s, .opened);
     return id;
 }
 
@@ -589,10 +614,7 @@ pub fn open(c: *Connection) WriteError!u31 {
 /// as the peer's frame size allows. `scratch` holds the encoded block.
 pub fn writeHeaders(c: *Connection, w: *Io.Writer, id: u31, fields: []const hpack.Field, end_stream: bool, scratch: []u8) WriteError!void {
     const s = c.stream(id) orelse return error.StreamClosed;
-    switch (s.state) {
-        .open, .half_closed_remote => {},
-        else => return error.StreamClosed,
-    }
+    if (!sends(s.state)) return error.StreamClosed;
     var bw: Io.Writer = .fixed(scratch);
     c.encoder.encode(&bw, fields) catch return error.WriteFailed;
     const block = bw.buffered();
@@ -614,11 +636,7 @@ pub fn writeHeaders(c: *Connection, w: *Io.Writer, id: u31, fields: []const hpac
 
 fn endLocal(c: *Connection, s: *Stream) void {
     _ = c;
-    s.state = switch (s.state) {
-        .open => .half_closed_local,
-        .half_closed_remote => .closed,
-        else => s.state,
-    };
+    move(s, .end_local);
 }
 
 /// How much `id` may send now: the smaller of its window and the
@@ -635,10 +653,7 @@ pub fn sendable(c: *Connection, id: u31) usize {
 /// all of `bytes` has gone.
 pub fn writeData(c: *Connection, w: *Io.Writer, id: u31, bytes: []const u8, end_stream: bool) WriteError!usize {
     const s = c.stream(id) orelse return error.StreamClosed;
-    switch (s.state) {
-        .open, .half_closed_remote => {},
-        else => return error.StreamClosed,
-    }
+    if (!sends(s.state)) return error.StreamClosed;
     const n = @min(bytes.len, c.sendable(id));
     if (n == 0 and bytes.len != 0) return 0;
     const last = end_stream and n == bytes.len;
@@ -652,7 +667,7 @@ pub fn writeData(c: *Connection, w: *Io.Writer, id: u31, bytes: []const u8, end_
 /// Reset `id` with `code`.
 pub fn reset(c: *Connection, w: *Io.Writer, id: u31, code: ErrorCode) WriteError!void {
     c.rstWrite(w, id, code) catch return error.WriteFailed;
-    if (c.stream(id)) |s| s.state = .closed;
+    if (c.stream(id)) |s| if (s.state != .closed) move(s, .reset);
 }
 
 /// Tell the peer this end is going away: no stream past the last it
@@ -788,4 +803,22 @@ test "fuzz: any frames after the preface are taken or end the connection, and no
             }
         }
     }.one, .{});
+}
+
+test "a stream receives until its peer ends it, and sends until it ends it itself" {
+    const Case = struct { state: StreamState, receives: bool, sends: bool };
+    for ([_]Case{
+        .{ .state = .idle, .receives = false, .sends = false },
+        .{ .state = .open, .receives = true, .sends = true },
+        .{ .state = .half_closed_local, .receives = true, .sends = false },
+        .{ .state = .half_closed_remote, .receives = false, .sends = true },
+        .{ .state = .closed, .receives = false, .sends = false },
+    }) |case| {
+        try testing.expectEqual(case.receives, receives(case.state));
+        try testing.expectEqual(case.sends, sends(case.state));
+    }
+    // Both ends, in either order, close it; a reset closes it from any open state.
+    try testing.expectEqual(StreamState.closed, Lifecycle.next(Lifecycle.next(.open, .end_local).?, .end_remote).?);
+    try testing.expectEqual(StreamState.closed, Lifecycle.next(Lifecycle.next(.open, .end_remote).?, .end_local).?);
+    try testing.expectEqual(null, Lifecycle.next(.closed, .reset));
 }

@@ -1045,3 +1045,223 @@ test "over TLS both ends agree HTTP/2 by ALPN, and requests at once share its co
     try testing.expectEqual(@as(u32, 8), ok.load(.monotonic));
     try testing.expectEqual(@as(u64, 1), client.stats().connections_opened);
 }
+
+const zone = @import("../testing/zone.zig");
+const Observer = @import("../transport/Observer.zig");
+
+/// A server certificate for 127.0.0.1 and localhost, and the trust a client
+/// checks it against.
+const ServerTls = struct {
+    pki: *openssl.Pki,
+    cert: []u8,
+    key_pem: []u8,
+    key: cloak.PrivateKey,
+    identity: cloak.Identity,
+    builder: cloak.Trust,
+    servers: cloak.Trust.Snapshot,
+    credentials: [1]cloak.tls.Credential,
+
+    fn make(gpa: std.mem.Allocator) !*ServerTls {
+        const io = test_io.io();
+        const t = try gpa.create(ServerTls);
+        errdefer gpa.destroy(t);
+        t.pki = try openssl.Pki.make(gpa, io);
+        errdefer t.pki.destroy();
+        t.cert = try t.pki.read(io, "server-ec.pem");
+        errdefer gpa.free(t.cert);
+        t.key_pem = try t.pki.read(io, "server-ec.key");
+        errdefer gpa.free(t.key_pem);
+        t.key = try cloak.PrivateKey.parse(gpa, t.key_pem, .{});
+        errdefer t.key.deinit();
+        t.identity = try cloak.Identity.initPem(gpa, t.cert, t.key, .{});
+        errdefer t.identity.deinit();
+        t.builder = .init(gpa);
+        errdefer t.builder.deinit();
+        try t.builder.addPem(t.cert, .{});
+        t.servers = try t.builder.freeze();
+        t.credentials = .{.{ .identity = t.identity }};
+        return t;
+    }
+
+    fn destroy(t: *ServerTls, gpa: std.mem.Allocator) void {
+        t.servers.deinit();
+        t.builder.deinit();
+        t.identity.deinit();
+        t.key.deinit();
+        gpa.free(t.key_pem);
+        gpa.free(t.cert);
+        t.pki.destroy();
+        gpa.destroy(t);
+    }
+};
+
+/// Counts the client's TLS handshakes with the target, resumed and with ECH.
+const Handshakes = struct {
+    full: std.atomic.Value(u32) = .init(0),
+    resumed: std.atomic.Value(u32) = .init(0),
+    ech: std.atomic.Value(u32) = .init(0),
+
+    fn observer(h: *Handshakes) Observer {
+        return .{ .context = h, .eventFn = on };
+    }
+
+    fn on(context: ?*anyopaque, event: Observer.Event) void {
+        const h: *Handshakes = @ptrCast(@alignCast(context.?)); // safe: `observer` passes a Handshakes
+        switch (event) {
+            .tls => |t| {
+                _ = (if (t.resumed) &h.resumed else &h.full).fetchAdd(1, .monotonic);
+                if (t.ech) _ = h.ech.fetchAdd(1, .monotonic);
+            },
+            else => {},
+        }
+    }
+};
+
+/// `n` requests to `url`, each on a connection of its own.
+fn fetchEach(gpa: std.mem.Allocator, client: *Client, url: []const u8, n: usize) !void {
+    const io = test_io.io();
+    for (0..n) |_| {
+        var diagnostics: Diagnostics = .{};
+        var response = client.send(io, .{ .url = url, .diagnostics = &diagnostics }) catch |err| {
+            std.debug.print("{t}: tls error {?t}, alert {?t}, stage {t}\n", .{ err, diagnostics.tls_error, diagnostics.tls_alert, diagnostics.stage });
+            return err;
+        };
+        defer response.deinit(io);
+        const body = try response.collect(gpa, io, .limited(1 << 20));
+        defer gpa.free(body);
+        try testing.expectEqualStrings("secure", body);
+    }
+}
+
+test "a client resumes its sessions from the server's tickets, unless either end is without them" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const t = try ServerTls.make(gpa);
+    defer t.destroy(gpa);
+    var url_buf: [64]u8 = undefined;
+    const Case = struct { tickets: bool, resumption: bool };
+    for ([_]Case{ .{ .tickets = true, .resumption = true }, .{ .tickets = false, .resumption = true }, .{ .tickets = true, .resumption = false } }) |case| {
+        const running = try Running.start(gpa, .{ .http2 = false, .tls = .{ .credentials = &t.credentials, .tickets = if (case.tickets) .{ .own = .{} } else .none } }, .of(whoami));
+        defer running.stop();
+        const url = try std.mem.print(&url_buf, "https://127.0.0.1:{d}/", .{running.port});
+        var seen: Handshakes = .{};
+        var client: Client = .init(gpa, .{
+            .tls = .{ .trust = t.servers, .resumption = if (case.resumption) .{} else null },
+            .pool = .{ .max_idle_per_route = 0 },
+            .observer = seen.observer(),
+        });
+        defer client.deinit(io);
+        try fetchEach(gpa, &client, url, 3);
+        try testing.expectEqual(@as(u64, 3), client.stats().connections_opened);
+        // The first is a full handshake; each after it resumes from a
+        // ticket the one before was given.
+        const resumed: u32 = if (case.tickets and case.resumption) 2 else 0;
+        try testing.expectEqual(resumed, seen.resumed.load(.monotonic));
+        try testing.expectEqual(3 - resumed, seen.full.load(.monotonic));
+    }
+}
+
+/// An ECH key: its config, published with `public_name`, and its pair.
+const EchKey = struct {
+    pair: cloak.tls.ech.KeyPair,
+    config_buf: [128]u8 = undefined,
+    config: []u8 = &.{},
+    list_buf: [140]u8 = undefined,
+    list: []u8 = &.{},
+
+    fn init(k: *EchKey, seed: u8, id: u8) !void {
+        k.* = .{ .pair = cloak.tls.ech.keyPair(&@as([32]u8, @splat(seed))) };
+        k.config = try cloak.tls.ech.writeConfig(&k.config_buf, .{ .id = id, .public_key = k.pair.public, .public_name = "localhost", .max_name_length = 32 });
+        k.list = try cloak.tls.ech.writeList(&k.list_buf, &.{k.config});
+    }
+
+    fn key(k: *const EchKey) cloak.tls.ech.Key {
+        return .{ .config = k.config, .secret = k.pair.secret.expose() };
+    }
+};
+
+test "an origin is reached as its HTTPS record says, its name hidden by ECH, and a stale config is retried once" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const t = try ServerTls.make(gpa);
+    defer t.destroy(gpa);
+    var held: EchKey = undefined;
+    try held.init(1, 1);
+    defer held.pair.deinit();
+    var stale: EchKey = undefined;
+    try stale.init(2, 2);
+    defer stale.pair.deinit();
+    const Case = struct {
+        /// The keys the server holds.
+        server: []const cloak.tls.ech.Key,
+        /// The config list the record publishes.
+        published: []const u8,
+        connections: u64,
+        ech: u32,
+    };
+    const keys = [_]cloak.tls.ech.Key{held.key()};
+    for ([_]Case{
+        // The record's config is the server's: accepted.
+        .{ .server = &keys, .published = held.list, .connections = 1, .ech = 1 },
+        // A config the server no longer holds: it refuses, authenticated as
+        // the public name, with its own; the retry is accepted.
+        .{ .server = &keys, .published = stale.list, .connections = 2, .ech = 1 },
+        // A server with ECH off: refused with no retry configs; the retry
+        // goes without ECH.
+        .{ .server = &.{}, .published = held.list, .connections = 2, .ech = 0 },
+    }) |case| {
+        const running = try Running.start(gpa, .{ .tls = .{ .credentials = &t.credentials, .ech_keys = case.server } }, .of(whoami));
+        defer running.stop();
+        // The URL names port 443; the record sends the client to the
+        // server's port, and its address is the name's.
+        const record_port = zone.port(running.port);
+        const entries = [_]zone.Entry{.{
+            .name = "localhost",
+            .a = &.{.{ 127, 0, 0, 1 }},
+            .https = &.{.{ .params = &.{
+                .{ .key = .alpn, .value = zone.alpn(&.{"h2"}) },
+                .{ .key = .port, .value = &record_port },
+                .{ .key = .ech, .value = case.published },
+            } }},
+        }};
+        var z: zone.Zone = .{ .entries = &entries };
+        const d: Dns = .{ .transport = z.transport() };
+        var seen: Handshakes = .{};
+        var client: Client = .init(gpa, .{ .tls = .{ .certificate_compression = .none, .resumption = null, .trust = t.servers }, .resolver = d.resolver(), .observer = seen.observer() });
+        defer client.deinit(io);
+        try fetchEach(gpa, &client, "https://localhost/", 1);
+        try testing.expectEqual(case.connections, client.stats().connections_opened);
+        try testing.expectEqual(case.ech, seen.ech.load(.monotonic));
+    }
+}
+
+test "an HTTPS record whose endpoint fails, or that speaks no protocol the client does, leaves the origin dialed as it is" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const t = try ServerTls.make(gpa);
+    defer t.destroy(gpa);
+    const running = try Running.start(gpa, .{ .tls = .{ .credentials = &t.credentials } }, .of(whoami));
+    defer running.stop();
+    var url_buf: [64]u8 = undefined;
+    const url = try std.mem.print(&url_buf, "https://localhost:{d}/", .{running.port});
+    // A closed port, and a record that speaks only HTTP/3.
+    var closed = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
+    const closed_port = zone.port(closed.socket.address.getPort());
+    closed.deinit(io);
+    var name_buf: [64]u8 = undefined;
+    const name = try std.mem.print(&name_buf, "_{d}._https.localhost", .{running.port});
+    for ([_][]const zone.Param{
+        &.{.{ .key = .port, .value = &closed_port }},
+        &.{ .{ .key = .alpn, .value = zone.alpn(&.{"h3"}) }, .{ .key = .no_default_alpn, .value = "" } },
+    }) |params| {
+        const entries = [_]zone.Entry{
+            .{ .name = "localhost", .a = &.{.{ 127, 0, 0, 1 }} },
+            .{ .name = name, .https = &.{.{ .target = "localhost", .params = params }} },
+        };
+        var z: zone.Zone = .{ .entries = &entries };
+        const d: Dns = .{ .transport = z.transport() };
+        var client: Client = .init(gpa, .{ .tls = .{ .trust = t.servers }, .resolver = d.resolver() });
+        defer client.deinit(io);
+        try fetchEach(gpa, &client, url, 1);
+    }
+}

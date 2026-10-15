@@ -38,8 +38,9 @@ pub const Event = union(enum) {
     },
     /// A tunnel through the proxy was opened: `CONNECT` or SOCKS.
     tunnel: struct { took: Duration },
-    /// A TLS handshake finished, with the proxy or with the server.
-    tls: struct { host: []const u8, proxy: bool, took: Duration },
+    /// A TLS handshake finished, with the proxy or with the server:
+    /// `resumed` from a ticket, `ech` with the server's name hidden.
+    tls: struct { host: []const u8, proxy: bool, took: Duration, resumed: bool = false, ech: bool = false },
     /// The request's head and body were written.
     sent: struct { method: []const u8, url: []const u8 },
     /// The response's head arrived, `wait` after the request was written.
