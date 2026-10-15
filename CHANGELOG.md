@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-15
+
 ### Breaking
 
 - `Dns.https` returns the name's usable HTTPS records owned by an allocator, as a `net.Resolver.Binding`, the most preferred first and each with its effective target (the record's own name for "."); `Dns.ServiceCopy` is gone.
