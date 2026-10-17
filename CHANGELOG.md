@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-17
+
 ### Added
 
 - `wire.cache`: `Cache-Control` directives read (RFC 9111 §5.2, RFC 5861's stale directives), and `freshFor`, how long a private cache keeps a response: `max-age` less `Age`, else `Expires` less `Date`, none under `no-store`, `no-cache` or conflicting directives.
