@@ -136,6 +136,12 @@ pub const Timeouts = struct {
     /// How long `shutdown` lets requests under way finish before it ends
     /// their connections.
     shutdown: Duration = .literal("10s"),
+    /// How long a connection the server ends waits for its client to end
+    /// it too, reading and dropping what still comes (RFC 9112 §9.6):
+    /// closed with bytes unread, a connection is reset, and a reset can
+    /// take the server's last bytes (a refusal, a TLS alert) from the
+    /// client before it reads them. Null closes at once.
+    linger: ?Duration = .literal("2s"),
 
     fn shortest(t: Timeouts) Duration {
         var d: ?Duration = null;

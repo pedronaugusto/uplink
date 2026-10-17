@@ -160,9 +160,32 @@ pub fn close(c: *Socket) void {
         for (c.session_buffers) |b| pool.release(io, b);
         c.secure = false;
     }
+    c.linger();
     c.timed.deinit(io, c.context.keeper());
     c.stream.close(io);
     for ([_][]u8{ c.input.interface.buffer, c.output.interface.buffer }) |b| if (b.len != 0) pool.release(io, b);
+}
+
+/// End the sending side, then read and drop what the client still sends
+/// until it ends its side too, or for `Timeouts.linger` (RFC 9112 §9.6):
+/// a socket closed with bytes unread is reset, and the reset can reach the
+/// client before it has read the server's last bytes. A socket that failed
+/// has nothing left to deliver.
+fn linger(c: *Socket) void {
+    const io = c.io;
+    const time = c.context.options.timeouts.linger orelse return;
+    if (c.failed() != .none or c.timed.fired()) return;
+    c.stream.shutdown(io, .send) catch return;
+    const until = Io.Clock.awake.now(io).addDuration(span.toIo(time));
+    var buf: [4096]u8 = undefined;
+    var data: [1][]u8 = .{&buf};
+    while (true) {
+        // A deadline that ends the wait aborts the socket, which is
+        // closing anyway.
+        const result = c.timed.perform(io, c.context.keeper(), .{ .net_read = .{ .socket_handle = c.stream.socket.handle, .data = &data } }, until) catch return;
+        const n = (result.net_read catch return).data_len;
+        if (n == 0) return;
+    }
 }
 
 pub fn handshake(c: *Socket, options: tls.ServerOptions) error{Failed}!void {

@@ -716,3 +716,101 @@ test "a SOCKS negotiation that stalls is given up on at the connect timeout, and
         try testing.expectEqual(@as(?Diagnostics.Timeout, case[1]), diagnostics.timeout);
     }
 }
+
+/// One HTTP/2 client's memory, for a test's raw peer.
+const RawH2 = struct {
+    const wire = @import("uplink.wire");
+    const h2 = wire.h2;
+    const hpack = wire.hpack;
+
+    streams: [8]h2.Connection.Stream = @splat(.{}),
+    block: [4096]u8 = undefined,
+    field_bytes: [4096]u8 = undefined,
+    fields: [32]hpack.Field = undefined,
+    db: [hpack.Table.bytesFor(4096)]u8 = undefined,
+    de: [hpack.Table.entriesFor(4096)]hpack.Table.Entry = undefined,
+    eb: [hpack.Table.bytesFor(4096)]u8 = undefined,
+    ee: [hpack.Table.entriesFor(4096)]hpack.Table.Entry = undefined,
+
+    fn memory(m: *RawH2) h2.Connection.Memory {
+        return .{ .streams = &m.streams, .block = &m.block, .field_bytes = &m.field_bytes, .fields = &m.fields, .decoder_bytes = &m.db, .decoder_entries = &m.de, .encoder_bytes = &m.eb, .encoder_entries = &m.ee };
+    }
+};
+
+const Answered = struct {
+    var done: std.atomic.Value(bool) = .init(false);
+
+    fn get(client: *Client, url: []const u8) void {
+        const io = test_io.io();
+        var response = client.send(io, .{ .url = url }) catch return;
+        defer response.deinit(io);
+        if (response.status == .ok) done.store(true, .release);
+    }
+
+    fn upload(client: *Client, url: []const u8, body: []const u8) void {
+        const io = test_io.io();
+        var response = client.send(io, .{ .url = url, .method = .POST, .body = .{ .bytes = body } }) catch return;
+        response.deinit(io);
+    }
+};
+
+test "an HTTP/2 response is read while another request's body waits on a server that reads nothing" {
+    const io = test_io.io();
+    const h2 = RawH2.h2;
+    Answered.done.store(false, .release);
+    var listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    var client: Client = .init(testing.allocator, .{ .http2 = .prior_knowledge });
+    defer client.deinit(io);
+    var url_one: [64]u8 = undefined;
+    var url_up: [64]u8 = undefined;
+    const one = try std.mem.print(&url_one, "http://127.0.0.1:{d}/one", .{listener.socket.address.getPort()});
+    const up = try std.mem.print(&url_up, "http://127.0.0.1:{d}/up", .{listener.socket.address.getPort()});
+
+    // The first request opens the connection and waits for its answer.
+    var getting = io.concurrent(Answered.get, .{ &client, one }) catch return error.SkipZigTest;
+    defer getting.cancel(io);
+    const peer = try listener.accept(io);
+    defer peer.close(io);
+
+    // A server with every window open as wide as it goes: it reads up to
+    // the first request's head, then nothing more.
+    var mem: RawH2 = .{};
+    var proto: h2.Connection = .init(.server, .{ .initial_window_size = std.math.maxInt(u31) }, .{ .connection_window = h2.Connection.Limits.max_window }, mem.memory());
+    var rbuf: [64 << 10]u8 = undefined;
+    var pr = peer.reader(io, &rbuf);
+    var wbuf: [4096]u8 = undefined;
+    var pw = peer.writer(io, &wbuf);
+    const r = &pr.interface;
+    const w = &pw.interface;
+    try testing.expect(proto.checkPreface(try r.peek(h2.preface.len)));
+    r.toss(h2.preface.len);
+    try proto.start(w);
+    try w.flush();
+    while (true) {
+        const head = h2.Head.parse((try r.peek(h2.head_len))[0..h2.head_len]);
+        const whole = h2.head_len + @as(usize, head.len);
+        const event = try proto.receive(w, head, (try r.peek(whole))[h2.head_len..]);
+        r.toss(whole);
+        if (event) |e| if (e == .headers) break;
+    }
+    try w.flush();
+
+    // The second request's body is far more than the socket buffers hold:
+    // its writes wait from here on.
+    const body = try testing.allocator.alloc(u8, 64 << 20);
+    defer testing.allocator.free(body);
+    @memset(body, 'x');
+    var uploading = io.concurrent(Answered.upload, .{ &client, up, body }) catch return error.SkipZigTest;
+    defer uploading.cancel(io);
+    try io.sleep(.fromMilliseconds(300), .awake);
+
+    // The first request's answer comes, and is read all the same.
+    const status = [_]RawH2.hpack.Field{.{ .name = ":status", .value = "200" }};
+    var scratch: [256]u8 = undefined;
+    try proto.writeHeaders(w, 1, &status, true, &scratch);
+    try w.flush();
+    var waited: u32 = 0;
+    while (!Answered.done.load(.acquire) and waited < 1000) : (waited += 1) try io.sleep(.fromMilliseconds(10), .awake);
+    try testing.expect(Answered.done.load(.acquire));
+}

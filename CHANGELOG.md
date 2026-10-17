@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `server.Options.timeouts.linger`: how long a connection the server ends waits for its client to end it too (RFC 9112 §9.6), two seconds by default; null closes at once.
+
+### Fixed
+
+- HTTP/2, both ends: a connection whose socket buffers filled stopped both ends until the activity timeout ended it (Windows' loopback buffers fill with a few streams' windows). Each end wrote under the lock its reading task needs, so a write the peer was not taking kept that end from reading, and the peer's write the same. Frames are now encoded into an outbox under the lock and written by one task at a time with the lock released; the server writes from a task of its own, so its reading never waits on a write.
+- The server's HTTP/2 connection left a request's stream allocated when the connection ended as the request came.
+- A connection the server ends goes with its FIN, and the server reads and drops what the client still sends for up to `timeouts.linger`: closed with bytes unread, the connection was reset, and the reset took the server's last bytes (a refusal, a TLS alert) from a client that had not read them yet; on Windows a client whose certificate was refused saw a broken connection, not the refusal.
+
+### Changed
+
+- Pins warp 0.4.1.
+
 ## [0.7.1] - 2026-10-17
 
 ### Added

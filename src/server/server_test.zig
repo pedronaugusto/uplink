@@ -487,6 +487,39 @@ fn readToEnd(stream: Io.net.Stream, gpa: std.mem.Allocator) !struct { []u8, Io.D
     return .{ try gpa.dupe(u8, rd.interface.buffered()), started.durationTo(Io.Clock.awake.now(io)) };
 }
 
+test "a connection the server ends with bytes unread ends with its FIN, not a reset that could take the answer with it" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const running = try Running.start(gpa, .{}, .of(hello));
+    defer running.stop();
+    const stream = try dialRaw(running);
+    defer stream.close(io);
+    // A head the server refuses, and far more after it than it reads
+    // before it answers.
+    const junk = try gpa.alloc(u8, 256 << 10);
+    defer gpa.free(junk);
+    @memset(junk, 'j');
+    var wbuf: [4096]u8 = undefined;
+    var w = stream.writer(io, &wbuf);
+    try w.interface.writeAll("GET / HTTP/1.1\r\nHost: x\r\nno colon here\r\n\r\n");
+    try w.interface.writeAll(junk);
+    try w.interface.flush();
+    var rbuf: [4096]u8 = undefined;
+    var rd = stream.reader(io, &rbuf);
+    var got: std.ArrayList(u8) = .empty;
+    defer got.deinit(gpa);
+    // The refusal, then the end of the stream; a reset would fail the read.
+    while (true) {
+        rd.interface.fillMore() catch |err| switch (err) {
+            error.EndOfStream => break,
+            error.ReadFailed => return rd.err orelse error.ReadFailed,
+        };
+        try got.appendSlice(gpa, rd.interface.buffered());
+        rd.interface.tossBuffered();
+    }
+    try testing.expect(std.mem.startsWith(u8, got.items, "HTTP/1.1 400 "));
+}
+
 test "a head sent a byte at a time is cut off at the head timeout, whatever its pace" {
     const gpa = testing.allocator;
     const io = test_io.io();
@@ -1080,6 +1113,71 @@ test "over TLS both ends agree HTTP/2 by ALPN, and requests at once share its co
     try group.await(io);
     try testing.expectEqual(@as(u32, 8), ok.load(.monotonic));
     try testing.expectEqual(@as(u64, 1), client.stats().connections_opened);
+}
+
+/// A response far larger than any socket buffer, and a request that only
+/// says it came.
+fn floodOrNote(io: Io, request: *Request, response: *Response) anyerror!void {
+    if (std.mem.eql(u8, request.path, "/flood")) {
+        const w = try response.writer(io);
+        const chunk: [16 << 10]u8 = @splat('x');
+        for (0..4096) |_| try w.writeAll(&chunk);
+        return response.end(io);
+    }
+    Noted.arrived.store(true, .release);
+    return response.send(io, "noted");
+}
+
+const Noted = struct {
+    var arrived: std.atomic.Value(bool) = .init(false);
+};
+
+test "the server reads a client's frames while its writes wait on that client, which reads nothing" {
+    const io = test_io.io();
+    const wire = @import("uplink.wire");
+    const h2 = wire.h2;
+    Noted.arrived.store(false, .release);
+    const running = try Running.start(testing.allocator, .{ .h2c = .only }, .of(floodOrNote));
+    defer running.stop();
+    const stream = try dialRaw(running);
+    defer stream.close(io);
+
+    // A client with every window open as wide as it goes, which never reads.
+    var streams: [8]h2.Connection.Stream = @splat(.{});
+    var block: [1024]u8 = undefined;
+    var field_bytes: [1024]u8 = undefined;
+    var fields: [16]wire.hpack.Field = undefined;
+    var db: [wire.hpack.Table.bytesFor(4096)]u8 = undefined;
+    var de: [wire.hpack.Table.entriesFor(4096)]wire.hpack.Table.Entry = undefined;
+    var eb: [wire.hpack.Table.bytesFor(4096)]u8 = undefined;
+    var ee: [wire.hpack.Table.entriesFor(4096)]wire.hpack.Table.Entry = undefined;
+    var proto: h2.Connection = .init(.client, .{ .enable_push = false, .initial_window_size = std.math.maxInt(u31) }, .{ .connection_window = h2.Connection.Limits.max_window }, .{
+        .streams = &streams,
+        .block = &block,
+        .field_bytes = &field_bytes,
+        .fields = &fields,
+        .decoder_bytes = &db,
+        .decoder_entries = &de,
+        .encoder_bytes = &eb,
+        .encoder_entries = &ee,
+    });
+    var wbuf: [4096]u8 = undefined;
+    var sw = stream.writer(io, &wbuf);
+    var scratch: [1024]u8 = undefined;
+    try proto.start(&sw.interface);
+    const flood = [_]wire.hpack.Field{ .{ .name = ":method", .value = "GET" }, .{ .name = ":scheme", .value = "http" }, .{ .name = ":authority", .value = "127.0.0.1" }, .{ .name = ":path", .value = "/flood" } };
+    try proto.writeHeaders(&sw.interface, try proto.open(), &flood, true, &scratch);
+    try sw.interface.flush();
+    // The response fills the buffers between the two ends long before it
+    // ends: the server's writes wait from here on.
+    try io.sleep(.fromMilliseconds(300), .awake);
+    const note = [_]wire.hpack.Field{ .{ .name = ":method", .value = "GET" }, .{ .name = ":scheme", .value = "http" }, .{ .name = ":authority", .value = "127.0.0.1" }, .{ .name = ":path", .value = "/note" } };
+    try proto.writeHeaders(&sw.interface, try proto.open(), &note, true, &scratch);
+    try sw.interface.flush();
+    // The second request is read and answered by its handler all the same.
+    var waited: u32 = 0;
+    while (!Noted.arrived.load(.acquire) and waited < 1000) : (waited += 1) try io.sleep(.fromMilliseconds(10), .awake);
+    try testing.expect(Noted.arrived.load(.acquire));
 }
 
 const zone = @import("../testing/zone.zig");

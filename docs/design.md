@@ -338,6 +338,11 @@ the lock, and say so where they are declared.
 - **A failure is never a short success.** Before the head, a 500; after it,
   what went out is flushed and the connection closed without a chunked
   body's last chunk.
+- **A connection ends with a FIN, then a short read** (RFC 9112 §9.6). The
+  server shuts its sending side and reads and drops what the client still
+  sends until the client ends its side or `timeouts.linger` runs out: closed
+  with bytes unread, a socket is reset, and a reset can reach the client
+  before the server's last bytes do (on Windows it always takes them).
 - **Shutdown knows which connections are idle.** The live list marks a
   connection idle under its lock while it waits for a request; `shutdown`
   ends those sockets at once and gives the rest their grace.
@@ -397,17 +402,24 @@ the lock, and say so where they are declared.
 - **The protocol is sans-I/O.** `wire.h2.Connection` holds the settings,
   streams, windows and HPACK tables in memory its caller gives, takes whole
   frames, answers what the protocol answers by itself onto a writer, and
-  returns events. The server's driver is one reading task and a task per
-  stream; nothing in the codec knows which.
+  returns events. The server's driver is one reading task, one sending task
+  and a task per stream; nothing in the codec knows which.
 - **A stream's data waits in a buffer no larger than its window.** The
   window is given back as the handler reads, so a slow handler slows its own
   stream and no other.
 - **Every limit is a test of the attack it stops.** Streams at once,
   header-block bytes across CONTINUATION frames, the decoded header list,
   resets, SETTINGS, PINGs and empty frames per window of frames.
-- **One lock, one condition.** Frames are written under the session's lock,
-  the protocol state behind it; a stream waiting for its window or its data
-  waits on one condition the reading task broadcasts.
+- **One lock, one condition, no write under the lock.** Frames are encoded
+  into an outbox under the session's lock, the protocol state behind it, and
+  one task at a time writes the outbox to the socket with the lock let go:
+  on the server a sending task of its own, on the client whichever request
+  finds no one writing. An end that held its lock across a socket write
+  could not read while the write waited, and two such ends stop each other
+  once the socket buffers between them fill. A stream waits for room past a
+  high-water mark; the reading task never waits. A stream waiting for its
+  window, its data or room waits on one condition the reading and sending
+  tasks broadcast.
 - **The client has no reading task.** A connection shared by requests that
   each run on their caller's task is read by whichever of them waits: it
   takes a token, reads one frame with the lock let go, hands the frame to the

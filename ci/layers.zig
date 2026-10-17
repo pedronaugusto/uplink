@@ -69,6 +69,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/transport/Observer.zig",
         "src/transport/Body.zig",
         "src/transport/Head.zig",
+        "src/transport/Outbox.zig",
     } },
     .{ .name = "coding", .patterns = &.{
         "src/coding/ZstdBuffer.zig",

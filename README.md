@@ -279,7 +279,10 @@ of a request's head (10 seconds, however slowly it trickles in), the time
 between requests (60), each read and write while answering (30), the TLS
 handshake (10), by the same reactor deadlines the client keeps. `shutdown`
 stops accepting, ends idle connections at once, lets requests under way finish
-with `Connection: close` for up to `Timeouts.shutdown`, then ends the rest.
+with `Connection: close` for up to `Timeouts.shutdown`, then ends the rest. A
+connection the server ends goes with its FIN, and what the client still sends
+is read and dropped for up to `Timeouts.linger` (2 seconds), so a refusal is
+not lost to a reset.
 `Response.hijack` hands the connection to the handler after a 101, and
 `trailer` writes a chunked body's trailer. TLS termination is cloak's, client
 certificates included.

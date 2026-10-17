@@ -1,10 +1,11 @@
 //! A server's HTTP/2 connection (RFC 9113), from its preface to its end:
-//! the reading task reads frames and hands each to the protocol state, and
-//! every request a stream carries is answered by the handler on a task of
-//! its own, as the HTTP/1.1 connection's requests are, through the same
+//! the reading task reads frames and hands each to the protocol state, a
+//! sending task writes what every task encoded (`Session`), and every
+//! request a stream carries is answered by the handler on a task of its
+//! own, as the HTTP/1.1 connection's requests are, through the same
 //! `Request` and `Response`. On an `Io` with no task to spare the streams
-//! are answered one at a time, on the reading task, and the server says so
-//! by allowing one stream at once.
+//! are answered one at a time, on the reading task, which writes as it
+//! goes, and the server says so by allowing one stream at once.
 
 const std = @import("std");
 const Io = std.Io;
@@ -40,31 +41,40 @@ pub fn serve(context: *Context, handler: Handler, socket: *Socket) void {
     var session = Session.init(context, socket, if (concurrent) 100 else 1) catch return;
     defer session.deinit();
     defer tasks.cancel(io);
-    const in = socket.reader();
-    const preface = in.peek(h2.preface.len) catch return;
-    {
-        var held = session.shared.acquireUncancelable(io);
-        defer held.deinit(io);
-        const shared = held.value();
-        if (!shared.conn.checkPreface(preface)) {
-            // glint-ignore: Z026 -- the connection closes next whether or not the GOAWAY reached the peer
-            shared.conn.goaway(socket.writer(), .protocol_error) catch {};
-            session.flushLocked(shared);
-            return;
-        }
-        in.toss(h2.preface.len);
-        shared.conn.start(socket.writer()) catch return;
-        session.flushLocked(shared);
-    }
-    readFrames(&session, handler, &tasks, concurrent);
+    if (concurrent) session.startSending(&tasks);
+    if (start(&session)) readFrames(&session, handler, &tasks, concurrent);
     {
         var held = session.shared.acquireUncancelable(io);
         defer held.deinit(io);
         held.value().closed = true;
     }
+    // The streams end, and the sending task once what is encoded (a
+    // GOAWAY, say) has gone.
     session.changed.broadcast(io);
     // glint-ignore: Z026 -- the streams' tasks end with the connection; a cancel here is the caller's, already on its way
     tasks.await(io) catch {};
+}
+
+/// Take the client's preface and send the server's: false when the
+/// connection goes no further.
+fn start(session: *Session) bool {
+    const socket = session.socket;
+    const io = socket.io;
+    const in = socket.reader();
+    const preface = in.peek(h2.preface.len) catch return false;
+    var held = session.shared.acquireUncancelable(io);
+    defer held.deinit(io);
+    const shared = held.value();
+    if (!shared.conn.checkPreface(preface)) {
+        // glint-ignore: Z026 -- the connection closes next whether or not the GOAWAY reached the peer
+        shared.conn.goaway(Session.out(shared), .protocol_error) catch {};
+        session.post(shared);
+        return false;
+    }
+    in.toss(h2.preface.len);
+    shared.conn.start(Session.out(shared)) catch return false;
+    session.post(shared);
+    return true;
 }
 
 /// Whether this `Io` can run a stream's handler beside the reading task.
@@ -109,8 +119,8 @@ fn readFrames(session: *Session, handler: Handler, tasks: *Io.Group, concurrent:
             const shared = held.value();
             if (shared.conn.goaway_sent == null) {
                 // glint-ignore: Z026 -- the connection drains its streams and ends either way
-                shared.conn.goaway(socket.writer(), .no_error) catch {};
-                session.flushLocked(shared);
+                shared.conn.goaway(Session.out(shared), .no_error) catch {};
+                session.post(shared);
             }
             if (shared.streams.items.len == 0) return;
         }
@@ -122,34 +132,37 @@ fn readFrames(session: *Session, handler: Handler, tasks: *Io.Group, concurrent:
         const whole = h2.head_len + @as(usize, head.len);
         const payload: []const u8 = if (whole <= in.buffer.len) (in.peek(whole) catch return)[h2.head_len..] else &.{};
         var spawn: ?*Stream = null;
-        {
+        const handled = blk: {
             var held = session.shared.acquireUncancelable(io);
             defer held.deinit(io);
             const shared = held.value();
-            const event = shared.conn.receive(socket.writer(), head, payload) catch {
+            const event = shared.conn.receive(Session.out(shared), head, payload) catch {
                 shared.closed = true;
-                session.flushLocked(shared);
-                session.changed.broadcast(io);
-                return;
+                session.post(shared);
+                break :blk false;
             };
             if (event) |e| spawn = handle(session, shared, e) catch {
                 shared.closed = true;
-                session.flushLocked(shared);
-                session.changed.broadcast(io);
-                return;
+                session.post(shared);
+                break :blk false;
             };
-            session.flushLocked(shared);
-            if (shared.closed) return;
-        }
-        if (whole <= in.buffer.len) in.toss(whole) else {
-            in.discardAll(whole) catch return;
-        }
+            session.post(shared);
+            break :blk !shared.closed;
+        };
+        const consumed = handled and if (whole <= in.buffer.len) consumed: {
+            in.toss(whole);
+            break :consumed true;
+        } else if (in.discardAll(whole)) |_| true else |_| false;
         session.changed.broadcast(io);
         if (spawn) |st| {
-            if (concurrent) {
+            // A request the connection ends under is not answered.
+            if (!consumed) {
+                finish(session, st);
+            } else if (concurrent) {
                 tasks.concurrent(io, answer, .{ session, handler, st }) catch answer(session, handler, st);
             } else answer(session, handler, st);
         }
+        if (!consumed) return;
     }
 }
 
@@ -166,7 +179,7 @@ fn handle(session: *Session, shared: *Session.Shared, event: h2.Connection.Event
                 if (kept == null or !h2.message.checkTrailers(kept.?)) {
                     // A malformed trailer section is the stream's error (RFC 9113 §8.1.1).
                     // glint-ignore: Z026 -- the reset is the answer; a failed write ends the connection at its next read
-                    shared.conn.reset(session.socket.writer(), st.id, .protocol_error) catch {};
+                    shared.conn.reset(Session.out(shared), st.id, .protocol_error) catch {};
                     st.reset_code = .protocol_error;
                     return null;
                 }
@@ -180,7 +193,7 @@ fn handle(session: *Session, shared: *Session.Shared, event: h2.Connection.Event
         .data => |d| {
             const st = Session.find(shared, d.stream) orelse {
                 // A stream already answered: its data is given back.
-                shared.conn.giveBack(session.socket.writer(), d.stream, d.bytes.len) catch {
+                shared.conn.giveBack(Session.out(shared), d.stream, d.bytes.len) catch {
                     shared.closed = true;
                 };
                 return null;
@@ -206,7 +219,7 @@ fn startStream(session: *Session, shared: *Session.Shared, id: u31, fields: []co
     const io = session.socket.io;
     const class = BufferPool.Class.fitting(h2.message.copySize(fields) + 1024) orelse {
         // glint-ignore: Z026 -- a head too large to keep is refused; the connection goes on
-        shared.conn.reset(session.socket.writer(), id, .refused_stream) catch {};
+        shared.conn.reset(Session.out(shared), id, .refused_stream) catch {};
         return null;
     };
     const buffer = try pool.acquire(io, class);
@@ -217,7 +230,7 @@ fn startStream(session: *Session, shared: *Session.Shared, id: u31, fields: []co
     const head = h2.message.checkRequest(kept) orelse {
         pool.release(io, buffer);
         // glint-ignore: Z026 -- the reset is the answer; a failed write ends the connection at its next read
-        shared.conn.reset(session.socket.writer(), id, .protocol_error) catch {};
+        shared.conn.reset(Session.out(shared), id, .protocol_error) catch {};
         return null;
     };
     if (shared.conn.stream(id)) |s| s.content_length = head.content_length;

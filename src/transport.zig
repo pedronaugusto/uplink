@@ -23,6 +23,8 @@ pub const Body = @import("transport/Body.zig");
 pub const Head = @import("transport/Head.zig");
 /// One HTTP/2 connection, its requests multiplexed over it.
 pub const H2 = @import("transport/H2.zig");
+/// The frames an HTTP/2 connection has for its socket, both ends'.
+pub const Outbox = @import("transport/Outbox.zig");
 
 test {
     _ = Connection;
@@ -36,4 +38,5 @@ test {
     _ = Body;
     _ = Head;
     _ = H2;
+    _ = Outbox;
 }

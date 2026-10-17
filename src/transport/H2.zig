@@ -9,8 +9,10 @@
 //! the others; one that finds the token taken waits to be woken. A frame is
 //! read only once the socket has something, so a reader whose own deadline
 //! passes gives up its turn, and no deadline ends the socket the other
-//! streams share. Frames are written under one lock, the protocol state
-//! behind it.
+//! streams share. Frames are encoded into the outbox under one lock, the
+//! protocol state behind it, and written by whichever task finds no other
+//! writing, with the lock released (`Outbox`): a reader never waits behind
+//! a write the server is not taking yet.
 
 const std = @import("std");
 const aegis = @import("aegis");
@@ -24,6 +26,7 @@ const Connection = @import("Connection.zig");
 const Context = @import("Context.zig");
 const BufferPool = @import("BufferPool.zig");
 const span = @import("../span.zig");
+const Outbox = @import("Outbox.zig");
 
 const H2 = @This();
 
@@ -37,9 +40,14 @@ changed: aegis.Condition = .init(),
 users: std.atomic.Value(u32) = .init(0),
 /// Private: what `create` allocated besides this value.
 memory: []u8,
+/// Private: the bytes the task holding the send role is writing, outside
+/// the lock.
+sending: std.ArrayList(u8) = .empty,
 
 const Shared = struct {
     proto: h2.Connection,
+    /// The frames for the socket.
+    outbox: Outbox,
     streams: std.ArrayList(*Stream) = .empty,
     scratch: []u8,
     /// A task holds the reading token.
@@ -131,6 +139,7 @@ pub fn create(ctx: *Context, io: Io, conn: *Connection) (Allocator.Error || erro
                 .max_header_block = .fromRaw(Layout.block),
                 .max_header_list = .fromRaw(Layout.field_bytes),
             }, mem),
+            .outbox = .init(ctx.gpa),
             .scratch = scratch,
         }),
     };
@@ -140,8 +149,9 @@ pub fn create(ctx: *Context, io: Io, conn: *Connection) (Allocator.Error || erro
     conn.share();
     var held = h.shared.acquireUncancelable(io);
     defer held.deinit(io);
-    held.value().proto.start(conn.writer()) catch return error.ConnectionFailed;
-    conn.flush() catch return error.ConnectionFailed;
+    const shared = held.value();
+    shared.proto.start(shared.outbox.writer()) catch return error.ConnectionFailed;
+    if (!shared.outbox.sendAlone(ConnSink{ .conn = conn })) return error.ConnectionFailed;
     return h;
 }
 
@@ -152,11 +162,12 @@ pub fn close(h: *H2, io: Io) void {
     if (shared.failure == null) {
         h.conn.io = io;
         // glint-ignore: Z026 -- the GOAWAY is a courtesy; the socket closes whether or not it went
-        shared.proto.goaway(h.conn.writer(), .no_error) catch {};
-        // glint-ignore: Z026 -- as above
-        h.conn.flush() catch {};
+        shared.proto.goaway(shared.outbox.writer(), .no_error) catch {};
+        _ = shared.outbox.sendAlone(ConnSink{ .conn = h.conn });
     }
     shared.streams.deinit(h.ctx.gpa);
+    shared.outbox.deinit();
+    h.sending.deinit(h.ctx.gpa);
     h.conn.close(io);
     h.ctx.gpa.free(@as([]align(64) u8, @alignCast(h.memory))); // safe: `create` allocated it 64-aligned
     h.ctx.gpa.destroy(h);
@@ -257,19 +268,38 @@ pub const Stream = struct {
         st.recv_start = (st.recv_start + n) % st.recv.len;
         st.recv_len -= n;
         const shared = held.value();
-        shared.proto.giveBack(h.conn.writer(), st.id, n) catch {
+        shared.proto.giveBack(shared.outbox.writer(), st.id, n) catch {
             shared.failure = .{ .io = h.conn.writeError() };
         };
-        h.flushLocked(shared);
+        h.post(io, &held);
         return n;
     }
 };
 
-fn flushLocked(h: *H2, shared: *Shared) void {
-    h.conn.flush() catch {
-        shared.failure = .{ .io = h.conn.writeError() };
-    };
+/// What was encoded goes: this task writes it, with the lock released while
+/// it does, unless another task is writing already, whose next round takes
+/// it. Called and returns with the lock held. A write that fails fails the
+/// connection.
+fn post(h: *H2, io: Io, held: anytype) void {
+    if (!held.value().outbox.ready()) return;
+    if (!Outbox.send(io, &h.shared, held, &h.sending, ConnSink{ .conn = h.conn })) {
+        const shared = held.value();
+        if (shared.failure == null) shared.failure = .{ .io = h.conn.writeError() };
+    }
+    // Room in the outbox for the streams that wait for it.
+    h.changed.broadcast(io);
 }
+
+/// The connection, as the outbox writes to it.
+pub const ConnSink = struct {
+    conn: *Connection,
+
+    pub fn transmit(sink: ConnSink, bytes: []const u8) bool {
+        sink.conn.writer().writeAll(bytes) catch return false;
+        sink.conn.flush() catch return false;
+        return true;
+    }
+};
 
 /// The error a stream that cannot go on reports, or none.
 fn failed(h: *H2, st: *const Stream, shared: *const Shared) Error!void {
@@ -295,11 +325,11 @@ pub fn open(h: *H2, io: Io, fields: []const hpack.Field, end_stream: bool, head:
     errdefer h.ctx.gpa.destroy(st);
     st.* = .{ .h2 = h, .id = id, .sent_end = end_stream, .expects_body = !head, .interface = .{ .vtable = &.{ .stream = Stream.streamRead }, .buffer = &.{}, .seek = 0, .end = 0 } };
     try shared.streams.append(h.ctx.gpa, st);
-    shared.proto.writeHeaders(h.conn.writer(), id, fields, end_stream, shared.scratch) catch {
+    shared.proto.writeHeaders(shared.outbox.writer(), id, fields, end_stream, shared.scratch) catch {
         shared.failure = .{ .io = h.conn.writeError() };
         return error.ConnectionFailed;
     };
-    h.flushLocked(shared);
+    h.post(io, &held);
     return st;
 }
 
@@ -311,19 +341,26 @@ pub fn send(h: *H2, io: Io, st: *Stream, bytes: []const u8, end_stream: bool, de
     var until = h.waitUntil(io, deadline);
     var rest = bytes;
     while (true) {
+        try h.failed(st, held.value());
+        if (held.value().outbox.backlog() >= Outbox.high_water) {
+            // Room comes as the task writing takes what waits, or as this
+            // one does when no one is writing.
+            h.post(io, &held);
+            if (held.value().outbox.backlog() >= Outbox.high_water) try h.awaitChange(io, &held, until);
+            continue;
+        }
         const shared = held.value();
-        try h.failed(st, shared);
-        const n = shared.proto.writeData(h.conn.writer(), st.id, rest, end_stream) catch {
+        const n = shared.proto.writeData(shared.outbox.writer(), st.id, rest, end_stream) catch {
             return error.ConnectionFailed;
         };
         rest = rest[n..];
         if (rest.len == 0 and (n != 0 or !end_stream or bytes.len == 0)) {
             if (end_stream) st.sent_end = true;
-            h.flushLocked(shared);
+            h.post(io, &held);
             return;
         }
+        h.post(io, &held);
         if (n == 0) {
-            h.flushLocked(shared);
             // The window opens when a WINDOW_UPDATE is read: by this task
             // if no one else is reading.
             try h.pump(io, &held, until);
@@ -369,43 +406,49 @@ fn waitUntil(h: *const H2, io: Io, deadline: ?Io.Timestamp) ?Io.Timestamp {
     return if (by_activity.nanoseconds < d.nanoseconds) by_activity else d;
 }
 
+/// Wait for a stream's state, the outbox or the reading token to change,
+/// no longer than `deadline`. Called and returns with the lock held.
+fn awaitChange(h: *H2, io: Io, held: anytype, deadline: ?Io.Timestamp) Error!void {
+    const timeout: Io.Timeout = if (deadline) |d| .{ .deadline = .{ .raw = d, .clock = .awake } } else .none;
+    h.changed.wait(io, held, timeout) catch |err| return switch (err) {
+        error.Timeout => if (deadline != null and Io.Clock.awake.now(io).nanoseconds >= deadline.?.nanoseconds) error.TimedOut else {},
+        error.Canceled => error.Canceled,
+        error.WaiterLimit => error.ConnectionFailed,
+    };
+}
+
 /// Take a turn: read one frame if no one is reading, else wait for whoever
 /// is. Called and returns with the lock held.
 fn pump(h: *H2, io: Io, held: anytype, deadline: ?Io.Timestamp) Error!void {
-    const shared = held.value();
-    if (shared.reading) {
-        const timeout: Io.Timeout = if (deadline) |d| .{ .deadline = .{ .raw = d, .clock = .awake } } else .none;
-        h.changed.wait(io, held, timeout) catch |err| return switch (err) {
-            error.Timeout => if (deadline != null and Io.Clock.awake.now(io).nanoseconds >= deadline.?.nanoseconds) error.TimedOut else {},
-            error.Canceled => error.Canceled,
-            error.WaiterLimit => error.ConnectionFailed,
-        };
-        return;
-    }
-    shared.reading = true;
+    if (held.value().reading) return h.awaitChange(io, held, deadline);
+    held.value().reading = true;
     held.deinit(io);
     const read = h.readFrame(io, deadline);
     held.* = h.shared.acquireUncancelable(io);
-    const after = held.value();
+    const handled = h.handleFrame(io, held.value(), read);
     // The token goes back once the frame is handled and taken off the
-    // stream, so the next reader starts at the next frame.
-    defer {
-        after.reading = false;
-        h.changed.broadcast(io);
-    }
+    // stream, so the next reader starts at the next frame; what the frame
+    // asked to be written goes after.
+    held.value().reading = false;
+    h.changed.broadcast(io);
+    h.post(io, held);
+    return handled;
+}
+
+/// Hand a frame read to the protocol state and its event to the streams,
+/// then take it off the reader; under the lock, with the reading token.
+fn handleFrame(h: *H2, io: Io, shared: *Shared, read: Error!struct { h2.Head, []const u8 }) Error!void {
     const head, const payload = try read;
     defer h.conn.reader().toss(h2.head_len + payload.len);
-    const event = after.proto.receive(h.conn.writer(), head, payload) catch {
-        after.failure = .protocol;
-        h.flushLocked(after);
+    const event = shared.proto.receive(shared.outbox.writer(), head, payload) catch {
+        shared.failure = .protocol;
         return error.ConnectionFailed;
     };
     // Out of memory for a stream's data: the stream cannot be given what
     // the protocol state took, so the connection ends.
-    if (event) |e| h.dispatch(io, after, e) catch {
-        after.failure = .{ .io = error.ConnectionFailed };
+    if (event) |e| h.dispatch(io, shared, e) catch {
+        shared.failure = .{ .io = error.ConnectionFailed };
     };
-    h.flushLocked(after);
 }
 
 /// Read one whole frame, waiting no longer than `deadline` for it to
@@ -529,7 +572,7 @@ fn dispatch(h: *H2, io: Io, shared: *Shared, event: h2.Connection.Event) Allocat
 /// §8.1.1) and its exchange fails.
 fn malformed(h: *H2, shared: *Shared, st: *Stream) void {
     // A reset that cannot be written: the connection has failed, which ends the stream too.
-    shared.proto.reset(h.conn.writer(), st.id, .protocol_error) catch {
+    shared.proto.reset(shared.outbox.writer(), st.id, .protocol_error) catch {
         shared.failure = .{ .io = h.conn.writeError() };
     };
     st.reset_code = .protocol_error;
@@ -549,14 +592,14 @@ pub fn finish(h: *H2, io: Io, st: *Stream) void {
         const shared = held.value();
         if (shared.failure == null and st.reset_code == null and !(st.recv_end and st.sent_end)) {
             // glint-ignore: Z026 -- a reset that cannot be written leaves a failed connection, which ends the stream too
-            shared.proto.reset(h.conn.writer(), st.id, .cancel) catch {};
-            h.flushLocked(shared);
+            shared.proto.reset(shared.outbox.writer(), st.id, .cancel) catch {};
         }
         shared.proto.release(st.id);
         for (shared.streams.items, 0..) |s, i| if (s == st) {
             _ = shared.streams.swapRemove(i);
             break;
         };
+        h.post(io, &held);
     }
     if (st.head_buffer.len != 0) h.ctx.buffers.release(io, st.head_buffer);
     if (st.trailer_buffer.len != 0) h.ctx.buffers.release(io, st.trailer_buffer);
