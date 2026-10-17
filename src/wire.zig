@@ -18,6 +18,8 @@ pub const socks = @import("wire/socks.zig");
 pub const url = @import("wire/url.zig");
 /// HTTP dates: read in their three forms, written in one.
 pub const date = @import("wire/date.zig");
+/// `Cache-Control` read, and how long a response stays fresh.
+pub const cache = @import("wire/cache.zig");
 /// `Set-Cookie` values, cookie dates, and the domain and path rules.
 pub const cookie = @import("wire/cookie.zig");
 /// Server-Sent Events, read and written.
@@ -52,6 +54,7 @@ test {
     _ = Method;
     _ = url;
     _ = date;
+    _ = cache;
     _ = cookie;
     _ = sse;
     _ = form;
