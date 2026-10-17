@@ -1435,7 +1435,7 @@ fn sendTo(client: *Client, url: []const u8) !void {
     response.deinit(test_io.io());
 }
 
-test "a handler learns its client left while it computes: a canceled request, over HTTP/1.1, TLS and HTTP/2" {
+test "a handler learns its client left while it computes: a canceled request, over HTTP/1.1 and TLS" {
     const gpa = testing.allocator;
     const io = test_io.io();
     const t = try ServerTls.make(gpa);
@@ -1444,7 +1444,6 @@ test "a handler learns its client left while it computes: a canceled request, ov
     const cases = [_]Case{
         .{ .options = .{}, .scheme = "http", .client = .{} },
         .{ .options = .{ .http2 = false, .tls = .{ .credentials = &t.credentials } }, .scheme = "https", .client = .{ .tls = .{ .trust = t.servers } } },
-        .{ .options = .{ .h2c = .only }, .scheme = "http", .client = .{ .http2 = .prior_knowledge } },
     };
     for (cases) |case| {
         Leaving.reset();
@@ -1483,4 +1482,46 @@ test "a client that stays is there, its pipelined requests kept for their turn, 
     try testing.expectEqual(@as(usize, 3), std.mem.count(u8, got, "HTTP/1.1 200 "));
     try testing.expect(std.mem.find(u8, got, "unread") != null);
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, got, "here"));
+}
+
+test "a handler learns its client left while it computes: a stream the client resets, over HTTP/2" {
+    const io = test_io.io();
+    const wire = @import("uplink.wire");
+    const h2 = wire.h2;
+    Leaving.reset();
+    const running = try Running.start(testing.allocator, .{ .h2c = .only }, .of(Leaving.handle));
+    defer running.stop();
+    const stream = try dialRaw(running);
+    defer stream.close(io);
+    var streams: [8]h2.Connection.Stream = @splat(.{});
+    var block: [1024]u8 = undefined;
+    var field_bytes: [1024]u8 = undefined;
+    var fields: [16]wire.hpack.Field = undefined;
+    var db: [wire.hpack.Table.bytesFor(4096)]u8 = undefined;
+    var de: [wire.hpack.Table.entriesFor(4096)]wire.hpack.Table.Entry = undefined;
+    var eb: [wire.hpack.Table.bytesFor(4096)]u8 = undefined;
+    var ee: [wire.hpack.Table.entriesFor(4096)]wire.hpack.Table.Entry = undefined;
+    var proto: h2.Connection = .init(.client, .{ .enable_push = false }, .{}, .{
+        .streams = &streams,
+        .block = &block,
+        .field_bytes = &field_bytes,
+        .fields = &fields,
+        .decoder_bytes = &db,
+        .decoder_entries = &de,
+        .encoder_bytes = &eb,
+        .encoder_entries = &ee,
+    });
+    var wbuf: [4096]u8 = undefined;
+    var sw = stream.writer(io, &wbuf);
+    var scratch: [1024]u8 = undefined;
+    try proto.start(&sw.interface);
+    const head = [_]wire.hpack.Field{ .{ .name = ":method", .value = "GET" }, .{ .name = ":scheme", .value = "http" }, .{ .name = ":authority", .value = "127.0.0.1" }, .{ .name = ":path", .value = "/" } };
+    const id = try proto.open();
+    try proto.writeHeaders(&sw.interface, id, &head, true, &scratch);
+    try sw.interface.flush();
+    try Leaving.until(&Leaving.started, true);
+    // The client gives up on the stream while its handler computes.
+    try proto.reset(&sw.interface, id, .cancel);
+    try sw.interface.flush();
+    try Leaving.until(&Leaving.seen, @as(u8, 1));
 }
