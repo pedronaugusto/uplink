@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-17
+
 ### Added
 
 - `server.Response.flush`: pushes the head and what the body has buffered to the client as it is written, for a response that streams (an event stream, a long poll); one flushed before its head went goes without a coding. Nothing reached the client before the body's buffer filled or the response ended.
