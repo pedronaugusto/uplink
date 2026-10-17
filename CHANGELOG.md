@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-10-17
+
 ### Added
 
 - `server.Options.timeouts.linger`: how long a connection the server ends waits for its client to end it too (RFC 9112 §9.6), two seconds by default; null closes at once.
