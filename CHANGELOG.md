@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-10-17
+
 ### Added
 
 - `server.Request.gone`: whether the client left while its request is answered (HTTP/1.1: it ended the connection, a half-close included; HTTP/2: it reset the stream; either: the connection failed), waiting up to a timeout for it. A handler that computes for long runs its work beside the wait and stops when the client leaves; one that loops asks with a zero duration. The body is read first (`error.BodyUnread`); what an HTTP/1.1 client sends meanwhile is kept for its next request.
