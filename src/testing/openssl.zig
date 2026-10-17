@@ -14,8 +14,14 @@ pub const passphrase = "correct-horse";
 pub const kinds = [_][]const u8{ "rsa", "p256", "p384", "ed25519" };
 
 /// Whether the tests must find `openssl` rather than skip: on a hosted CI
-/// job, where it is always installed.
+/// runner, whose image always installs it. GitHub's runners are x86_64 and
+/// aarch64; a test built for another architecture runs on a machine emulated
+/// beside the runner (preflight's riscv64 Linux), which has no image's tools.
 fn required() bool {
+    switch (builtin.target.cpu.arch) {
+        .x86_64, .aarch64 => {},
+        else => return false,
+    }
     const value = std.testing.environ.getAlloc(std.testing.allocator, "GITHUB_ACTIONS") catch return false;
     std.testing.allocator.free(value);
     return true;
@@ -41,8 +47,8 @@ pub const Pki = struct {
         errdefer dir.cleanup();
         const base = try dir.dir.realPathFileAlloc(io, ".", gpa);
         errdefer gpa.free(base);
+        try env.put("HOME", base);
         p.* = .{ .gpa = gpa, .dir = dir, .base = base, .env = env };
-        try p.env.put("HOME", base);
         try p.openssl(io, &.{ "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", "ca.key", "-out", "ca.pem", "-days", "2", "-subj", "/CN=uplink-test-ca" });
         try p.openssl(io, &.{ "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", "stranger.key", "-out", "stranger.pem", "-days", "2", "-subj", "/CN=uplink-test-stranger" });
         try p.openssl(io, &.{ "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "server.key", "-out", "server.pem", "-days", "2", "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1,DNS:127.0.0.1,DNS:localhost" });
