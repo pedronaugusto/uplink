@@ -581,9 +581,26 @@ const FakeServer = struct {
 
     fn start(f: *FakeServer, io: Io) !void {
         const loopback = try IpAddress.parse("127.0.0.1", 0);
-        f.udp = try loopback.bind(io, .{ .mode = .dgram });
-        f.address = f.udp.address;
-        f.tcp = try f.address.listen(io, .{ .reuse_address = true });
+        // UDP and TCP on one port: the port the system gives the UDP socket
+        // may be taken for TCP (another process's connection), so another
+        // is asked for until both are free.
+        var tries: u8 = 0;
+        while (true) : (tries += 1) {
+            f.udp = try loopback.bind(io, .{ .mode = .dgram });
+            f.address = f.udp.address;
+            f.tcp = f.address.listen(io, .{ .reuse_address = true }) catch |err| switch (err) {
+                error.AddressInUse => {
+                    f.udp.close(io);
+                    if (tries == 16) return err;
+                    continue;
+                },
+                else => |e| {
+                    f.udp.close(io);
+                    return e;
+                },
+            };
+            break;
+        }
         f.udp_task = io.concurrent(serveUdp, .{ f, io }) catch return error.SkipZigTest;
         f.tcp_task = io.concurrent(serveTcp, .{ f, io }) catch return error.SkipZigTest;
     }
