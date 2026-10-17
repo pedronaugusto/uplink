@@ -333,6 +333,13 @@ pub const Outgoing = struct {
     retry: ?u64 = null,
 };
 
+/// An event's fields but its data, for `EventWriter`.
+pub const Head = struct {
+    type: ?[]const u8 = null,
+    id: ?[]const u8 = null,
+    retry: ?u64 = null,
+};
+
 /// Errors from `writeEvent`.
 pub const WriteError = error{
     WriteFailed,
@@ -342,21 +349,69 @@ pub const WriteError = error{
 
 /// Write one event and the blank line that ends it.
 pub fn writeEvent(w: *Io.Writer, event: Outgoing) WriteError!void {
-    if (event.type) |t| if (std.mem.findAny(u8, t, "\r\n") != null) return error.InvalidField;
-    if (event.id) |id| if (std.mem.findAny(u8, id, "\r\n\x00") != null) return error.InvalidField;
-    if (event.type) |t| try w.print("event: {s}\n", .{t});
-    if (event.id) |id| try w.print("id: {s}\n", .{id});
-    if (event.retry) |ms| try w.print("retry: {d}\n", .{ms});
-    var rest = event.data;
-    while (true) {
-        const end = std.mem.findAny(u8, rest, "\r\n") orelse rest.len;
-        try w.print("data: {s}\n", .{rest[0..end]});
-        if (end == rest.len) break;
-        const skip: usize = if (rest[end] == '\r' and end + 1 < rest.len and rest[end + 1] == '\n') 2 else 1;
-        rest = rest[end + skip ..];
-    }
-    try w.writeAll("\n");
+    var e: EventWriter = try .begin(w, &.{}, .{ .type = event.type, .id = event.id, .retry = event.retry });
+    try e.interface.writeAll(event.data);
+    try e.end();
 }
+
+/// One event whose data is written as it is made, for data too large to
+/// hold whole: `begin` writes its fields, the data goes to `interface` (a
+/// line break in it, CR, LF or CRLF, starts another `data` line, as
+/// `writeEvent` splits its data), and `end` writes the blank line that ends
+/// the event. The writer must not move once data is written to it.
+pub const EventWriter = struct {
+    out: *Io.Writer,
+    /// Where the data is written.
+    interface: Io.Writer,
+    /// Private: the last byte was CR, so an LF right after it ends no line.
+    after_cr: bool = false,
+
+    /// Writes `head` and opens the data, which `buffer` collects before it
+    /// goes to `out` (it may be empty).
+    pub fn begin(out: *Io.Writer, buffer: []u8, head: Head) WriteError!EventWriter {
+        if (head.type) |t| if (std.mem.findAny(u8, t, "\r\n") != null) return error.InvalidField;
+        if (head.id) |id| if (std.mem.findAny(u8, id, "\r\n\x00") != null) return error.InvalidField;
+        if (head.type) |t| try out.print("event: {s}\n", .{t});
+        if (head.id) |id| try out.print("id: {s}\n", .{id});
+        if (head.retry) |ms| try out.print("retry: {d}\n", .{ms});
+        try out.writeAll("data: ");
+        return .{ .out = out, .interface = .{ .vtable = &.{ .drain = drain }, .buffer = buffer } };
+    }
+
+    /// Ends the data and the event.
+    pub fn end(e: *EventWriter) WriteError!void {
+        try e.interface.flush();
+        try e.out.writeAll("\n\n");
+    }
+
+    fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
+        const e: *EventWriter = @alignCast(@fieldParentPtr("interface", w)); // safe: the writer is an EventWriter's own
+        try e.put(w.buffered());
+        w.end = 0;
+        var n: usize = 0;
+        for (data[0 .. data.len - 1]) |d| {
+            try e.put(d);
+            n += d.len;
+        }
+        const last = data[data.len - 1];
+        if (last.len != 0) for (0..splat) |_| try e.put(last);
+        return n + last.len * splat;
+    }
+
+    /// `bytes` as data lines.
+    fn put(e: *EventWriter, bytes: []const u8) Io.Writer.Error!void {
+        var rest = bytes;
+        while (rest.len != 0) {
+            if (e.after_cr and rest[0] == '\n') rest = rest[1..];
+            e.after_cr = false;
+            const at = std.mem.findAny(u8, rest, "\r\n") orelse return e.out.writeAll(rest);
+            try e.out.writeAll(rest[0..at]);
+            try e.out.writeAll("\ndata: ");
+            e.after_cr = rest[at] == '\r';
+            rest = rest[at + 1 ..];
+        }
+    }
+};
 
 const testing = std.testing;
 
@@ -425,6 +480,32 @@ test "a written event reads back as itself" {
     const empty = (try r.next()).?;
     try testing.expectEqualStrings("", empty.data);
     try testing.expectError(error.InvalidField, writeEvent(&w, .{ .type = "a\nb", .data = "" }));
+}
+
+test "an event written in pieces is the event written whole" {
+    const data = "one\r\ntwo\rthree\nfour\r";
+    var whole_buffer: [256]u8 = undefined;
+    var whole: Io.Writer = .fixed(&whole_buffer);
+    try writeEvent(&whole, .{ .type = "message", .data = data });
+    // Every split, a CRLF across two writes among them, through a buffer
+    // smaller than the data and through none.
+    for ([_]usize{ 0, 4 }) |size| for (0..data.len + 1) |at| {
+        var out_buffer: [256]u8 = undefined;
+        var out: Io.Writer = .fixed(&out_buffer);
+        var buffer: [4]u8 = undefined;
+        var e: EventWriter = try .begin(&out, buffer[0..size], .{ .type = "message" });
+        try e.interface.writeAll(data[0..at]);
+        try e.interface.writeAll(data[at..]);
+        try e.end();
+        try testing.expectEqualStrings(whole.buffered(), out.buffered());
+    };
+    // A splat is its bytes repeated.
+    var out_buffer: [64]u8 = undefined;
+    var out: Io.Writer = .fixed(&out_buffer);
+    var e: EventWriter = try .begin(&out, &.{}, .{});
+    try e.interface.splatBytesAll("a\n", 3);
+    try e.end();
+    try testing.expectEqualStrings("data: a\ndata: a\ndata: a\ndata: \n\n", out.buffered());
 }
 
 test "fuzz: any stream is read in pieces as it is read whole" {

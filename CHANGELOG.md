@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `wire.sse.EventWriter`: one event whose data is written as it is made, for data too large to hold whole (`begin` with the event's `Head`, the data to its `interface`, a line break in it starting another `data` line, then `end`). `writeEvent` writes through it.
+
 ## [0.8.1] - 2026-10-17
 
 ### Added
