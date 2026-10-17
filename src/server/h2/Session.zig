@@ -384,6 +384,23 @@ pub const Stream = struct {
         return .ready;
     }
 
+    /// Wait up to `timeout` for the peer to reset the stream or for the
+    /// connection to end: whether one did. False too when the condition
+    /// takes no more waiters.
+    pub fn awaitGone(st: *Stream, io: Io, timeout: Io.Timeout) Io.Cancelable!bool {
+        const s = st.session;
+        var held = try s.shared.acquire(io);
+        defer held.deinit(io);
+        const deadline = timeout.toDeadline(io);
+        while (st.reset_code == null and !held.value().closed) {
+            s.changed.wait(io, &held, deadline) catch |err| return switch (err) {
+                error.Timeout, error.WaiterLimit => false,
+                error.Canceled => error.Canceled,
+            };
+        }
+        return true;
+    }
+
     /// Whether the request's data has ended, all of it delivered (some
     /// perhaps not yet read).
     pub fn dataEnded(st: *Stream) bool {

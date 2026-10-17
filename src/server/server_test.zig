@@ -1399,3 +1399,88 @@ test "an HTTPS record whose endpoint fails, or that speaks no protocol the clien
         try fetchEach(gpa, &client, url, 1);
     }
 }
+
+/// What a handler that waits for its client to leave saw.
+const Leaving = struct {
+    var started: std.atomic.Value(bool) = .init(false);
+    /// 0 while it waits, 1 when the client left, 2 when the wait ended
+    /// otherwise.
+    var seen: std.atomic.Value(u8) = .init(0);
+
+    fn reset() void {
+        started.store(false, .release);
+        seen.store(0, .release);
+    }
+
+    fn handle(io: Io, request: *Request, response: *Response) anyerror!void {
+        started.store(true, .release);
+        const left = request.gone(io, .{ .duration = .{ .raw = .fromSeconds(20), .clock = .awake } }) catch |err| {
+            seen.store(2, .release);
+            return err;
+        };
+        seen.store(if (left) 1 else 2, .release);
+        if (!left) try response.send(io, "stayed");
+    }
+
+    fn until(flag: anytype, want: anytype) !void {
+        const io = test_io.io();
+        var waited: u32 = 0;
+        while (flag.load(.acquire) != want and waited < 1000) : (waited += 1) try io.sleep(.fromMilliseconds(10), .awake);
+        try testing.expectEqual(want, flag.load(.acquire));
+    }
+};
+
+fn sendTo(client: *Client, url: []const u8) !void {
+    var response = try client.send(test_io.io(), .{ .url = url });
+    response.deinit(test_io.io());
+}
+
+test "a handler learns its client left while it computes: a canceled request, over HTTP/1.1, TLS and HTTP/2" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const t = try ServerTls.make(gpa);
+    defer t.destroy(gpa);
+    const Case = struct { options: Server.Options, scheme: []const u8, client: Client.Options };
+    const cases = [_]Case{
+        .{ .options = .{}, .scheme = "http", .client = .{} },
+        .{ .options = .{ .http2 = false, .tls = .{ .credentials = &t.credentials } }, .scheme = "https", .client = .{ .tls = .{ .trust = t.servers } } },
+        .{ .options = .{ .h2c = .only }, .scheme = "http", .client = .{ .http2 = .prior_knowledge } },
+    };
+    for (cases) |case| {
+        Leaving.reset();
+        const running = try Running.start(gpa, case.options, .of(Leaving.handle));
+        defer running.stop();
+        var client: Client = .init(gpa, case.client);
+        defer client.deinit(io);
+        var url_buf: [64]u8 = undefined;
+        const url = try std.mem.print(&url_buf, "{s}://127.0.0.1:{d}/", .{ case.scheme, running.port });
+        var sending = io.concurrent(sendTo, .{ &client, url }) catch return error.SkipZigTest;
+        try Leaving.until(&Leaving.started, true);
+        // The client gives up on the request while its handler computes.
+        // glint-ignore: Z026 -- a canceled send ends as it does; what the test checks is the handler's side
+        _ = sending.cancel(io) catch {};
+        try Leaving.until(&Leaving.seen, @as(u8, 1));
+    }
+}
+
+fn asking(io: Io, request: *Request, response: *Response) anyerror!void {
+    const now: Io.Timeout = .{ .duration = .{ .raw = .zero, .clock = .awake } };
+    if (std.mem.eql(u8, request.path, "/early")) {
+        // The body comes first.
+        try testing.expectError(error.BodyUnread, request.gone(io, now));
+        return response.send(io, "unread");
+    }
+    return response.send(io, if (try request.gone(io, now)) "left" else "here");
+}
+
+test "a client that stays is there, its pipelined requests kept for their turn, and a body is read before the question" {
+    const gpa = testing.allocator;
+    const running = try Running.start(gpa, .{}, .of(asking));
+    defer running.stop();
+    const got = try running.raw(gpa, "POST /early HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello" ++
+        "GET /a HTTP/1.1\r\nHost: x\r\n\r\nGET /b HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    defer gpa.free(got);
+    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, got, "HTTP/1.1 200 "));
+    try testing.expect(std.mem.find(u8, got, "unread") != null);
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, got, "here"));
+}

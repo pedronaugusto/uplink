@@ -12,6 +12,7 @@ const cloak = @import("cloak");
 const tls = @import("../tls.zig");
 const span = @import("../span.zig");
 const Timed = @import("../net/Timed.zig");
+const sys = @import("../net/sys.zig");
 const Context = @import("Context.zig");
 
 const Socket = @This();
@@ -134,6 +135,56 @@ pub fn awaitReadable(c: *Socket, io: Io, timeout: Io.Duration) Io.Cancelable!Tim
     return Timed.awaitReadable(io, c.stream.socket.handle, &c.input.interface, timeout);
 }
 
+/// Wait up to `timeout` for the client to end the connection while a
+/// request is answered, its body read: whether it did (its FIN or a reset),
+/// or the connection failed. What the client sends meanwhile (its next
+/// request, TLS records) is read into the input buffer and kept for the
+/// reader; once that buffer is full the wait can only run out. False too
+/// when the `Io` cannot wait for a bounded time. One wait at a time, from
+/// any task, while the handler runs.
+pub fn awaitEnd(c: *Socket, io: Io, timeout: Io.Timeout) Io.Cancelable!bool {
+    if (c.failed() != .none) return true;
+    const until = timeout.toDeadline(io);
+    const r = &c.input.interface;
+    while (true) {
+        if (r.seek == r.end) {
+            r.seek = 0;
+            r.end = 0;
+        }
+        if (r.end == r.buffer.len) return waitOut(io, until);
+        // A look that neither waits nor takes answers at once where the
+        // system has one: what a query with no time to wait needs.
+        if (sys.peek(c.stream.socket.handle)) |seen| switch (seen) {
+            .closed => return true,
+            .readable => {},
+            .idle => if (expired(io, until)) return false,
+        };
+        var data: [1][]u8 = .{r.buffer[r.end..]};
+        const result = io.operateTimeout(.{ .net_read = .{ .socket_handle = c.stream.socket.handle, .data = &data } }, until) catch |err| return switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => false,
+            error.Canceled => error.Canceled,
+        };
+        const n = (result.net_read catch return true).data_len;
+        if (n == 0) return true;
+        r.end += n;
+    }
+}
+
+fn expired(io: Io, until: Io.Timeout) bool {
+    const left = until.toDurationFromNow(io) orelse return false;
+    return left.raw.nanoseconds <= 0;
+}
+
+/// Wait out `until`, which nothing ends sooner but a cancelation.
+fn waitOut(io: Io, until: Io.Timeout) Io.Cancelable!bool {
+    var never: Io.Event = .unset;
+    never.waitTimeout(io, until) catch |err| return switch (err) {
+        error.Timeout => false,
+        error.Canceled => error.Canceled,
+    };
+    unreachable; // unreachable: nothing sets the event
+}
+
 /// The task serving the connection was canceled: no operation follows.
 pub fn noteCanceled(c: *Socket) void {
     c.note(.canceled);
@@ -162,6 +213,7 @@ pub fn close(c: *Socket) void {
     }
     c.linger();
     c.timed.deinit(io, c.context.keeper());
+    c.context.closing(io, &c.entry);
     c.stream.close(io);
     for ([_][]u8{ c.input.interface.buffer, c.output.interface.buffer }) |b| if (b.len != 0) pool.release(io, b);
 }

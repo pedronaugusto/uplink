@@ -202,6 +202,10 @@ pub const Entry = struct {
     node: std.DoublyLinkedList.Node = .{},
     /// Waiting for a request; read and written under the list's lock.
     idle: bool = false,
+    /// Its socket is closed, or about to be, before it leaves the list:
+    /// `stop` leaves the handle alone, which may already name another
+    /// socket. Under the list's lock.
+    closed: bool = false,
     socket: Io.net.Socket.Handle,
 };
 
@@ -298,6 +302,13 @@ pub fn leave(c: *Context, io: Io, entry: *Entry) void {
     if (live.count == 0 and c.isStopping()) c.drained.set(io);
 }
 
+/// `entry`'s socket is closing: nothing ends it from here on.
+pub fn closing(c: *Context, io: Io, entry: *Entry) void {
+    var held = c.live.acquireUncancelable(io);
+    defer held.deinit(io);
+    entry.closed = true;
+}
+
 /// Mark `entry` waiting for a request, or not: an idle connection is the
 /// one `stop` ends at once. False when the server is stopping, and the
 /// connection should not wait.
@@ -334,6 +345,7 @@ fn abort(c: *Context, io: Io, which: enum { idle, all }) void {
     var it = live.list.first;
     while (it) |node| : (it = node.next) {
         const entry: *Entry = @fieldParentPtr("node", node);
+        if (entry.closed) continue;
         if (which == .all or entry.idle) reactor.net.abort(io, entry.socket);
     }
 }

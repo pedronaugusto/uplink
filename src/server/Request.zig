@@ -240,6 +240,26 @@ pub fn trailers(r: *Request) ?fields.Headers {
     return parsed;
 }
 
+/// Why `gone` could not say. `BodyUnread`: on HTTP/1.1 what the client
+/// sends before the body's end is the body, so the body is read first.
+pub const GoneError = Io.Cancelable || error{BodyUnread};
+
+/// Whether the client left while its request is answered: it ended the
+/// connection (HTTP/1.1, its FIN or a reset; a half-close counts, as it
+/// does for proxies), reset the request's stream (HTTP/2), or the
+/// connection failed. Waits up to `timeout` for that (`.none`: until it
+/// happens or the task is canceled): a handler that computes for long runs
+/// its work beside this wait and stops it when the client leaves, and one
+/// that loops asks with a zero duration. The body is read to its end
+/// first, on both versions. What the client sends meanwhile on HTTP/1.1 is
+/// kept for its next request. One wait at a time, from any task, ended
+/// before the handler returns.
+pub fn gone(r: *Request, io: Io, timeout: Io.Timeout) GoneError!bool {
+    if (!r.bodyComplete()) return error.BodyUnread;
+    if (r.stream) |st| return st.awaitGone(io, timeout);
+    return r.socket.awaitEnd(io, timeout);
+}
+
 /// Whether the body was read to its end.
 pub fn bodyComplete(r: *const Request) bool {
     if (r.stream) |st| return st.drained();
