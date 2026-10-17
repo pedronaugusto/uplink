@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-17
+
+### Breaking
+
+- Pins cloak 0.14.0 (from 0.10.1): the TLS options name cloak's types, so a program that builds them takes cloak 0.14 (its open enums, raw public keys in `Verify` and `Trust`, `credentialFor` taking forms, `.ecdsa_p1363`).
+
+### Changed
+
+- Pins aegis 0.1.11, which cloak 0.14 selects.
+
 ## [0.7.3] - 2026-10-17
 
 ### Added
