@@ -209,6 +209,26 @@ pub fn send(r: *Response, io: Io, body: []const u8) Error!void {
     return r.sendWhole(body);
 }
 
+/// Push what was written so far to the client: the head, when it has not
+/// gone, and the body's buffered bytes, framed. A response that streams as
+/// it is made (an event stream, a long poll) flushes after each piece. One
+/// flushed before its head went is sent without a coding: what must reach
+/// the client as it is written cannot wait in a compressor. One already
+/// under a coding pushes as much as the coding has put out.
+pub fn flush(r: *Response, io: Io) Error!void {
+    r.socket.adopt(io);
+    switch (r.state) {
+        .open => {
+            r.compressible = false;
+            try r.sendHead(.chunked, null);
+        },
+        .streaming => {},
+        .ended, .hijacked => return error.HeadSent,
+    }
+    r.interface.flush() catch return r.failure();
+    r.flushOut() catch return r.fail();
+}
+
 /// Add a field to the trailer of a chunked body, sent at `end`.
 pub fn trailer(r: *Response, name: []const u8, value: []const u8) Error!void {
     if (r.state == .ended or r.state == .hijacked) return error.HeadSent;

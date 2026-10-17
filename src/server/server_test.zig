@@ -128,6 +128,42 @@ test "a body longer than the buffer is chunked, and one that fits goes with its 
     try testing.expect(std.mem.endsWith(u8, plain, "\r\n\r\nhello"));
 }
 
+/// Set by the test once it has read the first event: the handler sends the
+/// second only then, so the first can only have arrived through `flush`.
+var first_read: Io.Event = .unset;
+
+fn events(io: Io, _: *Request, response: *Response) anyerror!void {
+    try response.header("Content-Type", "text/event-stream");
+    const w = try response.writer(io);
+    try w.writeAll("data: one\n\n");
+    try response.flush(io);
+    try first_read.wait(io);
+    try w.writeAll("data: two\n\n");
+    try response.end(io);
+}
+
+test "a flushed response reaches its client as it is written, without a coding" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    first_read = .unset;
+    const running = try Running.start(gpa, .{ .compression = .{ .min_size = .literal("1B") } }, .of(events));
+    defer running.stop();
+    var client: Client = .init(gpa, .{});
+    defer client.deinit(io);
+    var buf: [64]u8 = undefined;
+    var response = try client.send(io, .{ .url = running.url(&buf, "/"), .headers = &.{.{ .name = "Accept-Encoding", .value = "gzip" }} });
+    defer response.deinit(io);
+    try testing.expect(response.headers.get("content-encoding") == null);
+    const r = response.reader(io);
+    const first = try r.takeDelimiterInclusive('\n');
+    try testing.expectEqualStrings("data: one\n", first);
+    try testing.expectEqual(@as(u8, '\n'), try r.takeByte());
+    first_read.set(io);
+    const rest = try r.allocRemaining(gpa, .limited(1 << 10));
+    defer gpa.free(rest);
+    try testing.expectEqualStrings("data: two\n\n", rest);
+}
+
 fn echo(io: Io, request: *Request, response: *Response) anyerror!void {
     const body = try request.collect(testing.allocator, io, .limited(1 << 20));
     defer testing.allocator.free(body);
