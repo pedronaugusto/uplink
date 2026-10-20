@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-10-20
+
 ### Changed
 
 - Pins reactor 0.7.1 (on shuttle 0.3) and xenoglyph 0.4.1, where it pinned reactor 0.4.3 on shuttle 0.2.1, which kept a graph holding uplink from taking shakedown 0.4.11 or later; aegis 0.1.14. Development: preflight 0.10.2, shakedown 0.4.12.
