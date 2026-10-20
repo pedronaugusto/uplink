@@ -476,8 +476,8 @@ fn loadLine(jar: *CookieJar, io: Io, line: []const u8, now: i64) Allocator.Error
 
 /// Which cookies `save` writes.
 pub const SaveOptions = struct {
-    /// Session cookies too, with expiry 0; git's `http.saveCookies` keeps
-    /// only persistent ones.
+    /// Session cookies too, with expiry 0, as curl writes its cookie jar
+    /// (git's `http.saveCookies`).
     session: bool = false,
 };
 

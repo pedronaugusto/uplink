@@ -22,6 +22,20 @@ pub const ClientOptions = struct {
     trust: ?cloak.Trust.Snapshot = null,
     /// `none` checks neither a server's certificate nor its name.
     verify: Verify = .full,
+    /// The lowest and highest TLS versions spoken with a server: a `min`
+    /// of `.tls13` refuses one that speaks only TLS 1.2, as curl's
+    /// `CURLOPT_SSLVERSION` (git's `http.sslVersion`) does. A proxy's
+    /// own TLS keeps both versions.
+    min_version: cloak.tls.Version = .tls12,
+    max_version: cloak.tls.Version = .tls13,
+    /// The SHA-256 of each SubjectPublicKeyInfo a server's own certificate
+    /// may hold, as curl's `CURLOPT_PINNEDPUBLICKEY` (git's
+    /// `http.pinnedPubkey`); empty pins nothing. Checked beside the
+    /// authorities, so with `verify = .none` a pin is refused at the
+    /// handshake (`error.TlsFailed`, `Diagnostics.tls_error` being
+    /// `InvalidOptions`) rather than left unchecked. Borrowed for as long
+    /// as the client uses it.
+    pins: []const [32]u8 = &.{},
     /// The certificate and key a server that asks for one is answered with,
     /// which the caller keeps alive for as long as the client uses it.
     client_auth: ?cloak.ClientAuth = null,

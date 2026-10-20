@@ -82,6 +82,46 @@ test "a server that speaks only TLS 1.2 is answered in TLS 1.2" {
     try testing.expect(std.mem.find(u8, page, "TLSv1.2") != null);
 }
 
+test "a server is held to the lowest version and to a pinned key, as curl holds it for git" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const pki = try openssl.Pki.make(gpa, io);
+    defer pki.destroy();
+    const trust = try trusting(io, pki, "server.pem");
+    defer trust.deinit();
+    var old = try openssl.SServer.start(gpa, io, pki, .{ .version = "-tls1_2" });
+    defer old.stop(io);
+    var tls13_only: Client = .init(gpa, .{ .tls = .{ .trust = trust, .min_version = .tls13 } });
+    defer tls13_only.deinit(io);
+    var diagnostics: Diagnostics = .{};
+    try testing.expectError(error.TlsFailed, fetch(gpa, io, &tls13_only, old.port, &diagnostics));
+
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const pem = try pki.read(io, "server.pem");
+    defer gpa.free(pem);
+    const cert = try cloak.certificates.certificate.parse(try firstCertificate(arena_state.allocator(), pem), .{});
+    var pin: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(cert.spki, &pin, .{});
+    var server = try openssl.SServer.start(gpa, io, pki, .{ .version = "-tls1_3" });
+    defer server.stop(io);
+    var pinned: Client = .init(gpa, .{ .tls = .{ .trust = trust, .pins = &.{ @splat(0), pin } } });
+    defer pinned.deinit(io);
+    const page = try fetch(gpa, io, &pinned, server.port, null);
+    gpa.free(page);
+
+    var other: Client = .init(gpa, .{ .tls = .{ .trust = trust, .pins = &.{@splat(0)} } });
+    defer other.deinit(io);
+    try testing.expectError(error.TlsFailed, fetch(gpa, io, &other, server.port, &diagnostics));
+    try testing.expectEqual(error.VerificationRejected, diagnostics.tls_error.?);
+
+    // A pin with nothing checked is refused, not skipped.
+    var unchecked: Client = .init(gpa, .{ .tls = .{ .verify = .none, .pins = &.{pin} } });
+    defer unchecked.deinit(io);
+    try testing.expectError(error.TlsFailed, fetch(gpa, io, &unchecked, server.port, &diagnostics));
+    try testing.expectEqual(error.InvalidOptions, diagnostics.tls_error.?);
+}
+
 /// How `openssl s_server -www` says the client signed: the scheme's name
 /// from OpenSSL 3.2 on, and a type and a digest before it.
 const SignedWith = struct {

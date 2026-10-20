@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `tls.ClientOptions.min_version` and `max_version`: the TLS versions spoken with a server (a proxy's own TLS keeps both), as curl's `CURLOPT_SSLVERSION` bounds them for git's `http.sslVersion`; and `tls.ClientOptions.pins`, the SHA-256 of each SubjectPublicKeyInfo the server's certificate may hold, as curl's `CURLOPT_PINNEDPUBLICKEY` for git's `http.pinnedPubkey`, checked beside the authorities (a pin under `verify = .none` is refused at the handshake rather than left unchecked).
+
 ## [0.8.3] - 2026-10-20
 
 ### Changed

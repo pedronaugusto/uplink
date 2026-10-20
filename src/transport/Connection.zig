@@ -730,6 +730,12 @@ fn startTls(conn: *Connection, slot: usize, host: []const u8, offer: Offer) (Ope
     const io = conn.io;
     if (conn.diagnostics) |d| d.stage = if (slot == 0) .proxy_tls else .tls;
     const trust = try conn.trustFor(slot);
+    // The server's own versions and pins; a proxy's TLS keeps cloak's.
+    const target = slot != 0;
+    if (target and ctx.tls.pins.len != 0 and trust == null) {
+        if (conn.diagnostics) |d| d.tls_error = error.InvalidOptions;
+        return error.TlsFailed;
+    }
     const read_buffer = try ctx.buffers.acquire(io, .record);
     errdefer ctx.buffers.release(io, read_buffer);
     const write_buffer = try ctx.buffers.acquire(io, .record);
@@ -744,6 +750,9 @@ fn startTls(conn: *Connection, slot: usize, host: []const u8, offer: Offer) (Ope
     session.open(ctx.gpa, io, conn.readerBelow(slot), conn.writerBelow(slot), read_buffer, write_buffer, .{
         .identity = tls.reference(host),
         .trust = if (trust) |snapshot| .{ .snapshot = snapshot } else .none,
+        .pins = if (target) ctx.tls.pins else &.{},
+        .min_version = if (target) ctx.tls.min_version else .tls12,
+        .max_version = if (target) ctx.tls.max_version else .tls13,
         .auth = if (slot == 0) conn.route.proxy.?.proxy.tls.client_auth else ctx.tls.client_auth,
         .key_log = if (ctx.tls.key_log) |sink| tls.keyLog(sink) else null,
         .alpn = offer.alpn,
