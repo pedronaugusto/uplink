@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-21
+
 ### Breaking
 
 - `Client.Options.http2` has `upgrade`, and a route's protocol `h2c_upgrade`: an exhaustive switch over either names them.
