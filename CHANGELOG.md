@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.5] - 2026-10-21
+
 ### Added
 
 - Pins with `verify = .none` check the server's leaf key against them alone, no path, name or validity (cloak's `Verify.leaf_key`): curl's pinned public key with peer verification off, git's `http.pinnedPubkey` under `http.sslVerify=false`. A mismatch fails the handshake with `PinMismatch`; such pins were refused (`InvalidOptions`).
