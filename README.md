@@ -16,8 +16,9 @@ compile time. Both speak WebSocket and HTTP/2. Both run on any `std.Io` and even
 [reactor](https://github.com/pedronaugusto/reactor)'s runtime, and allocate
 nothing per request once warm. The codecs it is built from, HTTP/1.1 heads and
 chunked bodies, header fields, dates, cookies, authentication challenges,
-Server-Sent Events, form and multipart bodies and SOCKS, are public and do no
-I/O.
+AWS Signature Version 4 (a request signed, a URL presigned, for S3 and
+S3-compatible storage), Server-Sent Events, form and multipart bodies and SOCKS,
+are public and do no I/O.
 
 ## Install
 

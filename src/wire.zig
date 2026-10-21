@@ -11,6 +11,9 @@ pub const fields = @import("wire/fields.zig");
 pub const coding = @import("wire/coding.zig");
 /// Authentication challenges and their Basic and Digest answers.
 pub const auth = @import("wire/auth.zig");
+/// AWS Signature Version 4: a request signed, or a URL presigned, for S3
+/// and S3-compatible storage.
+pub const sigv4 = @import("wire/sigv4.zig");
 /// SOCKS4, 4a, 5 and 5h CONNECT negotiation.
 pub const socks = @import("wire/socks.zig");
 /// The parts of an `http` or `https` URL a request is made from, and
@@ -50,6 +53,7 @@ test {
     _ = fields;
     _ = coding;
     _ = auth;
+    _ = sigv4;
     _ = socks;
     _ = Method;
     _ = url;

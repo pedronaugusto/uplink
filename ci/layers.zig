@@ -28,6 +28,7 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "wire messages", .patterns = &.{
         "src/wire/h1.zig",
         "src/wire/auth.zig",
+        "src/wire/sigv4.zig",
     } },
     .{ .name = "wire connections", .patterns = &.{
         "src/wire/h2/Connection.zig",
