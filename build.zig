@@ -190,6 +190,9 @@ pub fn dev(b: *std.Build, tools: type) void {
         .tests = test_step,
         .portable_tests = true,
         .hardened = .{ .fuzz_step = "wire", .tsan_step = "unit" },
+        // The TLS interop tests' peer, on the riscv64 machine as on every
+        // hosted runner.
+        .vm_packages = &.{"openssl"},
         // uplink's own measurements, in bench/: `bay bench` builds
         // them in ReleaseFast and runs them, and `bay test` runs
         // each once with `--smoke`.

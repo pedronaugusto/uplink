@@ -13,15 +13,11 @@ pub const passphrase = "correct-horse";
 /// The kinds of client key: RSA, ECDSA on P-256 and P-384, Ed25519.
 pub const kinds = [_][]const u8{ "rsa", "p256", "p384", "ed25519" };
 
-/// Whether the tests must find `openssl` rather than skip: on a hosted CI
-/// runner, whose image always installs it. GitHub's runners are x86_64 and
-/// aarch64; a test built for another architecture runs on a machine emulated
-/// beside the runner (preflight's riscv64 Linux), which has no image's tools.
+/// Whether the tests must find `openssl` rather than skip: in CI, where every
+/// machine has it: the hosted runners' images install it, and the riscv64
+/// Linux machine preflight emulates beside a runner is given it by the
+/// build (`vm_packages`), the runner's environment passed in.
 fn required() bool {
-    switch (builtin.target.cpu.arch) {
-        .x86_64, .aarch64 => {},
-        else => return false,
-    }
     const value = std.testing.environ.getAlloc(std.testing.allocator, "GITHUB_ACTIONS") catch return false;
     std.testing.allocator.free(value);
     return true;
