@@ -27,6 +27,24 @@ const Stream = Session.Stream;
 /// Serve `socket` as HTTP/2 to its end. The client's preface is the next
 /// thing on it.
 pub fn serve(context: *Context, handler: Handler, socket: *Socket) void {
+    run(context, handler, socket, null);
+}
+
+/// What an HTTP/1.1 request that switched the connection brings: the
+/// request, as HTTP/2 fields, and the client's settings from its
+/// `HTTP2-Settings`.
+const Upgrade = struct { fields: []const hpack.Field, client_settings: []const u8 };
+
+/// Serve `socket` as HTTP/2 to its end after a 101 to an HTTP/1.1
+/// request's `Upgrade: h2c` (RFC 7540 §3.2): the request, as `fields`, is
+/// stream 1, already ended on the client's side, and `client_settings` the
+/// settings its `HTTP2-Settings` carried. The client's preface is the next
+/// thing on the socket.
+pub fn serveUpgraded(context: *Context, handler: Handler, socket: *Socket, fields: []const hpack.Field, client_settings: []const u8) void {
+    run(context, handler, socket, .{ .fields = fields, .client_settings = client_settings });
+}
+
+fn run(context: *Context, handler: Handler, socket: *Socket, upgrade: ?Upgrade) void {
     const io = socket.io;
     // A frame and its head must fit the read buffer.
     if (socket.input.interface.buffer.len < h2.head_len + 16384 and !socket.secure) {
@@ -41,7 +59,13 @@ pub fn serve(context: *Context, handler: Handler, socket: *Socket) void {
     defer session.deinit();
     defer tasks.cancel(io);
     if (concurrent) session.startSending(&tasks);
-    if (start(&session)) readFrames(&session, handler, &tasks, concurrent);
+    if (start(&session, upgrade)) {
+        // The upgraded request is answered as any stream's is.
+        if (upgrade) |u| if (upgraded(&session, u.fields)) |st| {
+            if (concurrent) tasks.concurrent(io, answer, .{ &session, handler, st }) catch answer(&session, handler, st) else answer(&session, handler, st);
+        };
+        readFrames(&session, handler, &tasks, concurrent);
+    }
     {
         var held = session.shared.acquireUncancelable(io);
         defer held.deinit(io);
@@ -54,9 +78,10 @@ pub fn serve(context: *Context, handler: Handler, socket: *Socket) void {
     tasks.await(io) catch {};
 }
 
-/// Take the client's preface and send the server's: false when the
-/// connection goes no further.
-fn start(session: *Session) bool {
+/// Take the client's preface and send the server's, after taking an
+/// upgrade's settings as the client's: false when the connection goes no
+/// further.
+fn start(session: *Session, upgrade: ?Upgrade) bool {
     const socket = session.socket;
     const io = socket.io;
     const in = socket.reader();
@@ -64,6 +89,8 @@ fn start(session: *Session) bool {
     var held = session.shared.acquireUncancelable(io);
     defer held.deinit(io);
     const shared = held.value();
+    // The settings were checked before the 101 went.
+    if (upgrade) |u| shared.conn.upgradeServer(u.client_settings) catch return false;
     if (!shared.conn.checkPreface(preface)) {
         // glint-ignore: Z026 -- the connection closes next whether or not the GOAWAY reached the peer
         shared.conn.goaway(Session.out(shared), .protocol_error) catch {};
@@ -74,6 +101,16 @@ fn start(session: *Session) bool {
     shared.conn.start(Session.out(shared)) catch return false;
     session.post(shared);
     return true;
+}
+
+/// The upgraded request's stream 1, made as a stream whose HEADERS came;
+/// null when it is refused.
+fn upgraded(session: *Session, fields: []const hpack.Field) ?*Stream {
+    var held = session.shared.acquireUncancelable(session.socket.io);
+    defer held.deinit(session.socket.io);
+    const shared = held.value();
+    defer session.post(shared);
+    return startStream(session, shared, 1, fields, true) catch null;
 }
 
 /// Whether this `Io` can run a stream's handler beside the reading task.

@@ -114,6 +114,7 @@ test "a server is held to the lowest version and to a pinned key, as curl holds 
     defer other.deinit(io);
     try testing.expectError(error.TlsFailed, fetch(gpa, io, &other, server.port, &diagnostics));
     try testing.expectEqual(error.VerificationRejected, diagnostics.tls_error.?);
+    try testing.expectEqual(error.PinMismatch, diagnostics.tls_verification.?);
 
     // With nothing else checked the leaf's key is checked against the pins
     // alone (git's `http.pinnedPubkey` under `http.sslVerify=false`).

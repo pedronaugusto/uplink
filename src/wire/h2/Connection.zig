@@ -239,6 +239,34 @@ pub fn start(c: *Connection, w: *Io.Writer) Io.Writer.Error!void {
     }
 }
 
+/// A client's connection that an HTTP/1.1 request upgraded (`Upgrade: h2c`,
+/// RFC 7540 §3.2): stream 1 is that request, ended on this side, whose
+/// response comes on it; the next stream is 3.
+pub fn upgradeClient(c: *Connection) void {
+    aegis.assert.pre(c.role == .client and c.next_stream == 1, "a client's connection upgrades before any stream");
+    c.next_stream = 3;
+    c.openUpgraded(.end_local);
+}
+
+/// A server's connection that answered an HTTP/1.1 request's upgrade:
+/// `client_settings` are the settings the request's `HTTP2-Settings`
+/// carried, taken as the client's as if a SETTINGS frame had brought them,
+/// and stream 1 is the request, ended on the client's side.
+pub fn upgradeServer(c: *Connection, client_settings: []const u8) h2.Settings.Error!void {
+    aegis.assert.pre(c.role == .server and c.last_peer_stream == 0, "a server's connection upgrades before any stream");
+    try c.remote.apply(client_settings, false);
+    c.last_peer_stream = 1;
+    c.openUpgraded(.end_remote);
+    c.stream(1).?.headers_received = true;
+}
+
+fn openUpgraded(c: *Connection, end: StreamEvent) void {
+    const s = c.freeSlot() orelse aegis.assert.never("a new connection has a free stream slot");
+    s.* = .{ .id = 1, .state = .idle, .send_window = c.remote.initial_window_size, .recv_window = c.localSettings().initial_window_size };
+    move(s, .opened);
+    move(s, end);
+}
+
 /// The server's check of the client's preface, the first bytes of the
 /// connection.
 pub fn checkPreface(c: *Connection, bytes: []const u8) bool {
@@ -682,6 +710,27 @@ pub fn release(c: *Connection, id: u31) void {
 }
 
 const testing = std.testing;
+
+test "an upgraded connection's stream 1 is the request, ended on the client's side" {
+    var cm: TestMemory = .{};
+    var client: Connection = .init(.client, .{}, .{}, cm.memory());
+    client.upgradeClient();
+    try testing.expectEqual(StreamState.half_closed_local, client.stream(1).?.state);
+    try testing.expectEqual(@as(u31, 3), try client.open());
+
+    var sm: TestMemory = .{};
+    var server: Connection = .init(.server, .{}, .{}, sm.memory());
+    // INITIAL_WINDOW_SIZE of 1000, as the request's `HTTP2-Settings` said.
+    try server.upgradeServer(&.{ 0, 4, 0, 0, 0x03, 0xe8 });
+    const one = server.stream(1).?;
+    try testing.expectEqual(StreamState.half_closed_remote, one.state);
+    try testing.expectEqual(@as(i64, 1000), one.send_window);
+    try testing.expectEqual(@as(u31, 1), server.last_peer_stream);
+
+    var bad: TestMemory = .{};
+    var refused: Connection = .init(.server, .{}, .{}, bad.memory());
+    try testing.expectError(error.FrameSizeError, refused.upgradeServer(&.{ 0, 4, 0, 0, 0 }));
+}
 
 const TestMemory = struct {
     streams: [8]Stream = @splat(.{}),

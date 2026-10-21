@@ -187,7 +187,11 @@ fn protocolFor(run: *const Run, r: Context.Route) Context.Route.Protocol {
     const choice = run.shared.options.http2;
     if (choice == .off or run.method.eql(.CONNECT) or named(run.request.headers, "upgrade") or absoluteForm(r)) return .http1;
     if (r.secure) return .negotiate;
-    return if (choice == .prior_knowledge) .h2_prior_knowledge else .http1;
+    return switch (choice) {
+        .prior_knowledge => .h2_prior_knowledge,
+        .upgrade => .h2c_upgrade,
+        .off, .negotiate => .http1,
+    };
 }
 
 /// Whether requests to the current URL go to an HTTP proxy whole, as
@@ -303,9 +307,9 @@ fn attempt(run: *Run, io: Io) Error!Response {
         run.sent = false;
         run.progress = false;
         run.releaseEntry(io);
-        const lease = try run.acquire(io, r);
+        var lease = try run.acquire(io, r);
         const result = switch (lease.kind) {
-            .h1 => |conn| run.exchange(io, conn, r),
+            .h1 => run.exchange(io, &lease, r),
             .h2 => |h| run.exchangeH2(io, h),
         };
         const response = result catch |failure| {
@@ -339,7 +343,8 @@ fn attempt(run: *Run, io: Io) Error!Response {
 const max_refusals = 3;
 
 /// Write the request on `conn` and read its response's head.
-fn exchange(run: *Run, io: Io, conn: *Connection, r: Context.Route) Error!Response {
+fn exchange(run: *Run, io: Io, lease: *Lease, r: Context.Route) H2Error!Response {
+    const conn = lease.kind.h1;
     const framing: h1.Framing = switch (run.body) {
         .none => if (run.method.eql(.POST) or run.method.eql(.PUT) or run.method.eql(.PATCH)) .{ .length = 0 } else .none,
         .bytes => |b| .{ .length = b.len },
@@ -351,7 +356,8 @@ fn exchange(run: *Run, io: Io, conn: *Connection, r: Context.Route) Error!Respon
         .chunked => true,
         .none, .until_close => false,
     };
-    const expect = run.request.expect_continue and has_body;
+    // curl asks no `100-continue` of a request that asks to upgrade.
+    const expect = run.request.expect_continue and has_body and r.protocol != .h2c_upgrade;
     try run.prepareAttempt(io);
     if (run.diagnostics()) |d| d.stage = .write;
     run.sent = true;
@@ -366,7 +372,39 @@ fn exchange(run: *Run, io: Io, conn: *Connection, r: Context.Route) Error!Respon
         .reader => |rd| try run.writeReader(io, conn, rd.reader, rd.length),
     }
     conn.flush() catch return conn.writeError();
-    return run.receive(io, conn, false);
+    var response = try run.receive(io, conn, false);
+    if (!switches(r, &response)) return response;
+    return run.switchToH2(io, &response, lease);
+}
+
+/// Whether `response` is the 101 that switches a request's connection to
+/// HTTP/2: the request asked (`h2c_upgrade`), and the server named `h2c`.
+pub fn switches(r: Context.Route, response: *const Response) bool {
+    if (r.protocol != .h2c_upgrade or response.status != .switching_protocols) return false;
+    const upgrade = response.headers.get("upgrade") orelse return false;
+    return std.ascii.eqlIgnoreCase(std.mem.trim(u8, upgrade, " \t"), "h2c");
+}
+
+/// After the 101 to the request's `Upgrade: h2c`: the connection goes on in
+/// HTTP/2, shared, and the request's response comes on stream 1. `lease`
+/// follows the connection: a share of the HTTP/2 one once it is made, the
+/// HTTP/1.1 one still while it is not.
+pub fn switchToH2(run: *Run, io: Io, switched: *Response, lease: *Lease) H2Error!Response {
+    const c = run.shared;
+    // unreachable: `switches` took a 101 whose body nobody read
+    const conn = (switched.upgrade(io) catch unreachable).conn;
+    switched.deinit(io);
+    const up = H2.upgraded(&c.context, io, conn, run.method.eql(.HEAD)) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.ConnectionFailed => conn.writeError(),
+    };
+    up.h2.users.store(1, .monotonic);
+    c.pool.share(io, up.h2) catch {
+        up.h2.abandon();
+        return error.OutOfMemory;
+    };
+    lease.kind = .{ .h2 = up.h2 };
+    return run.receiveH2(io, up.h2, up.stream);
 }
 
 /// Errors from an exchange over HTTP/2: `Refused` when the server took
@@ -608,6 +646,11 @@ pub fn writeHead(run: *Run, io: Io, conn: *Connection, r: Context.Route, framing
     try w.writeAll(" HTTP/1.1\r\nHost: ");
     try url.writeAuthority(w, false);
     try w.writeAll("\r\n");
+    if (r.protocol == .h2c_upgrade) {
+        // curl's `Curl_http2_request_upgrade`, its fields as it writes them.
+        var b64: [H2.upgrade_settings_len]u8 = undefined;
+        try w.print("Connection: Upgrade, HTTP2-Settings\r\nUpgrade: h2c\r\nHTTP2-Settings: {s}\r\n", .{H2.upgradeSettings(&b64)});
+    }
     try run.writeFields(io, w, r, conn.absolute_form, framing, expect);
     try w.writeAll("\r\n");
 }

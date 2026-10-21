@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- `Client.Options.http2` has `upgrade`, and a route's protocol `h2c_upgrade`: an exhaustive switch over either names them.
+
+### Added
+
+- HTTP/2 over plain TCP by upgrade (RFC 7540 §3.2), both ways. A client with `http2 = .upgrade` sends each HTTP/1.1 request with `Connection: Upgrade, HTTP2-Settings`, `Upgrade: h2c` and its settings in `HTTP2-Settings`, as curl's `CURL_HTTP_VERSION_2_0` does (git's `http.version=HTTP/2` over `http://`), asks no `100-continue` of it, and on a 101 naming `h2c` goes on in HTTP/2, the request's response on stream 1 and later requests sharing the connection; a server that does not switch is asked again on every request. A server with `h2c = .alongside_http1` answers such a request in HTTP/2 after a 101 when it has no body, as Apache's and nghttpx's do, and in HTTP/1.1 when it has one. Held to curl's `--http2` against the server.
+- `Diagnostics.tls_verification`: why the verifier refused the server's chain, as cloak names the reason (`PinMismatch` for a chain whose key no pin names, `Expired`, `Revoked`), beside `tls_error`'s `VerificationRejected`.
+- `CookieJar.load` reads a cookie file's `Set-Cookie:` lines as curl 8.5 reads them (`cookie_load`): a `Domain` makes the cookie that domain's and its hosts', one with none has no domain and goes only where curl's table keeps such cookies (an address, or a name whose last two labels share its slot), one with no `Path` goes to every path, `Secure` is kept; `save` leaves out one with no domain, as curl does.
+
+### Changed
+
+- The loopback host (`localhost`, `127.0.0.1`, `::1`) is a secure context for cookies over plain HTTP, as curl and RFC 6265bis treat it: a `Secure` cookie is set by it and sent to it.
+
 ## [0.8.7] - 2026-10-21
 
 ### Added

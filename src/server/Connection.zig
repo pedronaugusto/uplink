@@ -8,6 +8,7 @@ const aegis = @import("aegis");
 const Io = std.Io;
 const wire = @import("uplink.wire");
 const h1 = wire.h1;
+const hpack = wire.hpack;
 const coding = wire.coding;
 const span = @import("../span.zig");
 const BufferPool = @import("../transport/BufferPool.zig");
@@ -154,6 +155,14 @@ fn serveOne(c: *Connection) bool {
         .length => |n| if (aegis.units.Bytes(u64).fromRaw(n).compare(max) == .gt) return c.refuse(.payload_too_large, "body too large"),
         else => {},
     };
+    // A request with no body that asks to switch to HTTP/2 over plain TCP
+    // has it, as Apache's and nghttpx's do; one with a body is answered in
+    // HTTP/1.1.
+    if (!c.socket.secure and options.h2c == .alongside_http1 and rh.version == .http1_1 and framing == .none) {
+        var settings_buf: [max_upgrade_settings]u8 = undefined;
+        // unreachable: an HTTP/1.1 request without a Host was refused above
+        if (upgradeSettings(&rh.headers, &settings_buf)) |settings| return c.switchToH2(rh.method.name, rh.target, host_field orelse unreachable, &rh.headers, settings);
+    }
 
     var request: Request = .{
         .method = rh.method,
@@ -236,6 +245,75 @@ fn finishBody(c: *Connection, request: *Request) bool {
         left -= n;
     }
     return request.body.complete();
+}
+
+/// The most bytes of settings an upgrade's `HTTP2-Settings` may carry:
+/// every setting there is, twice over.
+const max_upgrade_settings = 16 * 6;
+
+/// The settings an HTTP/1.1 request that asks to switch to HTTP/2 carries
+/// (RFC 7540 §3.2): `Upgrade` names `h2c`, `Connection` names `Upgrade` and
+/// `HTTP2-Settings`, and one `HTTP2-Settings` holds, base64url-encoded, a
+/// SETTINGS payload this end takes. Null for any other request, which is
+/// answered in HTTP/1.1.
+fn upgradeSettings(headers: *const wire.fields.Headers, buf: *[max_upgrade_settings]u8) ?[]const u8 {
+    if (!headers.hasToken("upgrade", "h2c")) return null;
+    if (!headers.hasToken("connection", "upgrade") or !headers.hasToken("connection", "http2-settings")) return null;
+    if (countFields(headers, "http2-settings") != 1) return null;
+    // unreachable: counted once just above
+    const text = std.mem.trimEnd(u8, std.mem.trim(u8, headers.get("http2-settings") orelse unreachable, " \t"), "=");
+    const decoder = std.base64.url_safe_no_pad.Decoder;
+    const n = decoder.calcSizeForSlice(text) catch return null;
+    if (n > buf.len) return null;
+    decoder.decode(buf[0..n], text) catch return null;
+    var probe: wire.h2.Settings = .{};
+    probe.apply(buf[0..n], false) catch return null;
+    return buf[0..n];
+}
+
+/// Answer a request's upgrade with a 101, then serve the connection in
+/// HTTP/2 to its end, the request on stream 1 as HTTP/2 fields: the
+/// pseudo-fields, then its own less a connection's (RFC 9113 §8.2.2),
+/// named in lower case. Always false: nothing more goes in HTTP/1.1.
+fn switchToH2(c: *Connection, method: []const u8, target: []const u8, host: []const u8, headers: *const wire.fields.Headers, client_settings: []const u8) bool {
+    const s = c.socket.context;
+    var names_len: usize = 0;
+    var it = headers.iterator();
+    while (it.next()) |f| names_len += f.name.len;
+    const list = s.gpa.alloc(hpack.Field, 4 + headers.count()) catch return c.refuse(.service_unavailable, "out of memory");
+    defer s.gpa.free(list);
+    const names = s.gpa.alloc(u8, names_len) catch return c.refuse(.service_unavailable, "out of memory");
+    defer s.gpa.free(names);
+    list[0..4].* = .{
+        .{ .name = ":method", .value = method },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":authority", .value = host },
+        .{ .name = ":path", .value = target },
+    };
+    var n: usize = 4;
+    var at: usize = 0;
+    it = headers.iterator();
+    while (it.next()) |f| {
+        if (connectionSpecific(f.name)) continue;
+        const name = std.ascii.lowerString(names[at..][0..f.name.len], f.name);
+        at += f.name.len;
+        list[n] = .{ .name = name, .value = f.value };
+        n += 1;
+    }
+    const w = c.socket.writer();
+    w.writeAll("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n\r\n") catch return false;
+    c.socket.flush() catch return false;
+    h2_serve.serveUpgraded(s, c.handler, &c.socket, list[0..n], client_settings);
+    return false;
+}
+
+/// A field of the connection, not the request, which HTTP/2 does not carry:
+/// `Host` goes as `:authority`.
+fn connectionSpecific(name: []const u8) bool {
+    inline for (.{ "connection", "upgrade", "http2-settings", "host", "keep-alive", "proxy-connection", "transfer-encoding", "te" }) |n| {
+        if (std.ascii.eqlIgnoreCase(name, n)) return true;
+    }
+    return false;
 }
 
 /// How many fields named `name` the head has.

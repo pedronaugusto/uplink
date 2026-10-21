@@ -5,6 +5,8 @@
 pub const Session = @import("h2/Session.zig");
 /// Serve a connection as HTTP/2.
 pub const serve = @import("h2/serve.zig").serve;
+/// Serve a connection as HTTP/2 after a request's `Upgrade: h2c`.
+pub const serveUpgraded = @import("h2/serve.zig").serveUpgraded;
 
 test {
     _ = Session;

@@ -71,6 +71,26 @@ const idle_wait: Io.Duration = .fromSeconds(3600);
 /// The receive window each stream gets: what its buffer may hold.
 pub const stream_window: h2.Connection.Limits.Bytes = .literal("1MiB");
 
+/// The settings a client sends.
+const settings: h2.Settings = .{
+    .enable_push = false,
+    .initial_window_size = stream_window.raw(),
+    .max_header_list_size = Layout.field_bytes,
+};
+
+/// The value of `HTTP2-Settings` on a request that asks to upgrade: the
+/// settings the connection then sends, base64url-encoded without padding
+/// (RFC 7540 §3.2.1).
+pub fn upgradeSettings(out: *[upgrade_settings_len]u8) []const u8 {
+    var buf: [64]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+    settings.write(&w) catch unreachable; // unreachable: the settings are under 64 bytes
+    return std.base64.url_safe_no_pad.Encoder.encode(out, w.buffered());
+}
+
+/// The longest `upgradeSettings`.
+pub const upgrade_settings_len = std.base64.url_safe_no_pad.Encoder.calcSize(64);
+
 const Layout = struct {
     const streams = 128;
     const block = 64 << 10;
@@ -87,6 +107,42 @@ fn partSize(comptime T: type, n: usize) usize {
 /// Speak HTTP/2 on `conn`, whose TLS agreed `h2` by ALPN or which goes by
 /// prior knowledge: the preface and settings go out now.
 pub fn create(ctx: *Context, io: Io, conn: *Connection) (Allocator.Error || error{ConnectionFailed})!*H2 {
+    const h = try allocate(ctx, conn);
+    errdefer h.abandon();
+    try h.begin(io);
+    return h;
+}
+
+/// What `upgraded` gives: the connection, and the stream the upgraded
+/// request's response comes on.
+pub const Upgraded = struct { h2: *H2, stream: *Stream };
+
+/// Speak HTTP/2 on `conn`, whose server answered its HTTP/1.1 request's
+/// `Upgrade: h2c` with a 101 (RFC 7540 §3.2): the preface and settings go
+/// out now, and that request, sent whole, is stream 1, whose response
+/// comes on it; `head` for a `HEAD`.
+pub fn upgraded(ctx: *Context, io: Io, conn: *Connection, head: bool) (Allocator.Error || error{ConnectionFailed})!Upgraded {
+    const h = try allocate(ctx, conn);
+    errdefer h.abandon();
+    const st = try ctx.gpa.create(Stream);
+    st.* = .{ .h2 = h, .id = 1, .sent_end = true, .expects_body = !head, .interface = .{ .vtable = &.{ .stream = Stream.streamRead }, .buffer = &.{}, .seek = 0, .end = 0 } };
+    {
+        var held = h.shared.acquireUncancelable(io);
+        defer held.deinit(io);
+        const shared = held.value();
+        shared.proto.upgradeClient();
+        // From here `abandon` destroys it with the others.
+        shared.streams.append(ctx.gpa, st) catch |err| {
+            ctx.gpa.destroy(st);
+            return err;
+        };
+    }
+    try h.begin(io);
+    return .{ .h2 = h, .stream = st };
+}
+
+/// The connection's memory and state, nothing sent yet.
+fn allocate(ctx: *Context, conn: *Connection) Allocator.Error!*H2 {
     const sizes = [_]usize{
         partSize(h2.Connection.Stream, Layout.streams),
         partSize(u8, Layout.block),
@@ -130,11 +186,7 @@ pub fn create(ctx: *Context, io: Io, conn: *Connection) (Allocator.Error || erro
         .ctx = ctx,
         .memory = memory,
         .shared = .init(.{
-            .proto = .init(.client, .{
-                .enable_push = false,
-                .initial_window_size = stream_window.raw(),
-                .max_header_list_size = Layout.field_bytes,
-            }, .{
+            .proto = .init(.client, settings, .{
                 .max_concurrent_streams = Layout.streams,
                 .max_header_block = .fromRaw(Layout.block),
                 .max_header_list = .fromRaw(Layout.field_bytes),
@@ -143,16 +195,31 @@ pub fn create(ctx: *Context, io: Io, conn: *Connection) (Allocator.Error || erro
             .scratch = scratch,
         }),
     };
-    conn.io = io;
+    return h;
+}
+
+/// Send the preface and settings, sharing the connection from here on.
+fn begin(h: *H2, io: Io) error{ConnectionFailed}!void {
+    h.conn.io = io;
     // The connection is shared: no exchange's deadline bounds its socket,
     // and its `Io` stays this one.
-    conn.share();
+    h.conn.share();
     var held = h.shared.acquireUncancelable(io);
     defer held.deinit(io);
     const shared = held.value();
     shared.proto.start(shared.outbox.writer()) catch return error.ConnectionFailed;
-    if (!shared.outbox.sendAlone(ConnSink{ .conn = conn })) return error.ConnectionFailed;
-    return h;
+    if (!shared.outbox.sendAlone(ConnSink{ .conn = h.conn })) return error.ConnectionFailed;
+}
+
+/// Free what `allocate` took, the connection left to the caller: for one
+/// that failed to start, or that `upgraded` made and nothing shared.
+pub fn abandon(h: *H2) void {
+    const shared = h.shared.teardown();
+    for (shared.streams.items) |st| h.ctx.gpa.destroy(st);
+    shared.streams.deinit(h.ctx.gpa);
+    shared.outbox.deinit();
+    h.ctx.gpa.free(@as([]align(64) u8, @alignCast(h.memory))); // safe: `allocate` allocated it 64-aligned
+    h.ctx.gpa.destroy(h);
 }
 
 /// Close the connection, telling the peer when it can still hear, and free

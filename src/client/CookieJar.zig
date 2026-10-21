@@ -159,7 +159,8 @@ fn storeAt(jar: *CookieJar, io: Io, url: url_mod.Url, set_cookie: []const u8, no
         }
     }
     const path = sc.path orelse cookie.defaultPath(cookie.pathOf(url.target));
-    if (sc.secure and !url.secure) return;
+    const secure = secureContext(url, host);
+    if (sc.secure and !secure) return;
     if (!prefixKept(sc, host_only, path)) return;
     var expires: ?i64 = sc.expires;
     if (sc.max_age) |age| expires = expiry(now, age);
@@ -167,7 +168,7 @@ fn storeAt(jar: *CookieJar, io: Io, url: url_mod.Url, set_cookie: []const u8, no
     var held = jar.state.acquireUncancelable(io);
     defer held.deinit(io);
     const s = held.value();
-    if (!sc.secure and !url.secure and shadowsSecure(s, host, sc.name, path)) return;
+    if (!sc.secure and !secure and shadowsSecure(s, host, sc.name, path)) return;
     const gop = try s.domains.getOrPut(jar.gpa, domain);
     if (!gop.found_existing) {
         gop.key_ptr.* = jar.gpa.dupe(u8, domain) catch |err| {
@@ -198,6 +199,13 @@ fn storeAt(jar: *CookieJar, io: Io, url: url_mod.Url, set_cookie: []const u8, no
     if (seq == s.next_seq) s.next_seq += 1;
     _ = jar.total.fetchAdd(1, .monotonic);
     jar.enforceLimits(s, list, now);
+}
+
+/// Whether a request to `url`, whose lower-cased host is `host`, may set and
+/// be sent `Secure` cookies: over TLS, or to the loopback host by name or
+/// address, as curl and RFC 6265bis treat it.
+fn secureContext(url: url_mod.Url, host: []const u8) bool {
+    return url.secure or std.mem.eql(u8, host, "localhost") or std.mem.eql(u8, host, "127.0.0.1") or std.mem.eql(u8, host, "::1");
 }
 
 /// The rules of the `__Secure-` and `__Host-` name prefixes.
@@ -310,6 +318,7 @@ pub fn writeField(jar: *CookieJar, io: Io, w: *Io.Writer, url: url_mod.Url) Io.W
     if (url.host.len > host_buf.len) return false;
     const host = std.ascii.lowerString(&host_buf, url.host);
     const path = cookie.pathOf(url.target);
+    const secure = secureContext(url, host);
     const now = nowOf(io);
     var held = jar.state.acquireUncancelable(io);
     defer held.deinit(io);
@@ -323,7 +332,7 @@ pub fn writeField(jar: *CookieJar, io: Io, w: *Io.Writer, url: url_mod.Url) Io.W
             jar.purgeExpired(list, now);
             for (list.items) |c| {
                 if (c.host_only and domain.len != host.len) continue;
-                if (c.secure and !url.secure) continue;
+                if (c.secure and !secure) continue;
                 if (!cookie.pathMatch(path, c.path)) continue;
                 s.scratch.appendAssumeCapacity(c);
             }
@@ -332,6 +341,14 @@ pub fn writeField(jar: *CookieJar, io: Io, w: *Io.Writer, url: url_mod.Url) Io.W
         const dot = std.mem.findScalar(u8, domain, '.') orelse break;
         domain = domain[dot + 1 ..];
     }
+    if (sharesNoDomain(host)) if (s.domains.getPtr(no_domain)) |list| {
+        jar.purgeExpired(list, now);
+        for (list.items) |c| {
+            if (c.secure and !secure) continue;
+            if (!cookie.pathMatch(path, c.path)) continue;
+            s.scratch.appendAssumeCapacity(c);
+        }
+    };
     if (s.scratch.items.len == 0) return false;
     std.sort.insertion(*Cookie, s.scratch.items, {}, sendFirst);
     try w.writeAll("Cookie: ");
@@ -345,6 +362,29 @@ pub fn writeField(jar: *CookieJar, io: Io, w: *Io.Writer, url: url_mod.Url) Io.W
     }
     try w.writeAll("\r\n");
     return true;
+}
+
+/// The domain of a cookie that has none: one read from a `Set-Cookie:` line
+/// with no `Domain`. `save` leaves such a cookie out, as curl does.
+const no_domain = "";
+
+/// Whether curl's cookie table keeps `host`'s cookies in the slot where it
+/// keeps those with no domain (`cookiehash`, its first of 63): an address,
+/// or a name whose last two labels hash there. curl sends a cookie with no
+/// domain only to such hosts (`Curl_cookie_getlist`).
+fn sharesNoDomain(host: []const u8) bool {
+    if (Io.net.IpAddress.parseLiteral(host)) |_| return true else |_| {}
+    var top = host;
+    if (std.mem.findScalarLast(u8, host, '.')) |last| {
+        if (std.mem.findScalarLast(u8, host[0..last], '.')) |first| top = host[first + 1 ..];
+    }
+    // curl's `cookie_hash_domain`, in its `size_t`.
+    var h: usize = 5381;
+    for (top) |c| {
+        h +%= h << 5;
+        h ^= std.ascii.toUpper(c);
+    }
+    return h % 63 == 0;
 }
 
 fn sendFirst(_: void, a: *Cookie, b: *Cookie) bool {
@@ -396,8 +436,10 @@ pub const LoadError = error{
 /// `domain`, `TRUE` when hosts under it get it, `path`, `TRUE` for secure,
 /// expiry in seconds (0 for a session cookie), name and value, separated by
 /// tabs; `#HttpOnly_` before an HTTP-only cookie's domain; other `#` lines
-/// are comments. Lines that are not cookies, and expired cookies, are
-/// skipped. A cookie read replaces one of the same name, domain and path.
+/// are comments. A line that starts `Set-Cookie:` is a response's header
+/// as curl reads one there (`cookie_load`): see `loadHeader`. Lines that are
+/// not cookies, and expired cookies, are skipped. A cookie read replaces one
+/// of the same name, domain and path.
 pub fn load(jar: *CookieJar, io: Io, r: *Io.Reader) LoadError!void {
     const now = nowOf(io);
     while (true) {
@@ -412,6 +454,7 @@ pub fn load(jar: *CookieJar, io: Io, r: *Io.Reader) LoadError!void {
 }
 
 fn loadLine(jar: *CookieJar, io: Io, line: []const u8, now: i64) Allocator.Error!void {
+    if (std.ascii.startsWithIgnoreCase(line, "Set-Cookie:")) return jar.loadHeader(io, std.mem.trimStart(u8, line["Set-Cookie:".len..], " \t"), now);
     var text = line;
     var http_only = false;
     if (std.mem.startsWith(u8, text, "#HttpOnly_")) {
@@ -445,6 +488,35 @@ fn loadLine(jar: *CookieJar, io: Io, line: []const u8, now: i64) Allocator.Error
         .secure = std.ascii.eqlIgnoreCase(parts[3], "TRUE"),
         .http_only = http_only,
     };
+    return jar.put(io, sc, domain, path, expires, !std.ascii.eqlIgnoreCase(parts[1], "TRUE"), now);
+}
+
+/// A `Set-Cookie:` line of a cookie file, as curl takes one with no host
+/// to judge it by (`Curl_cookie_add` with no domain or path): its `Domain`
+/// makes it a cookie of that domain and the hosts under it; with none it has
+/// no domain (`no_domain`), and is sent where curl's table keeps cookies
+/// with no domain (`sharesNoDomain`); with no `Path` it goes to every path.
+/// `Secure` is kept, as curl keeps it from a file.
+fn loadHeader(jar: *CookieJar, io: Io, text: []const u8, now: i64) Allocator.Error!void {
+    const sc = cookie.parse(text) orelse return;
+    var domain_buf: [Io.net.HostName.max_len]u8 = undefined;
+    var domain: []const u8 = no_domain;
+    if (sc.domain) |d| {
+        if (d.len > domain_buf.len) return;
+        domain = std.ascii.lowerString(&domain_buf, d);
+    }
+    // curl's `__Host-` asks for a path written as `/`, which a cookie with
+    // none has not.
+    if (!prefixKept(sc, sc.domain == null, sc.path orelse "")) return;
+    var expires: ?i64 = sc.expires;
+    if (sc.max_age) |age| expires = expiry(now, age);
+    if (expires) |e| if (e <= now) return;
+    return jar.put(io, sc, domain, sc.path orelse "/", expires, sc.domain == null, now);
+}
+
+/// Keep a cookie read from a file, in place of one of the same name,
+/// domain, host-only flag and path.
+fn put(jar: *CookieJar, io: Io, sc: cookie.SetCookie, domain: []const u8, path: []const u8, expires: ?i64, host_only: bool, now: i64) Allocator.Error!void {
     var held = jar.state.acquireUncancelable(io);
     defer held.deinit(io);
     const s = held.value();
@@ -456,10 +528,9 @@ fn loadLine(jar: *CookieJar, io: Io, line: []const u8, now: i64) Allocator.Error
         };
         gop.value_ptr.* = .empty;
     }
-    const host_only = !std.ascii.eqlIgnoreCase(parts[1], "TRUE");
     const list = gop.value_ptr;
     for (list.items, 0..) |old, i| {
-        if (old.host_only != host_only or !std.mem.eql(u8, old.name, name) or !std.mem.eql(u8, old.path, path)) continue;
+        if (old.host_only != host_only or !std.mem.eql(u8, old.name, sc.name) or !std.mem.eql(u8, old.path, path)) continue;
         _ = list.orderedRemove(i);
         jar.freeCookie(old);
         _ = jar.total.fetchSub(1, .monotonic);
@@ -491,7 +562,8 @@ pub fn save(jar: *CookieJar, io: Io, w: *Io.Writer, options: SaveOptions) Io.Wri
     s.scratch.clearRetainingCapacity();
     var it = s.domains.valueIterator();
     while (it.next()) |list| for (list.items) |c| {
-        if (c.expired(now) or (c.expires == null and !options.session)) continue;
+        // One with no domain is left out, as curl leaves it out.
+        if (c.expired(now) or (c.expires == null and !options.session) or c.domain.len == 0) continue;
         s.scratch.appendAssumeCapacity(c);
     };
     std.sort.insertion(*Cookie, s.scratch.items, {}, older);
@@ -638,6 +710,46 @@ test "the Netscape file is read and written in its tab-separated form" {
     try testing.expectEqual(@as(u32, 2), jar.count());
     jar.clear(io);
     try testing.expectEqual(@as(u32, 0), jar.count());
+}
+
+test "a cookie file's Set-Cookie lines are read as curl 8.5 reads them" {
+    var clock: shakedown.Clock = .init(test_io.io(), .{});
+    const io = clock.io();
+    var jar: CookieJar = .init(testing.allocator, .{});
+    defer jar.deinit(io);
+    const file =
+        "Set-Cookie: plain=1\n" ++
+        "set-cookie:\twide=2; Domain=.example.com; Path=/docs\n" ++
+        "Set-Cookie: safe=3; Secure; HttpOnly\n" ++
+        // `__Host-` wants a path written as `/`; an expired one is skipped.
+        "Set-Cookie: __Host-h=4; Secure\n" ++
+        "Set-Cookie: gone=5; Max-Age=0\n";
+    var in: Io.Reader = .fixed(file);
+    try jar.load(io, &in);
+    try testing.expectEqual(@as(u32, 3), jar.count());
+    // A cookie with no domain goes where curl's table keeps such cookies:
+    // to an address, and to a name that hashes beside them (`ak.test`), not
+    // to others. The loopback host is a secure context, as curl has it.
+    try testing.expectEqualStrings("Cookie: plain=1; safe=3\r\n", try field(&jar, io, "http://127.0.0.1/x"));
+    try testing.expectEqualStrings("Cookie: plain=1\r\n", try field(&jar, io, "http://ak.test/x"));
+    try testing.expectEqualStrings("", try field(&jar, io, "http://example.org/x"));
+    try testing.expectEqualStrings("Cookie: wide=2\r\n", try field(&jar, io, "http://www.example.com/docs/x"));
+    // Saved as curl saves them: one with no domain is left out.
+    var buf: [256]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+    try jar.save(io, &w, .{ .session = true });
+    try testing.expectEqualStrings("# Netscape HTTP Cookie File\n\n.example.com\tTRUE\t/docs\tFALSE\t0\twide\t2\n", w.buffered());
+}
+
+test "a Secure cookie is set and sent over plain HTTP to the loopback host alone" {
+    var clock: shakedown.Clock = .init(test_io.io(), .{});
+    const io = clock.io();
+    var jar: CookieJar = .init(testing.allocator, .{});
+    defer jar.deinit(io);
+    try jar.store(io, try url_mod.parse("http://localhost:8080/"), "a=1; Secure");
+    try jar.store(io, try url_mod.parse("http://example.com/"), "b=2; Secure");
+    try testing.expectEqual(@as(u32, 1), jar.count());
+    try testing.expectEqualStrings("Cookie: a=1\r\n", try field(&jar, io, "http://LOCALHOST:8080/"));
 }
 
 test "a store that runs out of memory keeps the jar whole" {

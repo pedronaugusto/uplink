@@ -197,9 +197,16 @@ pub fn finish(o: *Outgoing, io: Io) FinishError!Response {
         .data => unreachable, // unreachable: a stream's body ends in `finishStream`
     }
     conn.flush() catch return conn.writeError();
-    const first = try o.run.receive(io, conn, false);
+    var first = try o.run.receive(io, conn, false);
     // The response holds the connection now, and the run the response.
     o.conn = null;
+    if (Run.switches(conn.route, &first)) {
+        var lease: Run.Lease = .{ .kind = .{ .h1 = conn }, .reused = false };
+        first = o.run.switchToH2(io, &first, &lease) catch |err| {
+            o.run.releaseFailed(io, lease);
+            return Run.noRefusal(err);
+        };
+    }
     return o.run.complete(io, first);
 }
 

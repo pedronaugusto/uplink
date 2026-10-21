@@ -17,6 +17,11 @@ peer: ?Io.net.IpAddress = null,
 /// certificate, as cloak names it: `PeerAlert`, `VerificationRejected`, and
 /// the like.
 tls_error: ?anyerror = null,
+/// Why the server's chain was refused, when the verifier refused it, as
+/// cloak names the reason: `PinMismatch` for a chain whose key no pin
+/// names, `Expired`, `Revoked`, and the like. `tls_error` is then
+/// `VerificationRejected`, and `tls_alert` the class the reason was sent as.
+tls_verification: ?anyerror = null,
 /// The TLS alert that ended a handshake, when one did: the server's, or the
 /// one the client sent for a failure of its own (`unknown_ca` for a chain
 /// that did not verify, `certificate_expired` for one out of its time).

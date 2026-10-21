@@ -189,6 +189,9 @@ pub const Route = struct {
         negotiate,
         /// HTTP/2 over plain TCP, by prior knowledge.
         h2_prior_knowledge,
+        /// HTTP/1.1 over plain TCP, each request asking the server to
+        /// switch to HTTP/2 (`Upgrade: h2c`).
+        h2c_upgrade,
     };
 
     /// A host name's bytes, held by value.

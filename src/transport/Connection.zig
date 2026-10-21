@@ -513,12 +513,14 @@ pub fn readError(conn: *Connection) IoError {
             if (conn.diagnostics) |d| {
                 d.tls_error = err;
                 d.tls_alert = alert;
+                d.tls_verification = seen.verification;
             }
             return error.ClientCertificateRejected;
         };
         if (conn.diagnostics) |d| {
             d.tls_error = err;
             d.tls_alert = seen.alert_received orelse seen.alert_sent;
+            d.tls_verification = seen.verification;
         }
         return error.TlsFailed;
     }
@@ -825,6 +827,7 @@ fn handshakeFailed(conn: *Connection, err: cloak.tls.Session.OpenError, report: 
     if (conn.diagnostics) |d| {
         d.tls_error = err;
         d.tls_alert = alert;
+        d.tls_verification = report.verification;
     }
     if (report.alert_received) |received| if (report.certificate_requested and tls.refusesCertificate(received)) return error.ClientCertificateRejected;
     return switch (err) {

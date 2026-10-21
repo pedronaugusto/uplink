@@ -78,6 +78,12 @@ pub const Http2 = enum {
     /// As `negotiate` over TLS, and over plain TCP without asking (RFC
     /// 9113 §3.3), to a server known to speak it.
     prior_knowledge,
+    /// As `negotiate` over TLS; over plain TCP, a request in HTTP/1.1 asks
+    /// the server to switch (`Upgrade: h2c`, RFC 7540 §3.2), and a server
+    /// that answers 101 is spoken to in HTTP/2 from then on, the request's
+    /// response on stream 1. curl's `CURL_HTTP_VERSION_2_0`, git's
+    /// `http.version=HTTP/2`.
+    upgrade,
 };
 
 /// Why a request failed.

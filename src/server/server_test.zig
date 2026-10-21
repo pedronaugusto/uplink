@@ -921,6 +921,93 @@ test "the client speaks HTTP/2 by prior knowledge, its requests over one connect
     try testing.expectEqual(@as(u64, 7), running.server.stats().requests);
 }
 
+test "a request in HTTP/1.1 asks to upgrade, and the connection goes on in HTTP/2, as curl's does" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const running = try Running.start(gpa, .{ .h2c = .alongside_http1 }, .of(h2Echo));
+    defer running.stop();
+    var client: Client = .init(gpa, .{ .http2 = .upgrade });
+    defer client.deinit(io);
+    var buf: [64]u8 = undefined;
+    // A request with a body is answered in HTTP/1.1, as Apache's and
+    // nghttpx's answer it.
+    {
+        var response = try client.send(io, .{ .url = running.url(&buf, "/post"), .method = .POST, .body = .{ .bytes = "twelve bytes" } });
+        defer response.deinit(io);
+        try testing.expectEqual(.http1_1, response.version);
+        const body = try response.collect(gpa, io, .limited(1 << 20));
+        defer gpa.free(body);
+        try testing.expectEqualStrings("http1_1 POST /post 12", body);
+    }
+    // The next, on the connection kept, switches it: its response comes on
+    // stream 1, and every request after it goes on the HTTP/2 connection.
+    for ([_][]const u8{ "/x?q=1", "/y" }, [_][]const u8{ "h2 GET /x 0", "h2 GET /y 0" }) |path, want| {
+        var response = try client.send(io, .{ .url = running.url(&buf, path) });
+        defer response.deinit(io);
+        try testing.expectEqual(std.http.Status.ok, response.status);
+        try testing.expectEqual(.h2, response.version);
+        const body = try response.collect(gpa, io, .limited(1 << 20));
+        defer gpa.free(body);
+        try testing.expectEqualStrings(want, body);
+    }
+    {
+        var response = try client.send(io, .{ .url = running.url(&buf, "/echo"), .method = .POST, .body = .{ .bytes = "over h2" } });
+        defer response.deinit(io);
+        try testing.expectEqual(.h2, response.version);
+        const body = try response.collect(gpa, io, .limited(1 << 20));
+        defer gpa.free(body);
+        try testing.expectEqualStrings("over h2", body);
+    }
+    try testing.expectEqual(@as(u64, 1), client.stats().connections_opened);
+    try testing.expectEqual(@as(u64, 4), running.server.stats().requests);
+
+    // A `HEAD` that switches a connection has no body on stream 1.
+    var other: Client = .init(gpa, .{ .http2 = .upgrade });
+    defer other.deinit(io);
+    var head = try other.send(io, .{ .url = running.url(&buf, "/head"), .method = .HEAD });
+    defer head.deinit(io);
+    try testing.expectEqual(.h2, head.version);
+    const none = try head.collect(gpa, io, .limited(1 << 20));
+    defer gpa.free(none);
+    try testing.expectEqual(0, none.len);
+}
+
+test "a server that does not switch is spoken to in HTTP/1.1, asked again on every request" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const running = try Running.start(gpa, .{}, .of(h2Echo));
+    defer running.stop();
+    var client: Client = .init(gpa, .{ .http2 = .upgrade });
+    defer client.deinit(io);
+    var buf: [64]u8 = undefined;
+    for (0..2) |_| {
+        var response = try client.send(io, .{ .url = running.url(&buf, "/x") });
+        defer response.deinit(io);
+        try testing.expectEqual(.http1_1, response.version);
+        const body = try response.collect(gpa, io, .limited(1 << 20));
+        defer gpa.free(body);
+        try testing.expectEqualStrings("http1_1 GET /x 0", body);
+    }
+    try testing.expectEqual(@as(u64, 1), client.stats().connections_opened);
+}
+
+test "curl asks the server to upgrade, and is answered in HTTP/2" {
+    const gpa = testing.allocator;
+    const version = try curl(gpa, &.{"--version"}) orelse return error.SkipZigTest;
+    defer gpa.free(version);
+    if (std.mem.find(u8, version, "HTTP2") == null) return error.SkipZigTest;
+    const running = try Running.start(gpa, .{ .h2c = .alongside_http1 }, .of(echoVersion));
+    defer running.stop();
+    var url_buf: [64]u8 = undefined;
+    const out = try curl(gpa, &.{ "--http2", "-w", "|%{http_version}", running.url(&url_buf, "/x") }) orelse return error.SkipZigTest;
+    defer gpa.free(out);
+    try testing.expectEqualStrings("h2 GET /x |2", out);
+    // curl asks with a body too; the server answers that in HTTP/1.1.
+    const posted = try curl(gpa, &.{ "--http2", "-d", "hello", "-w", "|%{http_version}", running.url(&url_buf, "/x") }) orelse return error.SkipZigTest;
+    defer gpa.free(posted);
+    try testing.expectEqualStrings("http1_1 POST /x hello|1.1", posted);
+}
+
 test "bodies past every window go both ways over HTTP/2, and trailers come after" {
     const gpa = testing.allocator;
     const io = test_io.io();
