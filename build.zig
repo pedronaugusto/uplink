@@ -80,11 +80,12 @@ pub fn dev(b: *std.Build, tools: type) void {
         .package = p,
         .filter = test_filter,
     };
-    // The suite runs twice: on `Io.Threaded`, which `std.testing.io` is, and
-    // on a reactor runtime, the evented `Io` uplink is built for. One after
-    // the other, so neither loads the machine the other's timers run on.
-    const tests = addTests(b, "uplink-tests", false, test_inputs);
-    const evented_tests = addTests(b, "uplink-tests-evented", true, test_inputs);
+    // The suite runs on `Io.Threaded`, which `std.testing.io` is, and on a
+    // reactor runtime, the evented `Io` uplink is built for, once on each
+    // kernel backend the target has, a test binary for each (a run's
+    // environment would stay in Zig's cached configuration). One after the
+    // other, so no run loads the machine another's timers run on.
+    const tests = addTests(b, "uplink-tests", null, test_inputs);
     // `uplink.wire`'s own tests, built as its root: a module's tests run only
     // from the build that has it as the root, and this build has aegis and
     // shakedown to import and nothing of the client.
@@ -103,23 +104,27 @@ pub fn dev(b: *std.Build, tools: type) void {
     const test_step = b.step("test", "Run the tests and the example");
     const tests_run = b.addRunArtifact(tests);
     const wire_run = b.addRunArtifact(wire_tests);
-    const evented_run = b.addRunArtifact(evented_tests);
-    evented_run.step.dependOn(&tests_run.step);
-    wire_run.step.dependOn(&evented_run.step);
     test_step.dependOn(&tests_run.step);
+    const check_step = b.step("check", "Compile the tests and the example without running them");
+    check_step.dependOn(&tests.step);
+    check_step.dependOn(&wire_tests.step);
+    var previous = &tests_run.step;
+    for (backends(target.result.os.tag)) |backend| {
+        const evented_tests = addTests(b, b.fmt("uplink-tests-{s}", .{backend}), backend, test_inputs);
+        check_step.dependOn(&evented_tests.step);
+        const evented_run = b.addRunArtifact(evented_tests);
+        evented_run.step.dependOn(previous);
+        test_step.dependOn(&evented_run.step);
+        previous = &evented_run.step;
+    }
+    wire_run.step.dependOn(previous);
     test_step.dependOn(&wire_run.step);
-    test_step.dependOn(&evented_run.step);
 
     // The codecs alone, and the suite on `Io.Threaded` alone: the release
     // tier fuzzes the codecs' properties and runs the threaded suite under
     // ThreadSanitizer.
     b.step("wire", "Run uplink.wire's tests alone").dependOn(&b.addRunArtifact(wire_tests).step);
     b.step("unit", "Run the suite on Io.Threaded alone").dependOn(&b.addRunArtifact(tests).step);
-
-    const check_step = b.step("check", "Compile the tests and the example without running them");
-    check_step.dependOn(&tests.step);
-    check_step.dependOn(&wire_tests.step);
-    check_step.dependOn(&evented_tests.step);
 
     //=====================================================================
     // Example: built AND run against the module a consumer gets.
@@ -278,9 +283,9 @@ const TestInputs = struct {
     filter: ?[]const u8,
 };
 
-/// The test suite, running on `std.testing.io` or, `evented`, on a reactor
-/// runtime (`src/testing/io.zig` says which it was built for).
-fn addTests(b: *std.Build, name: []const u8, evented: bool, inputs: TestInputs) *std.Build.Step.Compile {
+/// The test suite, running on `std.testing.io` or, with a `backend`, on a
+/// reactor runtime over it (`src/testing/io.zig` says which it was built for).
+fn addTests(b: *std.Build, name: []const u8, backend: ?[]const u8, inputs: TestInputs) *std.Build.Step.Compile {
     const tests = b.addTest(.{
         .name = name,
         .filters = if (inputs.filter) |filter| &.{filter} else &.{},
@@ -293,9 +298,20 @@ fn addTests(b: *std.Build, name: []const u8, evented: bool, inputs: TestInputs) 
     });
     tests.root_module.addImport("shakedown", inputs.shakedown);
     const io = b.addOptions();
-    io.addOption(bool, "evented", evented);
+    io.addOption(?[]const u8, "backend", backend);
     tests.root_module.addOptions("test_io", io);
     return tests;
+}
+
+/// The reactor backends a target's kernel has, by `Runtime.Backend`'s names:
+/// the evented suite runs once on each.
+fn backends(os: std.Target.Os.Tag) []const []const u8 {
+    return switch (os) {
+        .linux => &.{ "io_uring", "epoll" },
+        .windows => &.{"iocp"},
+        .freebsd, .openbsd, .netbsd, .dragonfly => &.{"kqueue"},
+        else => if (os.isDarwin()) &.{"kqueue"} else &.{"auto"},
+    };
 }
 
 /// `check-wire-consumer`: a project that asks for `uplink.wire` alone
