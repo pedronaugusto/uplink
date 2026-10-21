@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `Request.gone` with a timeout said the client was still there at once on an `Io` that cannot bound a read of a socket (std's `Io.Threaded` on Windows, which refuses a timed socket read as `ConcurrencyUnavailable`): a handler never learned its client left (the leaving-client test, red on every Windows leg since 2026-10-18). There it waits through reactor for the socket to have something to read, within the time, and the read then finds the client's end. The leaving-client test names its case and what the handler had when it fails.
+
 ## [0.9.0] - 2026-10-21
 
 ### Breaking

@@ -13,6 +13,7 @@ const tls = @import("../tls.zig");
 const span = @import("../span.zig");
 const Timed = @import("../net/Timed.zig");
 const sys = @import("../net/sys.zig");
+const reactor = @import("reactor");
 const Context = @import("Context.zig");
 
 const Socket = @This();
@@ -160,9 +161,23 @@ pub fn awaitEnd(c: *Socket, io: Io, timeout: Io.Timeout) Io.Cancelable!bool {
             .idle => if (expired(io, until)) return false,
         };
         var data: [1][]u8 = .{r.buffer[r.end..]};
-        const result = io.operateTimeout(.{ .net_read = .{ .socket_handle = c.stream.socket.handle, .data = &data } }, until) catch |err| return switch (err) {
-            error.Timeout, error.ConcurrencyUnavailable => false,
-            error.Canceled => error.Canceled,
+        const read: Io.Operation = .{ .net_read = .{ .socket_handle = c.stream.socket.handle, .data = &data } };
+        const result = io.operateTimeout(read, until) catch |err| switch (err) {
+            error.Timeout => return false,
+            error.Canceled => return error.Canceled,
+            // This `Io` cannot bound a read of a socket (std's `Io.Threaded`
+            // on Windows): reactor waits, within the time, for the socket to
+            // have something to read (its end or a reset among them), and the
+            // read then finds it.
+            error.ConcurrencyUnavailable => blk: {
+                reactor.wait(io, .{ .readable = c.stream.socket.handle }, until) catch |waited| switch (waited) {
+                    error.Timeout => return false,
+                    error.Canceled => return error.Canceled,
+                    // A socket the system cannot watch has failed.
+                    error.Unsupported, error.Unexpected => return true,
+                };
+                break :blk try io.operate(read);
+            },
         };
         const n = (result.net_read catch return true).data_len;
         if (n == 0) return true;

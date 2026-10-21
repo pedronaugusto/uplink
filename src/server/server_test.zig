@@ -1493,15 +1493,22 @@ const Leaving = struct {
     /// 0 while it waits, 1 when the client left, 2 when the wait ended
     /// otherwise.
     var seen: std.atomic.Value(u8) = .init(0);
+    /// How the wait ended when it was not the client leaving: what a red
+    /// on a host this road cannot run says.
+    var ended: ?anyerror = null;
+    /// The case under way.
+    var scheme: []const u8 = "";
 
     fn reset() void {
         started.store(false, .release);
         seen.store(0, .release);
+        ended = null;
     }
 
     fn handle(io: Io, request: *Request, response: *Response) anyerror!void {
         started.store(true, .release);
         const left = request.gone(io, .{ .duration = .{ .raw = .fromSeconds(20), .clock = .awake } }) catch |err| {
+            ended = err;
             seen.store(2, .release);
             return err;
         };
@@ -1513,6 +1520,11 @@ const Leaving = struct {
         const io = test_io.io();
         var waited: u32 = 0;
         while (flag.load(.acquire) != want and waited < 1000) : (waited += 1) try io.sleep(.fromMilliseconds(10), .awake);
+        if (flag.load(.acquire) != want) std.log.err("{s}: after {d} ms the handler had {s}", .{ scheme, waited * 10, switch (seen.load(.acquire)) {
+            0 => if (started.load(.acquire)) "not learned the client left" else "not started",
+            1 => "learned the client left",
+            else => if (ended) |err| @errorName(err) else "found the client still there",
+        } });
         try testing.expectEqual(want, flag.load(.acquire));
     }
 };
@@ -1534,6 +1546,7 @@ test "a handler learns its client left while it computes: a canceled request, ov
     };
     for (cases) |case| {
         Leaving.reset();
+        Leaving.scheme = case.scheme;
         const running = try Running.start(gpa, case.options, .of(Leaving.handle));
         defer running.stop();
         var client: Client = .init(gpa, case.client);
