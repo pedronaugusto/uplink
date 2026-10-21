@@ -300,7 +300,7 @@ pub const Proxies = struct {
             @atomicStore(@TypeOf(slot.state), &slot.state, .none, .release);
             return;
         };
-        const proxy = parseKept(p.gpa, a, &slot.credential, value, e.rules) catch |err| switch (err) {
+        const proxy = Proxy.parseKept(p.gpa, a, &slot.credential, value, e.rules) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidProxy => {
                 @atomicStore(@TypeOf(slot.state), &slot.state, .invalid, .release);
@@ -309,32 +309,6 @@ pub const Proxies = struct {
         };
         slot.slot = .{ .proxy = proxy };
         @atomicStore(@TypeOf(slot.state), &slot.state, .some, .release);
-    }
-
-    /// `Proxy.parse` of `value`, its host in `arena` and its user and
-    /// password in `credential`: parsed in scratch that is wiped, so the
-    /// password is in no arena, whose memory is freed unwiped.
-    fn parseKept(gpa: Allocator, arena: Allocator, credential: *?aegis.SecretBytes, value: []const u8, rules: Proxy.Rules) Error!Proxy {
-        // The URL copied, the host, and the user and password unescaped: no
-        // more than four times `value`, and a prefix of `http://`.
-        const room = value.len * 4 + 64;
-        var scratch: aegis.SecretBytes = try .init(gpa, room);
-        defer scratch.deinit();
-        scratch.resizeWithinCapacity(room) catch unreachable; // unreachable: `room` is the capacity just made
-        var fixed: std.heap.FixedBufferAllocator = .init(scratch.exposeMut());
-        var proxy = try Proxy.parse(fixed.allocator(), value, rules);
-        proxy.host = try arena.dupe(u8, proxy.host);
-        if (proxy.credential) |c| {
-            var kept: aegis.SecretBytes = try .init(gpa, c.user.len + c.password.len);
-            errdefer kept.deinit();
-            kept.resizeWithinCapacity(c.user.len + c.password.len) catch unreachable; // unreachable: the capacity just made
-            const bytes = kept.exposeMut();
-            @memcpy(bytes[0..c.user.len], c.user);
-            @memcpy(bytes[c.user.len..], c.password);
-            proxy.credential = .{ .user = bytes[0..c.user.len], .password = bytes[c.user.len..], .method = c.method };
-            credential.* = kept;
-        }
-        return proxy;
     }
 };
 

@@ -16,6 +16,7 @@ const wire = @import("uplink.wire");
 const auth = wire.auth;
 const url_mod = wire.url;
 const cloak = @import("cloak");
+const aegis = @import("aegis");
 
 const Proxy = @This();
 
@@ -104,7 +105,8 @@ pub const ParseError = error{
 /// `http` 1080 under `.lowercase` or 80 under `.uppercase`. Every string
 /// belongs to `arena`.
 pub fn parse(arena: Allocator, text: []const u8, rules: Rules) ParseError!Proxy {
-    const url = if (std.mem.find(u8, text, "://") == null) try arena.print("http://{s}", .{text}) else try arena.dupe(u8, text);
+    // Exactly the bytes needed: `parseKept` parses in scratch sized from `text`.
+    const url = if (std.mem.find(u8, text, "://") == null) try std.mem.concat(arena, u8, &.{ "http://", text }) else try arena.dupe(u8, text);
     const uri = std.Uri.parse(url) catch return error.InvalidProxy;
     const kind = kindOf(uri.scheme) orelse return error.InvalidProxy;
     const host = if (uri.host) |h| try h.toRawMaybeAlloc(arena) else return error.InvalidProxy;
@@ -119,6 +121,34 @@ pub fn parse(arena: Allocator, text: []const u8, rules: Rules) ParseError!Proxy 
         .user = if (uri.user) |u| try u.toRawMaybeAlloc(arena) else "",
         .password = if (uri.password) |p| try p.toRawMaybeAlloc(arena) else "",
     };
+    return proxy;
+}
+
+/// `parse` for a value that may carry a password: the URL is parsed in
+/// scratch that is wiped, the host goes to `arena`, and the user and
+/// password to `credential`, which the credential's slices borrow and the
+/// caller lets go once the proxy is no longer used. No arena, whose memory
+/// is freed unwiped, holds the password.
+pub fn parseKept(gpa: Allocator, arena: Allocator, credential: *?aegis.SecretBytes, text: []const u8, rules: Rules) ParseError!Proxy {
+    // The URL copied, the host, and the user and password unescaped: no
+    // more than four times `text`, and a prefix of `http://`.
+    const room = text.len * 4 + 64;
+    var scratch: aegis.SecretBytes = try .init(gpa, room);
+    defer scratch.deinit();
+    scratch.resizeWithinCapacity(room) catch unreachable; // unreachable: `room` is the capacity just made
+    var fixed: std.heap.FixedBufferAllocator = .init(scratch.exposeMut());
+    var proxy = try parse(fixed.allocator(), text, rules);
+    proxy.host = try arena.dupe(u8, proxy.host);
+    if (proxy.credential) |c| {
+        var kept: aegis.SecretBytes = try .init(gpa, c.user.len + c.password.len);
+        errdefer kept.deinit();
+        kept.resizeWithinCapacity(c.user.len + c.password.len) catch unreachable; // unreachable: the capacity just made
+        const bytes = kept.exposeMut();
+        @memcpy(bytes[0..c.user.len], c.user);
+        @memcpy(bytes[c.user.len..], c.password);
+        proxy.credential = .{ .user = bytes[0..c.user.len], .password = bytes[c.user.len..], .method = c.method };
+        credential.* = kept;
+    }
     return proxy;
 }
 
@@ -349,6 +379,7 @@ fn inCidr(a: IpAddress, entry: []const u8, slash: usize) bool {
 }
 
 const testing = std.testing;
+const Unwiped = @import("../testing/Unwiped.zig");
 
 test "proxy URLs keep IPv6 hosts and decoded credentials, and default their ports by rules" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
@@ -370,6 +401,25 @@ test "proxy URLs keep IPv6 hosts and decoded credentials, and default their port
     const explicit = try parse(a, "socks4://user@host:7777", .lowercase);
     try testing.expectEqual(@as(u16, 7777), explicit.port);
     try testing.expectEqualStrings("", explicit.credential.?.password);
+}
+
+test "a kept parse leaves the password in its secret and in no freed memory unwiped" {
+    var unwiped: Unwiped = .init(testing.allocator, "pwtoken");
+    var arena: std.heap.ArenaAllocator = .init(unwiped.allocator());
+    var credential: ?aegis.SecretBytes = null;
+    const p = try parseKept(unwiped.allocator(), arena.allocator(), &credential, "http://us%65r:pwtoken%21@proxy.test:3128", .lowercase);
+    try testing.expectEqualStrings("proxy.test", p.host);
+    try testing.expectEqualStrings("user", p.credential.?.user);
+    try testing.expectEqualStrings("pwtoken!", p.credential.?.password);
+    try testing.expectEqualStrings("userpwtoken!", credential.?.expose());
+    credential.?.deinit();
+    arena.deinit();
+    try testing.expect(!unwiped.found);
+    var none: ?aegis.SecretBytes = null;
+    var plain: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer plain.deinit();
+    try testing.expect((try parseKept(testing.allocator, plain.allocator(), &none, "proxy.test:8080", .lowercase)).credential == null);
+    try testing.expect(none == null);
 }
 
 test "parsed proxy strings outlive the text they came from" {

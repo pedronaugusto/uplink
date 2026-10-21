@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `Proxy.parseKept`: `Proxy.parse` for a value that may carry a password, parsed in scratch that is wiped, the host in the caller's arena and the user and password in an `aegis.SecretBytes` the credential borrows. The environment's proxies already went through it; a program that reads a proxy setting of its own (relic's `http.proxy`) now can too.
+
+### Fixed
+
+- A proxy written without a scheme (`proxy.example:8080`) in `http_proxy` or `https_proxy` failed with `OutOfMemory`: the `http://` prefix was printed through a writer that grows past the scratch sized for it.
+
 ## [0.8.6] - 2026-10-21
 
 ### Added
