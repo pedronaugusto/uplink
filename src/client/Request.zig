@@ -9,8 +9,6 @@ const Method = wire.Method;
 const Diagnostics = @import("../transport/Diagnostics.zig");
 const policy = @import("policy.zig");
 
-const Request = @This();
-
 method: Method = .GET,
 /// An `http` or `https` URL. A space, a control character or a user and
 /// password in it are refused.

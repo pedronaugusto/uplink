@@ -13,7 +13,6 @@ const wire = @import("uplink.wire");
 const h2 = wire.h2;
 const hpack = wire.hpack;
 const Field = wire.fields.Field;
-const Method = wire.Method;
 const span = @import("../../span.zig");
 const BufferPool = @import("../../transport/BufferPool.zig");
 const Decoder = @import("../../coding/Decoder.zig");

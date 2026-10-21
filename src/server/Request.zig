@@ -11,7 +11,6 @@ const Io = std.Io;
 const wire = @import("uplink.wire");
 const h1 = wire.h1;
 const fields = wire.fields;
-const coding = wire.coding;
 const Method = wire.Method;
 const Version = wire.Version;
 const Body = @import("../transport/Body.zig");

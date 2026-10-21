@@ -18,8 +18,6 @@ const Prepare = @import("Prepare.zig");
 const policy = @import("policy.zig");
 const Duration = @import("../span.zig").Duration;
 
-const Shared = @This();
-
 context: Context,
 pool: Pool,
 origin_auth: OriginAuth,

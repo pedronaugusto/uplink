@@ -3,7 +3,6 @@
 //! tries again, how often and how long apart.
 
 const std = @import("std");
-const Io = std.Io;
 const wire = @import("uplink.wire");
 const date = wire.date;
 const url_mod = wire.url;
