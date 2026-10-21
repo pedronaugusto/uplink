@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Pins with `verify = .none` check the server's leaf key against them alone, no path, name or validity (cloak's `Verify.leaf_key`): curl's pinned public key with peer verification off, git's `http.pinnedPubkey` under `http.sslVerify=false`. A mismatch fails the handshake with `PinMismatch`; such pins were refused (`InvalidOptions`).
+
+### Changed
+
+- cloak 0.19.0 (from 0.14.0): a client's certificate goes to cloak as a one-element `credentials` list.
+
 ## [0.8.4] - 2026-10-20
 
 ### Added

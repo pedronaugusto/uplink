@@ -115,11 +115,16 @@ test "a server is held to the lowest version and to a pinned key, as curl holds 
     try testing.expectError(error.TlsFailed, fetch(gpa, io, &other, server.port, &diagnostics));
     try testing.expectEqual(error.VerificationRejected, diagnostics.tls_error.?);
 
-    // A pin with nothing checked is refused, not skipped.
-    var unchecked: Client = .init(gpa, .{ .tls = .{ .verify = .none, .pins = &.{pin} } });
-    defer unchecked.deinit(io);
-    try testing.expectError(error.TlsFailed, fetch(gpa, io, &unchecked, server.port, &diagnostics));
-    try testing.expectEqual(error.InvalidOptions, diagnostics.tls_error.?);
+    // With nothing else checked the leaf's key is checked against the pins
+    // alone (git's `http.pinnedPubkey` under `http.sslVerify=false`).
+    var leaf: Client = .init(gpa, .{ .tls = .{ .verify = .none, .pins = &.{ @splat(0), pin } } });
+    defer leaf.deinit(io);
+    const unverified = try fetch(gpa, io, &leaf, server.port, null);
+    gpa.free(unverified);
+    var mismatched: Client = .init(gpa, .{ .tls = .{ .verify = .none, .pins = &.{@splat(0)} } });
+    defer mismatched.deinit(io);
+    try testing.expectError(error.TlsFailed, fetch(gpa, io, &mismatched, server.port, &diagnostics));
+    try testing.expectEqual(error.PinMismatch, diagnostics.tls_error.?);
 }
 
 /// How `openssl s_server -www` says the client signed: the scheme's name

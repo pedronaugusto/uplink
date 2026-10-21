@@ -31,10 +31,11 @@ pub const ClientOptions = struct {
     /// The SHA-256 of each SubjectPublicKeyInfo a server's own certificate
     /// may hold, as curl's `CURLOPT_PINNEDPUBLICKEY` (git's
     /// `http.pinnedPubkey`); empty pins nothing. Checked beside the
-    /// authorities, so with `verify = .none` a pin is refused at the
-    /// handshake (`error.TlsFailed`, `Diagnostics.tls_error` being
-    /// `InvalidOptions`) rather than left unchecked. Borrowed for as long
-    /// as the client uses it.
+    /// authorities; with `verify = .none` the leaf's key is checked against
+    /// them alone, no path, name or validity (curl's pinned public key with
+    /// peer verification off, git's `http.sslVerify=false`), a mismatch
+    /// failing the handshake (`Diagnostics.tls_error` `PinMismatch`).
+    /// Borrowed for as long as the client uses it.
     pins: []const [32]u8 = &.{},
     /// The certificate and key a server that asks for one is answered with,
     /// which the caller keeps alive for as long as the client uses it.

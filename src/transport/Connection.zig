@@ -57,6 +57,8 @@ output: SocketWriter,
 sessions: [2]cloak.tls.Session = undefined,
 session_on: [2]bool = .{ false, false },
 session_buffers: [2][2][]u8 = undefined,
+/// Each session's client credential, which it borrows.
+credentials: [2]cloak.tls.ClientCredential = undefined,
 /// Requests name the whole URL: through a proxy, to an `http` target.
 absolute_form: bool = false,
 /// Private: the socket's operations, each ended at its deadline.
@@ -732,10 +734,11 @@ fn startTls(conn: *Connection, slot: usize, host: []const u8, offer: Offer) (Ope
     const trust = try conn.trustFor(slot);
     // The server's own versions and pins; a proxy's TLS keeps cloak's.
     const target = slot != 0;
-    if (target and ctx.tls.pins.len != 0 and trust == null) {
-        if (conn.diagnostics) |d| d.tls_error = error.InvalidOptions;
-        return error.TlsFailed;
-    }
+    // Pins with nothing else checked: the leaf's key against them alone.
+    const leaf_keys = target and ctx.tls.pins.len != 0 and trust == null;
+    const auth = if (slot == 0) conn.route.proxy.?.proxy.tls.client_auth else ctx.tls.client_auth;
+    // Borrowed by the session for its life.
+    if (auth) |a| conn.credentials[slot] = .{ .auth = a };
     const read_buffer = try ctx.buffers.acquire(io, .record);
     errdefer ctx.buffers.release(io, read_buffer);
     const write_buffer = try ctx.buffers.acquire(io, .record);
@@ -749,11 +752,11 @@ fn startTls(conn: *Connection, slot: usize, host: []const u8, offer: Offer) (Ope
     var namespace_buf: [Io.net.HostName.max_len + 32]u8 = undefined;
     session.open(ctx.gpa, io, conn.readerBelow(slot), conn.writerBelow(slot), read_buffer, write_buffer, .{
         .identity = tls.reference(host),
-        .trust = if (trust) |snapshot| .{ .snapshot = snapshot } else .none,
-        .pins = if (target) ctx.tls.pins else &.{},
+        .trust = if (trust) |snapshot| .{ .snapshot = snapshot } else if (leaf_keys) .{ .leaf_keys = ctx.tls.pins } else .none,
+        .pins = if (target and !leaf_keys) ctx.tls.pins else &.{},
         .min_version = if (target) ctx.tls.min_version else .tls12,
         .max_version = if (target) ctx.tls.max_version else .tls13,
-        .auth = if (slot == 0) conn.route.proxy.?.proxy.tls.client_auth else ctx.tls.client_auth,
+        .credentials = if (auth != null) conn.credentials[slot .. slot + 1] else &.{},
         .key_log = if (ctx.tls.key_log) |sink| tls.keyLog(sink) else null,
         .alpn = offer.alpn,
         .resumption = if (ctx.tls.resumption) |r| .{
