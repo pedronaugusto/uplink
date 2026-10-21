@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.6] - 2026-10-21
+
 ### Added
 
 - `wire.sigv4`: AWS Signature Version 4, sans I/O. `Signer.sign` makes the fields that sign a request (`X-Amz-Date`, `X-Amz-Content-Sha256`, `Authorization`, and `X-Amz-Security-Token` for a session's key) and `Signer.presign` writes a URL whose query signs it for a time, as S3 and S3-compatible storage take them: the canonical request hashed as it is made, the path encoded once (twice for other services), the query's names and values encoded and sorted, the signed fields' values trimmed. Held to AWS's own examples for both forms.
