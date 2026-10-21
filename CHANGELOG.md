@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-10-21
+
+### Fixed
+
+- The manifest declares the release's version: 0.9.0 and 0.9.1 were tagged with `build.zig.zon` still saying 0.8.7, so a fetch of either named itself `uplink-0.8.7`. Their code is this release's; take 0.9.2.
+
 ## [0.9.1] - 2026-10-21
 
 ### Fixed
