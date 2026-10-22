@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- reactor 0.8.1, the family's one reactor line: its `net.connectUnix` connects a Unix socket with std's error names on every `Io`, Windows included.
+
 ## [0.9.2] - 2026-10-21
 
 ### Fixed
