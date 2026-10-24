@@ -583,12 +583,15 @@ const FakeServer = struct {
         const loopback = try IpAddress.parse("127.0.0.1", 0);
         // UDP and TCP on one port: the port the system gives the UDP socket
         // may be taken for TCP (another process's connection), so another
-        // is asked for until both are free.
+        // is asked for until both are free. The listener asks for no address
+        // reuse: on Windows a reusing bind over a port another socket holds
+        // is refused as access denied, which std reports as Unexpected, where
+        // a plain one is AddressInUse.
         var tries: u8 = 0;
         while (true) : (tries += 1) {
             f.udp = try loopback.bind(io, .{ .mode = .dgram });
             f.address = f.udp.address;
-            f.tcp = f.address.listen(io, .{ .reuse_address = true }) catch |err| switch (err) {
+            f.tcp = f.address.listen(io, .{}) catch |err| switch (err) {
                 error.AddressInUse => {
                     f.udp.close(io);
                     if (tries == 16) return err;
