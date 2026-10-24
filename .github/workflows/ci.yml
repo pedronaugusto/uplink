@@ -12,10 +12,6 @@ on:
         type: choice
         options: [fast, merge, release]
         default: fast
-      land:
-        description: Fast-forward main to this commit when the merge tier passes
-        type: boolean
-        default: true
       status-only:
         description: Verify the recorded merge or release tier for this exact commit
         type: boolean
@@ -54,14 +50,3 @@ jobs:
         {"include":[{"os":"macos-latest","name":"test (macos-latest, Debug)","step":"ci-run","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"eb7622e04c8bc739","artifact":"preflight-eb7622e04c8bc739","operation":"replay","targets":"","directory":"","prepare":"","declared":false,"qemu":false},{"os":"macos-latest","name":"test (macos-latest, ReleaseSafe)","step":"ci-run","args":"-Doptimize=safe -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"c5f4b8300fc67a80","artifact":"preflight-c5f4b8300fc67a80","operation":"replay","targets":"","directory":"","prepare":"","declared":false,"qemu":false},{"os":"windows-latest","name":"test (windows-latest, Debug)","step":"ci-run","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"8504875e0509bae1","artifact":"preflight-8504875e0509bae1","operation":"replay","targets":"","directory":"","prepare":"","declared":false,"qemu":false},{"os":"windows-latest","name":"test (windows-latest, ReleaseSafe)","step":"ci-run","args":"-Doptimize=safe -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"075f774c882e73f3","artifact":"preflight-075f774c882e73f3","operation":"replay","targets":"","directory":"","prepare":"","declared":false,"qemu":false},{"os":"windows-11-arm","name":"test (windows-11-arm, Debug)","step":"ci-run","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"746d4f06bd14ff93","artifact":"preflight-746d4f06bd14ff93","operation":"replay","targets":"","directory":"","prepare":"","declared":false,"qemu":false},{"os":"windows-11-arm","name":"test (windows-11-arm, ReleaseSafe)","step":"ci-run","args":"-Doptimize=safe -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"88bc5ce84520ffe9","artifact":"preflight-88bc5ce84520ffe9","operation":"replay","targets":"","directory":"","prepare":"","declared":false,"qemu":false}]}
       windows-git-latest: false
       compile-once: true
-  land:
-    needs: gate
-    if: github.event_name == 'workflow_dispatch' && inputs.land && inputs.tier == 'merge' && needs.gate.result == 'success'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: write
-    steps:
-      - uses: pedronaugusto/preflight/.github/actions/land@b38de4d327f1590274fdab8383c0fdf6fac640a7
-        with:
-          version: ${{ needs.gate.outputs.version }}
