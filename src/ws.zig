@@ -9,7 +9,6 @@
 //! does the rest.
 
 const std = @import("std");
-const erased = @import("erased.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const wire = @import("uplink.wire");
@@ -119,26 +118,28 @@ pub fn accept(out: *Accepted, gpa: Allocator, io: Io, request: *ServerRequest, r
     out.conn = .init(gpa, .server, .{
         .reader = stream.reader,
         .writer = stream.writer,
-        .context = out,
         .flushFn = flushAccepted,
         .readableFn = readableAccepted,
         .canceledFn = canceledAccepted,
     }, options.conn, agreed);
 }
 
-fn flushAccepted(context: ?*anyopaque, _: Io) Io.Writer.Error!void {
-    const a: *Accepted = erased.restore(Accepted, context);
-    return a.stream.flush();
+/// The accepted connection whose transport `t` is.
+fn acceptedOf(t: *Conn.Transport) *Accepted {
+    const conn: *Conn = @alignCast(@fieldParentPtr("transport", t));
+    return @alignCast(@fieldParentPtr("conn", conn));
 }
 
-fn readableAccepted(context: ?*anyopaque, io: Io, timeout: Io.Duration) Io.Cancelable!Timed.Readiness {
-    const a: *Accepted = erased.restore(Accepted, context);
-    return a.stream.awaitReadable(io, timeout);
+fn flushAccepted(t: *Conn.Transport, _: Io) Io.Writer.Error!void {
+    return acceptedOf(t).stream.flush();
 }
 
-fn canceledAccepted(context: ?*anyopaque) bool {
-    const a: *Accepted = erased.restore(Accepted, context);
-    return a.stream.canceled();
+fn readableAccepted(t: *Conn.Transport, io: Io, timeout: Io.Duration) Io.Cancelable!Timed.Readiness {
+    return acceptedOf(t).stream.awaitReadable(io, timeout);
+}
+
+fn canceledAccepted(t: *Conn.Transport) bool {
+    return acceptedOf(t).stream.canceled();
 }
 
 fn refuse(io: Io, response: *ServerResponse, status: std.http.Status, err: AcceptError) AcceptError {
@@ -302,26 +303,28 @@ pub fn connect(out: *Opened, client: *Client, gpa: Allocator, io: Io, url: []con
     out.conn = .init(gpa, .client, .{
         .reader = out.stream.reader(io),
         .writer = out.stream.writer(io),
-        .context = out,
         .flushFn = flushOpened,
         .readableFn = readableOpened,
         .canceledFn = canceledOpened,
     }, options.conn, agreed);
 }
 
-fn flushOpened(context: ?*anyopaque, io: Io) Io.Writer.Error!void {
-    const o: *Opened = erased.restore(Opened, context);
-    o.stream.flush(io) catch return error.WriteFailed;
+/// The opened connection whose transport `t` is.
+fn openedOf(t: *Conn.Transport) *Opened {
+    const conn: *Conn = @alignCast(@fieldParentPtr("transport", t));
+    return @alignCast(@fieldParentPtr("conn", conn));
 }
 
-fn readableOpened(context: ?*anyopaque, io: Io, timeout: Io.Duration) Io.Cancelable!Timed.Readiness {
-    const o: *Opened = erased.restore(Opened, context);
-    return o.stream.awaitReadable(io, timeout);
+fn flushOpened(t: *Conn.Transport, io: Io) Io.Writer.Error!void {
+    openedOf(t).stream.flush(io) catch return error.WriteFailed;
 }
 
-fn canceledOpened(context: ?*anyopaque) bool {
-    const o: *Opened = erased.restore(Opened, context);
-    return o.stream.readFailure() == error.Canceled;
+fn readableOpened(t: *Conn.Transport, io: Io, timeout: Io.Duration) Io.Cancelable!Timed.Readiness {
+    return openedOf(t).stream.awaitReadable(io, timeout);
+}
+
+fn canceledOpened(t: *Conn.Transport) bool {
+    return openedOf(t).stream.readFailure() == error.Canceled;
 }
 
 /// `url` with `ws` made `http` and `wss` made `https`, in `buffer`.

@@ -7,18 +7,18 @@
 //! none pays for no clock reads.
 
 const std = @import("std");
-const erased = @import("../erased.zig");
 const Io = std.Io;
 const Duration = @import("../span.zig").Duration;
 
+/// A field of the type that observes, which `eventFn` finds by
+/// `@fieldParentPtr`; a client holds a pointer to it.
 const Observer = @This();
 
-context: ?*anyopaque,
-eventFn: *const fn (context: ?*anyopaque, event: Event) void,
+eventFn: *const fn (o: *Observer, event: Event) void,
 
 /// Tell the observer `event`.
-pub fn emit(o: Observer, event: Event) void {
-    o.eventFn(o.context, event);
+pub fn emit(o: *Observer, event: Event) void {
+    o.eventFn(o, event);
 }
 
 /// One step.
@@ -67,9 +67,10 @@ pub const Event = union(enum) {
 test "an observer is handed each event" {
     const Count = struct {
         n: u32 = 0,
+        observing: Observer = .{ .eventFn = on },
         const Self = @This();
-        fn on(context: ?*anyopaque, event: Event) void {
-            const self: *Self = erased.restore(Self, context);
+        fn on(o: *Observer, event: Event) void {
+            const self: *Self = @alignCast(@fieldParentPtr("observing", o));
             switch (event) {
                 .head => |h| if (h.status == 200) {
                     self.n += 1;
@@ -79,7 +80,7 @@ test "an observer is handed each event" {
         }
     };
     var count: Count = .{};
-    const o: Observer = .{ .context = &count, .eventFn = Count.on };
+    const o = &count.observing;
     o.emit(.{ .head = .{ .status = 200, .wait = .fromRaw(0) } });
     o.emit(.{ .tunnel = .{ .took = .fromRaw(0) } });
     try std.testing.expectEqual(@as(u32, 1), count.n);

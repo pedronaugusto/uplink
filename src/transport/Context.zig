@@ -43,7 +43,7 @@ dial: Dial,
 resolver: Resolver,
 /// Private: the cache `resolver` goes through, when it does.
 dns_cache: ?Resolver.Cache,
-observer: ?Observer,
+observer: ?*Observer,
 /// The buffer zstd bodies are decoded in, and the cap on their window.
 zstd: ZstdBuffer,
 counters: Counters = .{},
@@ -56,7 +56,7 @@ pub const Options = struct {
     dial: Dial = .{},
     resolver: ?Resolver = null,
     dns_cache: ?Resolver.Cache.Options = .{},
-    observer: ?Observer = null,
+    observer: ?*Observer = null,
     /// The largest window a zstd body may ask for.
     max_zstd_window: aegis.units.Bytes(u32) = .literal("8MiB"),
     /// The most free buffers of each size kept.

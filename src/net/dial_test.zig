@@ -311,7 +311,7 @@ test "an origin is dialed as it is when its endpoints fail, unless one publishes
         .{ .name = name, .https = &.{.{ .target = "gone.test", .params = &.{.{ .key = .ech, .value = "\x00\x00" }} }} },
     };
     var z: zone.Zone = .{ .entries = &entries };
-    const d: Dns = .{ .transport = z.transport() };
+    var d: Dns = .{ .transport = z.transport() };
     const options: Options = .{ .resolver = d.resolver(), .timeout = .literal("5s") };
     const protocols: []const []const u8 = &.{"http/1.1"};
     var plain = try dialHttps(io, gpa, "origin.test", port, .{ .protocols = protocols, .ech = false }, options);
@@ -334,7 +334,7 @@ test "an endpoint's hints are dialed when its name has no address" {
         .{ .key = .ipv4hint, .value = "\x7f\x00\x00\x01" },
     } }} }};
     var z: zone.Zone = .{ .entries = &entries };
-    const d: Dns = .{ .transport = z.transport() };
+    var d: Dns = .{ .transport = z.transport() };
     var got = try dialHttps(io, gpa, "hinted.test", 443, .{ .protocols = &.{"http/1.1"}, .ech = false }, .{ .resolver = d.resolver(), .timeout = .literal("5s") });
     defer got.binding.?.deinit(gpa);
     got.dialed.stream.deinit(io);

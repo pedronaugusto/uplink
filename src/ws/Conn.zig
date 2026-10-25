@@ -89,19 +89,20 @@ pub const Options = struct {
     deflate_level: u4 = 6,
 };
 
-/// The stream under the connection and what it can do.
+/// The stream under the connection and what it can do. It is the
+/// connection's own field: a function finds the connection, and what holds
+/// the connection, by `@fieldParentPtr`.
 pub const Transport = struct {
     reader: *Io.Reader,
     writer: *Io.Writer,
-    context: ?*anyopaque,
     /// Push what was written to the peer.
-    flushFn: *const fn (context: ?*anyopaque, io: Io) Io.Writer.Error!void,
+    flushFn: *const fn (t: *Transport, io: Io) Io.Writer.Error!void,
     /// Wait up to the duration for something to read, without ending the
     /// stream when nothing comes.
-    readableFn: *const fn (context: ?*anyopaque, io: Io, timeout: Io.Duration) Io.Cancelable!Timed.Readiness,
+    readableFn: *const fn (t: *Transport, io: Io, timeout: Io.Duration) Io.Cancelable!Timed.Readiness,
     /// Whether the stream's read or write failed for a cancelation, after
     /// the reader or writer reported a failure.
-    canceledFn: *const fn (context: ?*anyopaque) bool,
+    canceledFn: *const fn (t: *Transport) bool,
 };
 
 /// Why a read failed.
@@ -249,15 +250,15 @@ pub fn readMessage(c: *Conn, io: Io, gpa: Allocator, limit: Io.Limit) (ReadError
     return .{ m.kind, bytes };
 }
 
-fn readError(c: *const Conn) ReadError {
+fn readError(c: *Conn) ReadError {
     if (c.failure) |code| return if (code == ws.Close.abnormal) c.streamFailed() else error.ProtocolError;
     return c.streamFailed();
 }
 
 /// The stream failed under a read or write: `error.Canceled` when it was
 /// for a cancelation.
-fn streamFailed(c: *const Conn) error{ ConnectionFailed, Canceled } {
-    return if (c.transport.canceledFn(c.transport.context)) error.Canceled else error.ConnectionFailed;
+fn streamFailed(c: *Conn) error{ ConnectionFailed, Canceled } {
+    return if (c.transport.canceledFn(&c.transport)) error.Canceled else error.ConnectionFailed;
 }
 
 /// A control frame's write failing under a read.
@@ -295,9 +296,9 @@ fn readHeader(c: *Conn, io: Io) ReadError!ws.Header {
 fn waitForFrame(c: *Conn, io: Io) ReadError!void {
     const interval = c.options.ping_interval orelse return;
     // An `Io` that cannot wait a bounded time just reads.
-    if (try c.transport.readableFn(c.transport.context, io, span.toIo(interval)) != .timed_out) return;
+    if (try c.transport.readableFn(&c.transport, io, span.toIo(interval)) != .timed_out) return;
     c.ping(io, "") catch |err| return answerFailed(err);
-    if (try c.transport.readableFn(c.transport.context, io, span.toIo(interval)) != .timed_out) return;
+    if (try c.transport.readableFn(&c.transport, io, span.toIo(interval)) != .timed_out) return;
     c.failure = ws.Close.going_away;
     // glint-ignore: Z026 -- the peer is gone or silent; the close is a courtesy
     c.sendClose(io, ws.Close.going_away, "") catch {};
@@ -541,7 +542,7 @@ pub fn send(c: *Conn, io: Io, kind: Kind, payload: []const u8) WriteError!void {
     } else {
         try c.frame(io, w, .{ .opcode = opcode, .len = payload.len }, payload);
     }
-    c.transport.flushFn(c.transport.context, io) catch return c.streamFailed();
+    c.transport.flushFn(&c.transport, io) catch return c.streamFailed();
 }
 
 /// `input` compressed onto the message's stream into `w.compressed`; at
@@ -643,7 +644,7 @@ fn fragment(c: *Conn, io: Io, mw: *MessageWriter, parts: []const []const u8, spl
         try c.frame(io, w, .{ .fin = last, .opcode = mw.opcode, .len = w.gathered.items.len }, w.gathered.items);
     }
     mw.opcode = .continuation;
-    if (last) c.transport.flushFn(c.transport.context, io) catch return c.streamFailed();
+    if (last) c.transport.flushFn(&c.transport, io) catch return c.streamFailed();
 }
 
 /// Close: send a close with `code` and `reason`, then wait up to
@@ -660,7 +661,7 @@ pub fn close(c: *Conn, io: Io, code: u16, reason: []const u8) void {
     while (c.peer_close == null and c.failure == null) {
         const left = Io.Clock.awake.now(io).durationTo(until);
         if (left.nanoseconds <= 0) return;
-        const ready = c.transport.readableFn(c.transport.context, io, left) catch return;
+        const ready = c.transport.readableFn(&c.transport, io, left) catch return;
         if (ready == .timed_out) return;
         _ = c.next(io, &buffer) catch return;
     }
@@ -682,7 +683,7 @@ fn sendControl(c: *Conn, io: Io, opcode: ws.Opcode, payload: []const u8) WriteEr
     defer held.deinit(io);
     if (c.close_sent.load(.acquire) == .set) return error.Closed;
     try c.frame(io, held.value(), .{ .opcode = opcode, .len = payload.len }, payload);
-    c.transport.flushFn(c.transport.context, io) catch return c.streamFailed();
+    c.transport.flushFn(&c.transport, io) catch return c.streamFailed();
 }
 
 fn sendClose(c: *Conn, io: Io, code: u16, reason: []const u8) WriteError!void {
@@ -694,7 +695,7 @@ fn sendClose(c: *Conn, io: Io, code: u16, reason: []const u8) WriteError!void {
     defer held.deinit(io);
     if (c.close_sent.swap(.set, .acq_rel) == .set) return error.Closed;
     try c.frame(io, held.value(), .{ .opcode = .close, .len = 2 + n }, payload[0 .. 2 + n]);
-    c.transport.flushFn(c.transport.context, io) catch return c.streamFailed();
+    c.transport.flushFn(&c.transport, io) catch return c.streamFailed();
 }
 
 /// Write one frame, masked when this end is a client.

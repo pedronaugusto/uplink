@@ -55,13 +55,13 @@ pub const Options = struct {
     /// from it; the caller's, and may serve several clients.
     cache: ?*Cache = null,
     /// Where an answer to a server's 401 comes from; null answers none.
-    credentials: ?Credentials = null,
+    credentials: ?*Credentials = null,
     /// Sent as `User-Agent` unless a request names its own.
     user_agent: ?[]const u8 = null,
     /// Told every step of every request, with its timing.
-    observer: ?Observer = null,
+    observer: ?*Observer = null,
     /// Called before every attempt is written.
-    prepare: ?Prepare = null,
+    prepare: ?*Prepare = null,
     /// How long a request with `expect_continue` waits for the server's
     /// go-ahead before sending its body anyway.
     expect_continue_timeout: Duration = .literal("1s"),

@@ -11,18 +11,19 @@ const wire = @import("uplink.wire");
 const h1 = wire.h1;
 const Method = wire.Method;
 
+/// A field of the type that prepares, which `prepareFn` finds by
+/// `@fieldParentPtr`; a client holds a pointer to it.
 const Prepare = @This();
 
-context: ?*anyopaque,
-prepareFn: *const fn (io: Io, context: ?*anyopaque, attempt: *Attempt) Error!void,
+prepareFn: *const fn (io: Io, p: *Prepare, attempt: *Attempt) Error!void,
 
 /// Why an attempt could not be prepared. The request fails with
 /// `PrepareFailed`.
 pub const Error = error{ PrepareFailed, Canceled };
 
 /// Run the hook.
-pub fn run(p: Prepare, io: Io, attempt: *Attempt) Error!void {
-    return p.prepareFn(io, p.context, attempt);
+pub fn run(p: *Prepare, io: Io, attempt: *Attempt) Error!void {
+    return p.prepareFn(io, p, attempt);
 }
 
 /// One attempt, about to be written.

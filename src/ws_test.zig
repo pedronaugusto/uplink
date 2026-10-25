@@ -19,11 +19,11 @@ const Running = struct {
     task: Io.Future(Server.ServeError!void),
     port: u16,
 
-    fn start(gpa: std.mem.Allocator, handler: Server.Handler) !*Running {
+    fn start(gpa: std.mem.Allocator, handler: *const Server.Handler) !*Running {
         return startWith(gpa, .{}, handler);
     }
 
-    fn startWith(gpa: std.mem.Allocator, options: Server.Options, handler: Server.Handler) !*Running {
+    fn startWith(gpa: std.mem.Allocator, options: Server.Options, handler: *const Server.Handler) !*Running {
         const io = test_io.io();
         const r = try gpa.create(Running);
         errdefer gpa.destroy(r);
@@ -326,22 +326,27 @@ const Failed = struct {
     in: [64]u8 = undefined,
     reader: Io.Reader = .failing,
     writer: Io.Writer = .failing,
+    conn: ws.Conn = undefined,
 
-    fn transport(f: *Failed) ws.Conn.Transport {
+    /// The connection over the failed stream, held here so its transport
+    /// finds this.
+    fn open(f: *Failed) *ws.Conn {
         f.reader.buffer = &f.in;
-        return .{ .reader = &f.reader, .writer = &f.writer, .context = f, .flushFn = flush, .readableFn = readable, .canceledFn = canceledFn };
+        f.conn = .init(testing.allocator, .server, .{ .reader = &f.reader, .writer = &f.writer, .flushFn = flush, .readableFn = readable, .canceledFn = canceledFn }, .{}, null);
+        return &f.conn;
     }
 
-    fn flush(_: ?*anyopaque, _: Io) Io.Writer.Error!void {
+    fn flush(_: *ws.Conn.Transport, _: Io) Io.Writer.Error!void {
         return error.WriteFailed;
     }
 
-    fn readable(_: ?*anyopaque, _: Io, _: Io.Duration) Io.Cancelable!@import("net/Timed.zig").Readiness {
+    fn readable(_: *ws.Conn.Transport, _: Io, _: Io.Duration) Io.Cancelable!@import("net/Timed.zig").Readiness {
         return .ready;
     }
 
-    fn canceledFn(context: ?*anyopaque) bool {
-        const f: *Failed = @ptrCast(@alignCast(context.?)); // safe: `transport` passes a Failed
+    fn canceledFn(t: *ws.Conn.Transport) bool {
+        const conn: *ws.Conn = @alignCast(@fieldParentPtr("transport", t));
+        const f: *Failed = @alignCast(@fieldParentPtr("conn", conn));
         return f.canceled;
     }
 };
@@ -350,7 +355,7 @@ test "a stream that failed for a cancelation says so on reads and writes, and on
     const io = test_io.io();
     for ([_]bool{ true, false }) |canceled| {
         var failed: Failed = .{ .canceled = canceled };
-        var conn: ws.Conn = .init(testing.allocator, .server, failed.transport(), .{}, null);
+        const conn = failed.open();
         defer conn.deinit();
         const want: anyerror = if (canceled) error.Canceled else error.ConnectionFailed;
         var buffer: [64]u8 = undefined;

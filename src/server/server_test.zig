@@ -18,7 +18,7 @@ const Running = struct {
     task: Io.Future(Server.ServeError!void),
     port: u16,
 
-    fn start(gpa: std.mem.Allocator, options: Server.Options, handler: Server.Handler) !*Running {
+    fn start(gpa: std.mem.Allocator, options: Server.Options, handler: *const Server.Handler) !*Running {
         const io = test_io.io();
         const r = try gpa.create(Running);
         errdefer gpa.destroy(r);
@@ -765,9 +765,10 @@ test "trailers are read from a chunked request and written after a chunked respo
 const Seen = struct {
     answered: std.atomic.Value(u32) = .init(0),
     refused: std.atomic.Value(u32) = .init(0),
+    observing: Server.Observer = .{ .eventFn = event },
 
-    fn event(context: ?*anyopaque, e: Server.Observer.Event) void {
-        const seen: *Seen = @ptrCast(@alignCast(context.?)); // safe: the test passes its Seen
+    fn event(o: *Server.Observer, e: Server.Observer.Event) void {
+        const seen: *Seen = @alignCast(@fieldParentPtr("observing", o));
         switch (e) {
             .answered => |a| if (a.status == 200) {
                 _ = seen.answered.fetchAdd(1, .monotonic);
@@ -781,7 +782,7 @@ const Seen = struct {
 test "the observer is told each answer and each refusal" {
     const gpa = testing.allocator;
     var seen: Seen = .{};
-    const running = try Running.start(gpa, .{ .observer = .{ .context = &seen, .eventFn = Seen.event } }, .of(hello));
+    const running = try Running.start(gpa, .{ .observer = &seen.observing }, .of(hello));
     defer running.stop();
     const ok = try running.raw(gpa, "GET / HTTP/1.1\r\nHost: x\r\n\r\nGET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
     defer gpa.free(ok);
@@ -1141,8 +1142,8 @@ test "a query goes as an HTTP POST and its answer comes back with the query's id
     var client: Client = .init(testing.allocator, .{});
     defer client.deinit(io);
     var url_buf: [64]u8 = undefined;
-    const doh: Doh = .{ .client = &client, .url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/dns-query", .{listener.socket.address.getPort()}) };
-    const d: Dns = .{ .transport = doh.transport() };
+    var doh: Doh = .{ .client = &client, .url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/dns-query", .{listener.socket.address.getPort()}) };
+    var d: Dns = .{ .transport = doh.transport() };
     var out: [4]Io.net.IpAddress = undefined;
     const got = try d.resolver().lookup(io, "doh.test", 443, .ip4, &out);
     try testing.expectEqual(1, got.len);
@@ -1321,13 +1322,14 @@ const Handshakes = struct {
     full: std.atomic.Value(u32) = .init(0),
     resumed: std.atomic.Value(u32) = .init(0),
     ech: std.atomic.Value(u32) = .init(0),
+    observing: Observer = .{ .eventFn = on },
 
-    fn observer(h: *Handshakes) Observer {
-        return .{ .context = h, .eventFn = on };
+    fn observer(h: *Handshakes) *Observer {
+        return &h.observing;
     }
 
-    fn on(context: ?*anyopaque, event: Observer.Event) void {
-        const h: *Handshakes = @ptrCast(@alignCast(context.?)); // safe: `observer` passes a Handshakes
+    fn on(o: *Observer, event: Observer.Event) void {
+        const h: *Handshakes = @alignCast(@fieldParentPtr("observing", o));
         switch (event) {
             .tls => |t| {
                 _ = (if (t.resumed) &h.resumed else &h.full).fetchAdd(1, .monotonic);
@@ -1446,7 +1448,7 @@ test "an origin is reached as its HTTPS record says, its name hidden by ECH, and
             } }},
         }};
         var z: zone.Zone = .{ .entries = &entries };
-        const d: Dns = .{ .transport = z.transport() };
+        var d: Dns = .{ .transport = z.transport() };
         var seen: Handshakes = .{};
         var client: Client = .init(gpa, .{ .tls = .{ .certificate_compression = .none, .resumption = null, .trust = t.servers }, .resolver = d.resolver(), .observer = seen.observer() });
         defer client.deinit(io);
@@ -1480,7 +1482,7 @@ test "an HTTPS record whose endpoint fails, or that speaks no protocol the clien
             .{ .name = name, .https = &.{.{ .target = "localhost", .params = params }} },
         };
         var z: zone.Zone = .{ .entries = &entries };
-        const d: Dns = .{ .transport = z.transport() };
+        var d: Dns = .{ .transport = z.transport() };
         var client: Client = .init(gpa, .{ .tls = .{ .trust = t.servers }, .resolver = d.resolver() });
         defer client.deinit(io);
         try fetchEach(gpa, &client, url, 1);

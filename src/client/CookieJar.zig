@@ -55,14 +55,14 @@ pub const Options = struct {
     max_total: u32 = 3000,
     /// Whether a domain is a public suffix (`co.uk`, `github.io`), where no
     /// cookie may be set for every host under it.
-    public_suffix: ?PublicSuffix = null,
+    public_suffix: ?*const PublicSuffix = null,
 };
 
-/// A public suffix list, the caller's.
+/// A public suffix list, the caller's: a field of the type that holds the
+/// list, which `isFn` finds by `@fieldParentPtr`.
 pub const PublicSuffix = struct {
-    context: ?*anyopaque,
     /// Whether `domain`, lower-cased, is a public suffix.
-    isFn: *const fn (context: ?*anyopaque, domain: []const u8) bool,
+    isFn: *const fn (ps: *const PublicSuffix, domain: []const u8) bool,
 };
 
 /// One kept cookie. Every slice is in `bytes`.
@@ -228,7 +228,7 @@ fn prefixKept(sc: cookie.SetCookie, host_only: bool, path: []const u8) bool {
 }
 
 fn isPublicSuffix(jar: *const CookieJar, domain: []const u8) bool {
-    if (jar.options.public_suffix) |ps| return ps.isFn(ps.context, domain);
+    if (jar.options.public_suffix) |ps| return ps.isFn(ps, domain);
     return std.mem.findScalar(u8, domain, '.') == null;
 }
 

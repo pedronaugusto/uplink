@@ -225,7 +225,7 @@ fn hintsOf(s: @import("uplink.wire").dns.Service, port: u16, out: *[max_addresse
 /// `resolver.service`, given up once `timeout` runs out, as
 /// `Resolver.lookupWithin` is.
 fn serviceWithin(r: Resolver, io: Io, gpa: Allocator, host: []const u8, port: u16, timeout: ?Duration, bounded: *bool) HttpsError!?Resolver.Binding {
-    if (r.serviceFn == null) return null;
+    if (!r.readsServices()) return null;
     const limit = timeout orelse return serviceNow(r, io, gpa, host, port);
     const Race = union(enum) {
         found: HttpsError!?Resolver.Binding,

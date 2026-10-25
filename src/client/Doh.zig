@@ -7,7 +7,6 @@
 //! an address in the URL, or by a `Resolver.Static` entry for its name.
 
 const std = @import("std");
-const erased = @import("../erased.zig");
 const Io = std.Io;
 const dns = @import("uplink.wire").dns;
 const Dns = @import("../net/Dns.zig");
@@ -18,15 +17,17 @@ const Doh = @This();
 client: *Client,
 /// The server's URL, `https://dns.example/dns-query` say.
 url: []const u8,
+/// Private: the transport's function.
+exchanging: Dns.Transport = .{ .exchangeFn = exchange },
 
-pub fn transport(d: *const Doh) Dns.Transport {
-    return .{ .context = erased.erase(d), .exchangeFn = exchange };
+pub fn transport(d: *Doh) *Dns.Transport {
+    return &d.exchanging;
 }
 
 const media_type = "application/dns-message";
 
-fn exchange(io: Io, context: ?*anyopaque, query: []const u8, answer: []u8) Dns.ExchangeError![]u8 {
-    const d: *const Doh = erased.restore(Doh, context);
+fn exchange(io: Io, t: *Dns.Transport, query: []const u8, answer: []u8) Dns.ExchangeError![]u8 {
+    const d: *Doh = @alignCast(@fieldParentPtr("exchanging", t));
     if (query.len < dns.header_len or query.len > dns.max_message) return error.NoAnswer;
     // The id goes as 0, so equal queries are equal requests a cache can
     // answer (§4.1); the answer gets the query's own back.

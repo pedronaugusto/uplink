@@ -10,7 +10,6 @@
 //! An address literal never reaches a resolver: `lookup` answers it itself.
 
 const std = @import("std");
-const erased = @import("../erased.zig");
 const aegis = @import("aegis");
 const reactor = @import("reactor");
 const Allocator = std.mem.Allocator;
@@ -22,14 +21,26 @@ const IpAddress = Io.net.IpAddress;
 
 const Resolver = @This();
 
-context: ?*anyopaque,
-/// Answer `host`, a name, with up to `out.len` addresses on `port`, of
-/// `family` when one is given.
-lookupFn: *const fn (io: Io, context: ?*anyopaque, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress) LookupError![]IpAddress,
-/// Answer the HTTPS records of `name`, the DNS name asked (a port's prefix
-/// included), owned by `gpa`; null when it has none or they could not be
-/// had. Null for a resolver that reads none.
-serviceFn: ?*const fn (io: Io, context: ?*anyopaque, gpa: Allocator, name: []const u8) ServiceError!?Binding = null,
+/// What answers, embedded in the type that does; null is the system's.
+interface: ?*Interface = null,
+
+/// A resolver's functions, a field of the type that resolves: each finds
+/// it from the interface it is given, by `@fieldParentPtr`.
+pub const Interface = struct {
+    /// Answer `host`, a name, with up to `out.len` addresses on `port`, of
+    /// `family` when one is given.
+    lookupFn: *const fn (io: Io, interface: *Interface, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress) LookupError![]IpAddress,
+    /// Answer the HTTPS records of `name`, the DNS name asked (a port's prefix
+    /// included), owned by `gpa`; null when it has none or they could not be
+    /// had. Null for a resolver that reads none.
+    serviceFn: ?*const fn (io: Io, interface: *Interface, gpa: Allocator, name: []const u8) ServiceError!?Binding = null,
+};
+
+/// Whether the resolver reads service bindings.
+pub fn readsServices(r: Resolver) bool {
+    const i = r.interface orelse return false;
+    return i.serviceFn != null;
+}
 
 pub const LookupError = reactor.net.ResolveError;
 
@@ -104,11 +115,12 @@ pub fn serviceName(host: []const u8, port: u16, out: *[dns.max_name]u8) error{In
 /// by `gpa`; null when it has none, when `host` is an address, or when the
 /// resolver reads no such records.
 pub fn service(r: Resolver, io: Io, gpa: Allocator, host: []const u8, port: u16) ServiceError!?Binding {
-    const answer = r.serviceFn orelse return null;
+    const i = r.interface orelse return null;
+    const answer = i.serviceFn orelse return null;
     if (reactor.net.literal(host, port) != null) return null;
     var name_buf: [dns.max_name]u8 = undefined;
     const name = serviceName(host, port, &name_buf) catch return null;
-    return answer(io, r.context, gpa, name);
+    return answer(io, i, gpa, name);
 }
 
 /// `host`'s addresses on `port`: the address itself when `host` is one,
@@ -120,7 +132,8 @@ pub fn lookup(r: Resolver, io: Io, host: []const u8, port: u16, family: ?IpAddre
         out[0] = address;
         return out[0..1];
     }
-    return r.lookupFn(io, r.context, host, port, family, out);
+    const i = r.interface orelse return reactor.net.resolve(io, host, port, .{ .family = family }, out);
+    return i.lookupFn(io, i, host, port, family, out);
 }
 
 /// Errors from `lookupWithin`.
@@ -171,17 +184,15 @@ fn lookupMapped(r: Resolver, io: Io, host: []const u8, port: u16, family: ?IpAdd
 
 /// The system's lookup, by reactor's `net.resolve`: bounded, and waiting on
 /// no work started with `io.async`.
-pub const system: Resolver = .{ .context = null, .lookupFn = systemLookup };
-
-fn systemLookup(io: Io, _: ?*anyopaque, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress) LookupError![]IpAddress {
-    return reactor.net.resolve(io, host, port, .{ .family = family }, out);
-}
+pub const system: Resolver = .{};
 
 /// Chosen names answered with chosen addresses; any other passed on.
 pub const Static = struct {
     entries: []const Entry,
     /// What answers the names not listed.
     fallback: Resolver = .system,
+    /// Private: the resolver's functions.
+    resolving: Interface = undefined,
 
     /// One name's answer.
     pub const Entry = struct {
@@ -193,20 +204,22 @@ pub const Static = struct {
         addresses: []const IpAddress,
     };
 
-    pub fn resolver(s: *const Static) Resolver {
-        return .{ .context = erased.erase(s), .lookupFn = staticLookup, .serviceFn = if (s.fallback.serviceFn != null) staticService else null };
+    pub fn resolver(s: *Static) Resolver {
+        s.resolving = .{ .lookupFn = staticLookup, .serviceFn = if (s.fallback.readsServices()) staticService else null };
+        return .{ .interface = &s.resolving };
     }
 
     /// A name listed is reached at the addresses given, so it has no
     /// binding to send it elsewhere; the rest are the fallback's.
-    fn staticService(io: Io, context: ?*anyopaque, gpa: Allocator, name: []const u8) ServiceError!?Binding {
-        const s: *const Static = erased.restore(Static, context);
+    fn staticService(io: Io, interface: *Interface, gpa: Allocator, name: []const u8) ServiceError!?Binding {
+        const s: *Static = @alignCast(@fieldParentPtr("resolving", interface));
         for (s.entries) |e| if (std.ascii.eqlIgnoreCase(e.host, originOf(name))) return null;
-        return s.fallback.serviceFn.?(io, s.fallback.context, gpa, name);
+        const fallback = s.fallback.interface.?;
+        return fallback.serviceFn.?(io, fallback, gpa, name);
     }
 
-    fn staticLookup(io: Io, context: ?*anyopaque, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress) LookupError![]IpAddress {
-        const s: *const Static = erased.restore(Static, context);
+    fn staticLookup(io: Io, interface: *Interface, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress) LookupError![]IpAddress {
+        const s: *Static = @alignCast(@fieldParentPtr("resolving", interface));
         for (s.entries) |e| {
             if (!std.ascii.eqlIgnoreCase(e.host, host)) continue;
             if (e.port) |p| if (p != port) continue;
@@ -271,6 +284,8 @@ pub const Cache = struct {
     /// Private: service names, lower-cased and owned, to their bindings,
     /// none included, reached only through the lock beside them.
     services: aegis.BlockingGuarded(std.StringHashMapUnmanaged(ServiceEntry)),
+    /// Private: the resolver's functions.
+    resolving: Interface = undefined,
 
     pub const Options = struct {
         /// How long an answer is kept.
@@ -318,7 +333,8 @@ pub const Cache = struct {
     }
 
     pub fn resolver(c: *Cache) Resolver {
-        return .{ .context = c, .lookupFn = cacheLookup, .serviceFn = if (c.inner.serviceFn != null) cacheService else null };
+        c.resolving = .{ .lookupFn = cacheLookup, .serviceFn = if (c.inner.readsServices()) cacheService else null };
+        return .{ .interface = &c.resolving };
     }
 
     /// Forget every answer.
@@ -348,8 +364,8 @@ pub const Cache = struct {
         if (e.binding) |*b| b.deinit(c.gpa);
     }
 
-    fn cacheService(io: Io, context: ?*anyopaque, gpa: Allocator, name: []const u8) ServiceError!?Binding {
-        const c: *Cache = erased.restore(Cache, context);
+    fn cacheService(io: Io, interface: *Interface, gpa: Allocator, name: []const u8) ServiceError!?Binding {
+        const c: *Cache = @alignCast(@fieldParentPtr("resolving", interface));
         var key_buf: [dns.max_name]u8 = undefined;
         if (name.len > key_buf.len) return null;
         const key = std.ascii.lowerString(&key_buf, name);
@@ -362,7 +378,8 @@ pub const Cache = struct {
                 return try b.clone(gpa);
             };
         }
-        const fresh = try c.inner.serviceFn.?(io, c.inner.context, gpa, name);
+        const inner = c.inner.interface.?;
+        const fresh = try inner.serviceFn.?(io, inner, gpa, name);
         c.keepService(io, key, now, fresh);
         return fresh;
     }
@@ -419,8 +436,8 @@ pub const Cache = struct {
         c.freeService(kv.key, &kv.value);
     }
 
-    fn cacheLookup(io: Io, context: ?*anyopaque, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress) LookupError![]IpAddress {
-        const c: *Cache = erased.restore(Cache, context);
+    fn cacheLookup(io: Io, interface: *Interface, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress) LookupError![]IpAddress {
+        const c: *Cache = @alignCast(@fieldParentPtr("resolving", interface));
         var key_buf: [Io.net.HostName.max_len]u8 = undefined;
         if (host.len > key_buf.len) return error.InvalidHostName;
         const key = std.ascii.lowerString(&key_buf, host);
@@ -506,13 +523,14 @@ const shakedown = @import("shakedown");
 /// A resolver that answers every name with 10.0.0.1 and ::2, counting.
 const Counting = struct {
     calls: u32 = 0,
+    resolving: Interface = .{ .lookupFn = answer },
 
     fn resolver(self: *Counting) Resolver {
-        return .{ .context = self, .lookupFn = answer };
+        return .{ .interface = &self.resolving };
     }
 
-    fn answer(_: Io, context: ?*anyopaque, _: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress) LookupError![]IpAddress {
-        const self: *Counting = erased.restore(Counting, context);
+    fn answer(_: Io, interface: *Interface, _: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress) LookupError![]IpAddress {
+        const self: *Counting = @alignCast(@fieldParentPtr("resolving", interface));
         self.calls += 1;
         const all = [_]IpAddress{ .{ .ip4 = .{ .bytes = .{ 10, 0, 0, 1 }, .port = port } }, .{ .ip6 = .loopback(port) } };
         return pick(&all, family, out);
@@ -531,11 +549,13 @@ const Counting = struct {
 /// A resolver that waits a moment, a point a cancelation would end it at,
 /// and answers 10.0.0.1.
 const Slow = struct {
-    fn resolver() Resolver {
-        return .{ .context = null, .lookupFn = answer };
+    resolving: Interface = .{ .lookupFn = answer },
+
+    fn resolver(s: *Slow) Resolver {
+        return .{ .interface = &s.resolving };
     }
 
-    fn answer(io: Io, _: ?*anyopaque, _: []const u8, port: u16, _: ?IpAddress.Family, out: []IpAddress) LookupError![]IpAddress {
+    fn answer(io: Io, _: *Interface, _: []const u8, port: u16, _: ?IpAddress.Family, out: []IpAddress) LookupError![]IpAddress {
         try io.sleep(.fromMilliseconds(20), .awake);
         out[0] = .{ .ip4 = .{ .bytes = .{ 10, 0, 0, 1 }, .port = port } };
         return out[0..1];
@@ -549,7 +569,8 @@ test "a lookup with no task for its limit is waited for, never canceled" {
     defer fio.deinit();
     var out: [4]IpAddress = undefined;
     var bounded = true;
-    const found = try Slow.resolver().lookupWithin(fio.io(), "slow.example", 80, null, &out, .literal("5s"), &bounded);
+    var slow: Slow = .{};
+    const found = try slow.resolver().lookupWithin(fio.io(), "slow.example", 80, null, &out, .literal("5s"), &bounded);
     try testing.expectEqual(@as(usize, 1), found.len);
     try testing.expect(!bounded);
 }
@@ -561,7 +582,7 @@ test "static entries answer their names on their ports, and pass the rest on" {
         .{ .host = "git.example", .port = 443, .addresses = &.{.{ .ip4 = .loopback(0) }} },
         .{ .host = "any.example", .addresses = &.{ .{ .ip6 = .loopback(0) }, .{ .ip4 = .loopback(0) } } },
     };
-    const s: Static = .{ .entries = &entries, .fallback = counting.resolver() };
+    var s: Static = .{ .entries = &entries, .fallback = counting.resolver() };
     var out: [4]IpAddress = undefined;
     const r = s.resolver();
     const git = try r.lookup(io, "GIT.example", 443, null, &out);

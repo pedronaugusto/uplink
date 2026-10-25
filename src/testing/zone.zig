@@ -29,12 +29,14 @@ pub const Zone = struct {
     /// Questions asked, of every type.
     asked: std.atomic.Value(u32) = .init(0),
 
-    pub fn transport(z: *Zone) Dns.Transport {
-        return .{ .context = z, .exchangeFn = exchange };
+    exchanging: Dns.Transport = .{ .exchangeFn = exchange },
+
+    pub fn transport(z: *Zone) *Dns.Transport {
+        return &z.exchanging;
     }
 
-    fn exchange(_: Io, context: ?*anyopaque, query: []const u8, answer: []u8) Dns.ExchangeError![]u8 {
-        const z: *Zone = @ptrCast(@alignCast(context.?)); // safe: `transport` passes a Zone
+    fn exchange(_: Io, t: *Dns.Transport, query: []const u8, answer: []u8) Dns.ExchangeError![]u8 {
+        const z: *Zone = @alignCast(@fieldParentPtr("exchanging", t));
         _ = z.asked.fetchAdd(1, .monotonic);
         return z.respond(query, answer) catch error.NoAnswer;
     }

@@ -94,7 +94,7 @@ pub const Options = struct {
     /// body as the handler wrote it.
     compression: ?Compression = null,
     /// Told every request, with its status and timing.
-    observer: ?Observer = null,
+    observer: ?*Observer = null,
     /// The most free buffers of each size kept.
     max_free_buffers: u32 = 64,
 };
@@ -157,12 +157,13 @@ pub const Timeouts = struct {
 
 /// Every request as it is answered, with its timing, in one callback,
 /// which must be quick and may be called from several tasks at once.
+/// A field of the type that observes, which `eventFn` finds by
+/// `@fieldParentPtr`; a server holds a pointer to it.
 pub const Observer = struct {
-    context: ?*anyopaque = null,
-    eventFn: *const fn (context: ?*anyopaque, event: Event) void,
+    eventFn: *const fn (o: *Observer, event: Event) void,
 
-    pub fn emit(o: Observer, event: Event) void {
-        o.eventFn(o.context, event);
+    pub fn emit(o: *Observer, event: Event) void {
+        o.eventFn(o, event);
     }
 
     pub const Event = union(enum) {

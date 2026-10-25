@@ -11,7 +11,6 @@
 //! until that request settles.
 
 const std = @import("std");
-const erased = @import("../erased.zig");
 const sync = @import("../sync.zig");
 const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
@@ -114,7 +113,7 @@ pub const AnswerError = error{
 /// secret from `credentials` and keep it for the origin, in place of any
 /// answer it had. False when nothing can answer: no challenge a secret can
 /// take, or no secret given.
-pub fn answer(oa: *OriginAuth, io: Io, credentials: Credentials, url: url_mod.Url, url_text: []const u8, challenges: []const auth.Challenge) AnswerError!bool {
+pub fn answer(oa: *OriginAuth, io: Io, credentials: *Credentials, url: url_mod.Url, url_text: []const u8, challenges: []const auth.Challenge) AnswerError!bool {
     const best = strongest(challenges) orelse return false;
     const query: Credentials.Query = .{
         .url = url_text,
@@ -233,7 +232,7 @@ fn unlist(oa: *OriginAuth, e: *Entry) void {
 /// A request that sent `e` has its response: a 401 refuses the answer,
 /// which is forgotten, and anything else takes it. The caller's store is
 /// told, once per answer.
-pub fn settle(oa: *OriginAuth, io: Io, e: *Entry, credentials: ?Credentials, accepted: bool) void {
+pub fn settle(oa: *OriginAuth, io: Io, e: *Entry, credentials: ?*Credentials, accepted: bool) void {
     var held = oa.entries.acquireUncancelable(io);
     const entries = held.value();
     const tell = !e.reported and credentials != null;
@@ -294,18 +293,20 @@ const Store = struct {
     refused: u32 = 0,
     secret: Credentials.Secret = .{ .password = .{ .user = "Mufasa", .password = "Circle of Life" } },
 
-    fn credentials(s: *Store) Credentials {
-        return .{ .context = s, .fillFn = fillFn, .doneFn = doneFn };
+    filling: Credentials = .{ .fillFn = fillFn, .doneFn = doneFn },
+
+    fn credentials(s: *Store) *Credentials {
+        return &s.filling;
     }
 
-    fn fillFn(_: Io, context: ?*anyopaque, _: Credentials.Query) Credentials.FillError!?Credentials.Secret {
-        const s: *Store = erased.restore(Store, context);
+    fn fillFn(_: Io, c: *Credentials, _: Credentials.Query) Credentials.FillError!?Credentials.Secret {
+        const s: *Store = @alignCast(@fieldParentPtr("filling", c));
         s.filled += 1;
         return s.secret;
     }
 
-    fn doneFn(_: Io, context: ?*anyopaque, _: Credentials.Query, _: Credentials.Secret, accepted: bool) void {
-        const s: *Store = erased.restore(Store, context);
+    fn doneFn(_: Io, c: *Credentials, _: Credentials.Query, _: Credentials.Secret, accepted: bool) void {
+        const s: *Store = @alignCast(@fieldParentPtr("filling", c));
         if (accepted) s.taken += 1 else s.refused += 1;
     }
 };

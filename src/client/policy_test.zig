@@ -304,19 +304,21 @@ const Store = struct {
     taken: u32 = 0,
     refused: u32 = 0,
 
-    fn credentials(s: *Store) Credentials {
-        return .{ .context = s, .fillFn = fill, .doneFn = done };
+    filling: Credentials = .{ .fillFn = fill, .doneFn = done },
+
+    fn credentials(s: *Store) *Credentials {
+        return &s.filling;
     }
 
-    fn fill(_: Io, context: ?*anyopaque, query: Credentials.Query) Credentials.FillError!?Credentials.Secret {
-        const s: *Store = @ptrCast(@alignCast(context.?)); // safe: the tests pass a Store
+    fn fill(_: Io, c: *Credentials, query: Credentials.Query) Credentials.FillError!?Credentials.Secret {
+        const s: *Store = @alignCast(@fieldParentPtr("filling", c));
         std.debug.assert(std.mem.eql(u8, query.realm.?, "r"));
         s.filled += 1;
         return s.secret;
     }
 
-    fn done(_: Io, context: ?*anyopaque, _: Credentials.Query, _: Credentials.Secret, accepted: bool) void {
-        const s: *Store = @ptrCast(@alignCast(context.?)); // safe: the tests pass a Store
+    fn done(_: Io, c: *Credentials, _: Credentials.Query, _: Credentials.Secret, accepted: bool) void {
+        const s: *Store = @alignCast(@fieldParentPtr("filling", c));
         if (accepted) s.taken += 1 else s.refused += 1;
     }
 };
@@ -645,13 +647,14 @@ test "a chunked body's trailer fields are read once the body is" {
 const Recorder = struct {
     buf: [512]u8 = undefined,
     len: usize = 0,
+    observing: Observer = .{ .eventFn = on },
 
-    fn observer(r: *Recorder) Observer {
-        return .{ .context = r, .eventFn = on };
+    fn observer(r: *Recorder) *Observer {
+        return &r.observing;
     }
 
-    fn on(context: ?*anyopaque, event: Observer.Event) void {
-        const r: *Recorder = @ptrCast(@alignCast(context.?)); // safe: the test passes a Recorder
+    fn on(o: *Observer, event: Observer.Event) void {
+        const r: *Recorder = @alignCast(@fieldParentPtr("observing", o));
         const line = switch (event) {
             .head => |h| std.mem.print(r.buf[r.len..], "head{d} ", .{h.status}),
             else => std.mem.print(r.buf[r.len..], "{t} ", .{event}),
@@ -663,13 +666,14 @@ const Recorder = struct {
 /// Adds the attempt's number as a field.
 const Numbering = struct {
     texts: [8][4]u8 = undefined,
+    preparing: Prepare = .{ .prepareFn = prepare },
 
-    fn hook(n: *Numbering) Prepare {
-        return .{ .context = n, .prepareFn = prepare };
+    fn hook(n: *Numbering) *Prepare {
+        return &n.preparing;
     }
 
-    fn prepare(_: Io, context: ?*anyopaque, attempt: *Prepare.Attempt) Prepare.Error!void {
-        const n: *Numbering = @ptrCast(@alignCast(context.?)); // safe: the test passes a Numbering
+    fn prepare(_: Io, p: *Prepare, attempt: *Prepare.Attempt) Prepare.Error!void {
+        const n: *Numbering = @alignCast(@fieldParentPtr("preparing", p));
         const text = std.mem.print(&n.texts[attempt.number], "{d}", .{attempt.number}) catch unreachable; // unreachable: fewer than eight attempts
         attempt.add(.{ .name = "Content-Type", .value = text }) catch return error.PrepareFailed;
     }
@@ -704,7 +708,7 @@ test "a proxy is chosen from the environment per request, and no_proxy goes arou
     try env.put("http_proxy", try std.mem.print(&proxy_url, "http://127.0.0.1:{d}", .{proxy.port}));
     try env.put("no_proxy", "bypass.test");
     const entries = [_]Resolver.Static.Entry{.{ .host = "bypass.test", .addresses = &.{.{ .ip4 = .loopback(0) }} }};
-    const static: Resolver.Static = .{ .entries = &entries };
+    var static: Resolver.Static = .{ .entries = &entries };
     var client: Client = .init(gpa, .{ .proxy = .{ .environment = .{ .env = &env, .rules = .lowercase } }, .resolver = static.resolver() });
     defer client.deinit(io);
     var buf: [64]u8 = undefined;
@@ -814,7 +818,7 @@ test "a host in Unicode goes as IDNA's ASCII form, to the resolver and in Host; 
     const server = try Server.start(gpa, io, .{ .answer = hostOf });
     defer server.stop();
     const entries = [_]Resolver.Static.Entry{.{ .host = "xn--bcher-kva.test", .addresses = &.{.{ .ip4 = .loopback(0) }} }};
-    const static: Resolver.Static = .{ .entries = &entries };
+    var static: Resolver.Static = .{ .entries = &entries };
     var client: Client = .init(gpa, .{ .resolver = static.resolver() });
     defer client.deinit(io);
     var url: [64]u8 = undefined;

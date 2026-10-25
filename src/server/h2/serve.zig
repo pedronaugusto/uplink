@@ -27,7 +27,7 @@ const Stream = Session.Stream;
 
 /// Serve `socket` as HTTP/2 to its end. The client's preface is the next
 /// thing on it.
-pub fn serve(context: *Context, handler: Handler, socket: *Socket) void {
+pub fn serve(context: *Context, handler: *const Handler, socket: *Socket) void {
     run(context, handler, socket, null);
 }
 
@@ -41,11 +41,11 @@ const Upgrade = struct { fields: []const hpack.Field, client_settings: []const u
 /// stream 1, already ended on the client's side, and `client_settings` the
 /// settings its `HTTP2-Settings` carried. The client's preface is the next
 /// thing on the socket.
-pub fn serveUpgraded(context: *Context, handler: Handler, socket: *Socket, fields: []const hpack.Field, client_settings: []const u8) void {
+pub fn serveUpgraded(context: *Context, handler: *const Handler, socket: *Socket, fields: []const hpack.Field, client_settings: []const u8) void {
     run(context, handler, socket, .{ .fields = fields, .client_settings = client_settings });
 }
 
-fn run(context: *Context, handler: Handler, socket: *Socket, upgrade: ?Upgrade) void {
+fn run(context: *Context, handler: *const Handler, socket: *Socket, upgrade: ?Upgrade) void {
     const io = socket.io;
     // A frame and its head must fit the read buffer.
     if (socket.input.interface.buffer.len < h2.head_len + 16384 and !socket.secure) {
@@ -136,7 +136,7 @@ fn grow(context: *Context, socket: *Socket) bool {
     return true;
 }
 
-fn readFrames(session: *Session, handler: Handler, tasks: *Io.Group, concurrent: bool) void {
+fn readFrames(session: *Session, handler: *const Handler, tasks: *Io.Group, concurrent: bool) void {
     const socket = session.socket;
     const context = session.context;
     const io = socket.io;
@@ -280,7 +280,7 @@ fn startStream(session: *Session, shared: *Session.Shared, id: u31, fields: []co
 }
 
 /// Answer the request on `st` with the handler, then forget the stream.
-fn answer(session: *Session, handler: Handler, st: *Stream) void {
+fn answer(session: *Session, handler: *const Handler, st: *Stream) void {
     const context = session.context;
     const io = session.socket.io;
     defer finish(session, st);

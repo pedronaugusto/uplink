@@ -16,7 +16,6 @@
 //! (`cache_failed`).
 
 const std = @import("std");
-const erased = @import("../erased.zig");
 const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -25,7 +24,7 @@ const rules = wire.cache;
 
 const Cache = @This();
 
-store: Store,
+store: *Store,
 options: Options,
 
 pub const Options = struct {
@@ -38,7 +37,7 @@ pub const Options = struct {
     max_entry: aegis.units.Bytes(u64) = .literal("8MiB"),
 };
 
-pub fn init(store: Store, options: Options) Cache {
+pub fn init(store: *Store, options: Options) Cache {
     return .{ .store = store, .options = options };
 }
 
@@ -71,64 +70,71 @@ pub const Body = union(enum) {
 /// status line and fields, as HTTP/1.1 writes them, framing fields and
 /// `Age` left out), and its body.
 pub const Entry = struct {
-    handle: *anyopaque,
+    handle: *Handle,
     meta: Meta,
     head: []const u8,
     body: Body,
 };
 
 /// A response being stored, between `begin` and `commit` or `abort`.
-pub const Writing = struct { handle: *anyopaque };
+pub const Writing = struct { handle: *Handle };
+
+/// What a store gives back as a variant it holds or writes: a field of the
+/// store's own record of it, which the store finds by `@fieldParentPtr`.
+/// It names the store, so a store can tell a handle of its own.
+pub const Handle = struct { store: *const Store };
 
 /// Where a cache keeps what it stores. Every call may be made by several
 /// tasks at once.
+///
+/// A field of the type that stores, which its functions find by
+/// `@fieldParentPtr`; a cache holds a pointer to it.
 pub const Store = struct {
-    context: *anyopaque,
     vtable: *const VTable,
 
     pub const VTable = struct {
         /// The variants stored under `key`, newest first, into `out`, each
         /// held until `release`.
-        lookup: *const fn (context: *anyopaque, io: Io, key: []const u8, out: []Entry) Error!usize,
-        release: *const fn (context: *anyopaque, io: Io, entry: *const Entry) void,
+        lookup: *const fn (s: *Store, io: Io, key: []const u8, out: []Entry) Error!usize,
+        release: *const fn (s: *Store, io: Io, entry: *const Entry) void,
         /// A new variant for `key`; null when the store declines it.
-        begin: *const fn (context: *anyopaque, io: Io, key: []const u8, meta: Meta, head: []const u8) Error!?Writing,
+        begin: *const fn (s: *Store, io: Io, key: []const u8, meta: Meta, head: []const u8) Error!?Writing,
         /// More of its body; false when it grew past what the store takes,
         /// after which only `abort` is called.
-        append: *const fn (context: *anyopaque, io: Io, writing: Writing, bytes: []const u8) Error!bool,
+        append: *const fn (s: *Store, io: Io, writing: Writing, bytes: []const u8) Error!bool,
         /// The body is whole: the variant replaces the one with the same
         /// `Vary` values under its key.
-        commit: *const fn (context: *anyopaque, io: Io, writing: Writing) Error!void,
-        abort: *const fn (context: *anyopaque, io: Io, writing: Writing) void,
+        commit: *const fn (s: *Store, io: Io, writing: Writing) Error!void,
+        abort: *const fn (s: *Store, io: Io, writing: Writing) void,
         /// A held variant's head and times after a 304 (§3.2, §4.3.4).
-        update: *const fn (context: *anyopaque, io: Io, entry: *const Entry, meta: Meta, head: []const u8) Error!void,
+        update: *const fn (s: *Store, io: Io, entry: *const Entry, meta: Meta, head: []const u8) Error!void,
         /// Every variant under `key` (§4.4).
-        remove: *const fn (context: *anyopaque, io: Io, key: []const u8) Error!void,
+        remove: *const fn (s: *Store, io: Io, key: []const u8) Error!void,
     };
 
-    pub fn lookup(s: Store, io: Io, key: []const u8, out: []Entry) Error!usize {
-        return s.vtable.lookup(s.context, io, key, out);
+    pub fn lookup(s: *Store, io: Io, key: []const u8, out: []Entry) Error!usize {
+        return s.vtable.lookup(s, io, key, out);
     }
-    pub fn release(s: Store, io: Io, entry: *const Entry) void {
-        s.vtable.release(s.context, io, entry);
+    pub fn release(s: *Store, io: Io, entry: *const Entry) void {
+        s.vtable.release(s, io, entry);
     }
-    pub fn begin(s: Store, io: Io, key: []const u8, meta: Meta, head: []const u8) Error!?Writing {
-        return s.vtable.begin(s.context, io, key, meta, head);
+    pub fn begin(s: *Store, io: Io, key: []const u8, meta: Meta, head: []const u8) Error!?Writing {
+        return s.vtable.begin(s, io, key, meta, head);
     }
-    pub fn append(s: Store, io: Io, writing: Writing, bytes: []const u8) Error!bool {
-        return s.vtable.append(s.context, io, writing, bytes);
+    pub fn append(s: *Store, io: Io, writing: Writing, bytes: []const u8) Error!bool {
+        return s.vtable.append(s, io, writing, bytes);
     }
-    pub fn commit(s: Store, io: Io, writing: Writing) Error!void {
-        return s.vtable.commit(s.context, io, writing);
+    pub fn commit(s: *Store, io: Io, writing: Writing) Error!void {
+        return s.vtable.commit(s, io, writing);
     }
-    pub fn abort(s: Store, io: Io, writing: Writing) void {
-        s.vtable.abort(s.context, io, writing);
+    pub fn abort(s: *Store, io: Io, writing: Writing) void {
+        s.vtable.abort(s, io, writing);
     }
-    pub fn update(s: Store, io: Io, entry: *const Entry, meta: Meta, head: []const u8) Error!void {
-        return s.vtable.update(s.context, io, entry, meta, head);
+    pub fn update(s: *Store, io: Io, entry: *const Entry, meta: Meta, head: []const u8) Error!void {
+        return s.vtable.update(s, io, entry, meta, head);
     }
-    pub fn remove(s: Store, io: Io, key: []const u8) Error!void {
-        return s.vtable.remove(s.context, io, key);
+    pub fn remove(s: *Store, io: Io, key: []const u8) Error!void {
+        return s.vtable.remove(s, io, key);
     }
 };
 
@@ -184,6 +190,8 @@ pub const Memory = struct {
     gpa: Allocator,
     max_bytes: u64,
     state: aegis.BlockingGuarded(State),
+    /// Private: the store's functions.
+    storing: Store = .{ .vtable = &vtable },
 
     const State = struct {
         /// Each key's newest variant; the others follow it on `next`.
@@ -194,6 +202,8 @@ pub const Memory = struct {
     };
 
     const Item = struct {
+        /// What a lookup or a write gives back for this item.
+        handle: Handle,
         key: []u8,
         vary: []u8,
         head: []u8,
@@ -238,8 +248,8 @@ pub const Memory = struct {
         m.* = undefined;
     }
 
-    pub fn store(m: *Memory) Store {
-        return .{ .context = m, .vtable = &vtable };
+    pub fn store(m: *Memory) *Store {
+        return &m.storing;
     }
 
     const vtable: Store.VTable = .{
@@ -253,16 +263,18 @@ pub const Memory = struct {
         .remove = remove,
     };
 
-    fn of(context: *anyopaque) *Memory {
-        return erased.restore(Memory, context);
+    fn of(iface: *Store) *Memory {
+        return @alignCast(@fieldParentPtr("storing", iface));
     }
 
-    fn itemOf(handle: *anyopaque) *Item {
-        return erased.restore(Item, handle);
+    /// The item `handle` is a field of: one of this store's own.
+    fn itemOf(m: *const Memory, handle: *Handle) *Item {
+        aegis.assert.pre(handle.store == &m.storing, "a handle this store gave");
+        return @alignCast(@fieldParentPtr("handle", handle));
     }
 
     fn entryOf(i: *Item) Entry {
-        return .{ .handle = i, .meta = .{ .requested = i.requested, .received = i.received, .vary = i.vary }, .head = i.head, .body = .{ .bytes = i.body.items } };
+        return .{ .handle = &i.handle, .meta = .{ .requested = i.requested, .received = i.received, .vary = i.vary }, .head = i.head, .body = .{ .bytes = i.body.items } };
     }
 
     fn free(m: *Memory, i: *Item) void {
@@ -275,8 +287,8 @@ pub const Memory = struct {
         m.gpa.destroy(i);
     }
 
-    fn lookup(context: *anyopaque, io: Io, key: []const u8, out: []Entry) Error!usize {
-        const m = of(context);
+    fn lookup(iface: *Store, io: Io, key: []const u8, out: []Entry) Error!usize {
+        const m = of(iface);
         var held = m.state.acquireUncancelable(io);
         defer held.deinit(io);
         const s = held.value();
@@ -293,18 +305,18 @@ pub const Memory = struct {
         return n;
     }
 
-    fn release(context: *anyopaque, io: Io, entry: *const Entry) void {
-        const m = of(context);
-        const i = itemOf(entry.handle);
+    fn release(iface: *Store, io: Io, entry: *const Entry) void {
+        const m = of(iface);
+        const i = m.itemOf(entry.handle);
         var held = m.state.acquireUncancelable(io);
         defer held.deinit(io);
         i.holders -= 1;
         if (i.holders == 0 and i.gone) m.free(i);
     }
 
-    fn begin(context: *anyopaque, io: Io, key: []const u8, meta: Meta, head: []const u8) Error!?Writing {
+    fn begin(iface: *Store, io: Io, key: []const u8, meta: Meta, head: []const u8) Error!?Writing {
         _ = io;
-        const m = of(context);
+        const m = of(iface);
         if (key.len + meta.vary.len + head.len > m.max_bytes) return null;
         const i = try m.gpa.create(Item);
         errdefer m.gpa.destroy(i);
@@ -312,22 +324,22 @@ pub const Memory = struct {
         errdefer m.gpa.free(owned_key);
         const vary = try m.gpa.dupe(u8, meta.vary);
         errdefer m.gpa.free(vary);
-        i.* = .{ .key = owned_key, .vary = vary, .head = try m.gpa.dupe(u8, head), .body = .empty, .requested = meta.requested, .received = meta.received };
-        return .{ .handle = i };
+        i.* = .{ .key = owned_key, .vary = vary, .head = try m.gpa.dupe(u8, head), .body = .empty, .requested = meta.requested, .received = meta.received, .handle = .{ .store = &m.storing } };
+        return .{ .handle = &i.handle };
     }
 
-    fn append(context: *anyopaque, io: Io, writing: Writing, bytes: []const u8) Error!bool {
+    fn append(iface: *Store, io: Io, writing: Writing, bytes: []const u8) Error!bool {
         _ = io;
-        const m = of(context);
-        const i = itemOf(writing.handle);
+        const m = of(iface);
+        const i = m.itemOf(writing.handle);
         if (i.size() + bytes.len > m.max_bytes) return false;
         try i.body.appendSlice(m.gpa, bytes);
         return true;
     }
 
-    fn commit(context: *anyopaque, io: Io, writing: Writing) Error!void {
-        const m = of(context);
-        const i = itemOf(writing.handle);
+    fn commit(iface: *Store, io: Io, writing: Writing) Error!void {
+        const m = of(iface);
+        const i = m.itemOf(writing.handle);
         var held = m.state.acquireUncancelable(io);
         defer held.deinit(io);
         const s = held.value();
@@ -400,14 +412,15 @@ pub const Memory = struct {
         };
     }
 
-    fn abort(context: *anyopaque, io: Io, writing: Writing) void {
+    fn abort(iface: *Store, io: Io, writing: Writing) void {
         _ = io;
-        of(context).free(itemOf(writing.handle));
+        const m = of(iface);
+        m.free(m.itemOf(writing.handle));
     }
 
-    fn update(context: *anyopaque, io: Io, entry: *const Entry, meta: Meta, head: []const u8) Error!void {
-        const m = of(context);
-        const i = itemOf(entry.handle);
+    fn update(iface: *Store, io: Io, entry: *const Entry, meta: Meta, head: []const u8) Error!void {
+        const m = of(iface);
+        const i = m.itemOf(entry.handle);
         const fresh = try m.gpa.dupe(u8, head);
         errdefer m.gpa.free(fresh);
         var held = m.state.acquireUncancelable(io);
@@ -428,8 +441,8 @@ pub const Memory = struct {
         m.evict(s);
     }
 
-    fn remove(context: *anyopaque, io: Io, key: []const u8) Error!void {
-        const m = of(context);
+    fn remove(iface: *Store, io: Io, key: []const u8) Error!void {
+        const m = of(iface);
         var held = m.state.acquireUncancelable(io);
         defer held.deinit(io);
         const s = held.value();

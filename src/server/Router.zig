@@ -38,7 +38,9 @@ hosts: std.ArrayList(HostTree) = .empty,
 /// Private: every route, for the conflict check.
 routes: std.ArrayList(*const Route) = .empty,
 /// What a request no pattern matches is handed to; null answers 404.
-not_found: ?Handler = null,
+not_found: ?*const Handler = null,
+/// Private: the router as a handler.
+handling: Handler = .{ .handleFn = handled },
 /// After `add` refused a pattern as a conflict: the pattern it conflicts
 /// with.
 conflict: ?[]const u8 = null,
@@ -47,7 +49,7 @@ const HostTree = struct { host: []const u8, root: Node };
 
 const Route = struct {
     pattern: Pattern,
-    handler: Handler,
+    handler: *const Handler,
 };
 
 const Node = struct {
@@ -99,7 +101,7 @@ pub const AddError = Pattern.Error || error{
 };
 
 /// Route requests `pattern` matches to `target`.
-pub fn add(r: *Router, pattern: []const u8, target: Handler) AddError!void {
+pub fn add(r: *Router, pattern: []const u8, target: *const Handler) AddError!void {
     const a = r.arena.allocator();
     const text = try a.dupe(u8, pattern);
     const segments = try a.alloc(Pattern.Segment, Pattern.countSegments(text));
@@ -298,14 +300,19 @@ fn pickRest(routes: []const *const Route, method: []const u8, rest: []const u8, 
 }
 
 /// The router as the server's handler.
-pub fn handler(r: *Router) Handler {
-    return .init(r, serve);
+pub fn handler(r: *const Router) *const Handler {
+    return &r.handling;
+}
+
+fn handled(h: *const Handler, io: Io, request: *Request, response: *Response) anyerror!void {
+    const r: *const Router = @alignCast(@fieldParentPtr("handling", h));
+    return dispatch(r, io, request, response);
 }
 
 /// Route `request`: redirect a path that is not clean or that names a
 /// subtree without its `/`, answer 405 or 404, or call the handler with the
 /// captures in `request.params`.
-pub fn serve(r: *Router, io: Io, request: *Request, response: *Response) anyerror!void {
+pub fn serve(r: *const Router, io: Io, request: *Request, response: *Response) anyerror!void {
     return dispatch(r, io, request, response);
 }
 
@@ -470,7 +477,7 @@ fn matched(r: *const Router, method: Method, path: []const u8) ?[]const u8 {
 test "the most specific pattern wins, whatever the order they were added in" {
     var r: Router = .init(testing.allocator);
     defer r.deinit();
-    const h: Handler = .of(nop);
+    const h: *const Handler = .of(nop);
     for ([_][]const u8{ "/", "/a/", "/a/b", "/a/{x}", "/a/{x}/c", "GET /a/b", "/static/{rest...}", "/{$}", "other.com/a/b", "/x/{y}/z/" }) |p| try r.add(p, h);
     try testing.expectEqualStrings("GET /a/b", matched(&r, .GET, "/a/b").?);
     try testing.expectEqualStrings("GET /a/b", matched(&r, .HEAD, "/a/b").?);
@@ -491,7 +498,7 @@ test "the most specific pattern wins, whatever the order they were added in" {
 test "conflicting patterns are refused, naming the one already there" {
     var r: Router = .init(testing.allocator);
     defer r.deinit();
-    const h: Handler = .of(nop);
+    const h: *const Handler = .of(nop);
     try r.add("/a/{x}", h);
     try testing.expectError(error.Conflict, r.add("/a/{y}", h));
     try testing.expectEqualStrings("/a/{x}", r.conflict.?);
@@ -504,7 +511,7 @@ test "conflicting patterns are refused, naming the one already there" {
 test "a path under another method is gathered for Allow, and captures come back in order" {
     var r: Router = .init(testing.allocator);
     defer r.deinit();
-    const h: Handler = .of(nop);
+    const h: *const Handler = .of(nop);
     try r.add("POST /items/{id}", h);
     try r.add("GET /items/{id}", h);
     try r.add("GET /users/{user}/repos/{repo...}", h);

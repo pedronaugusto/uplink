@@ -26,6 +26,8 @@ const Files = @This();
 /// The directory served; the caller keeps it open.
 root: Io.Dir,
 options: Options,
+/// Private: the file server as a handler.
+handling: Handler = .{ .handleFn = handled },
 
 pub const Options = struct {
     /// The file a directory is answered with; null answers a directory 404.
@@ -43,12 +45,17 @@ pub fn init(root: Io.Dir, options: Options) Files {
 }
 
 /// The file server as the server's handler.
-pub fn handler(f: *Files) Handler {
-    return .init(f, serve);
+pub fn handler(f: *const Files) *const Handler {
+    return &f.handling;
+}
+
+fn handled(h: *const Handler, io: Io, request: *Request, response: *Response) anyerror!void {
+    const f: *const Files = @alignCast(@fieldParentPtr("handling", h));
+    return f.serve(io, request, response);
 }
 
 /// Answer `request` from the directory.
-pub fn serve(f: *Files, io: Io, request: *Request, response: *Response) anyerror!void {
+pub fn serve(f: *const Files, io: Io, request: *Request, response: *Response) anyerror!void {
     if (!request.method.eql(.GET) and !request.method.eql(.HEAD)) {
         try response.header("Allow", "GET, HEAD");
         return Router.plain(io, response, .method_not_allowed, "method not allowed\n");
@@ -107,7 +114,7 @@ fn redirectTo(io: Io, request: *const Request, response: *Response, suffix: []co
 /// A file's modification time to the nanosecond, for its entity tag.
 const Mtime = aegis.units.Instant(.real, .nanosecond, i96);
 
-fn serveFile(f: *Files, io: Io, request: *Request, response: *Response, relative: []const u8) anyerror!void {
+fn serveFile(f: *const Files, io: Io, request: *Request, response: *Response, relative: []const u8) anyerror!void {
     const file = f.root.openFile(io, relative, .{}) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => return Router.plain(io, response, .not_found, "not found\n"),

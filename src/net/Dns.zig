@@ -10,7 +10,6 @@
 //! asked (`Options.resolver`).
 
 const std = @import("std");
-const erased = @import("../erased.zig");
 const sync = @import("../sync.zig");
 const reactor = @import("reactor");
 const Allocator = std.mem.Allocator;
@@ -25,19 +24,22 @@ const Timed = @import("Timed.zig");
 
 const Dns = @This();
 
-transport: Transport,
+/// What carries the queries: a field of the type that does.
+transport: *Transport,
 /// The search domains and `ndots`; its slices must outlive the resolver.
 config: dns.Config = .{},
+/// Private: the resolver's functions.
+resolving: Resolver.Interface = .{ .lookupFn = lookupFn, .serviceFn = serviceFn },
 
-/// What carries a query to a server and its answer back.
+/// What carries a query to a server and its answer back: a field of the
+/// type that carries it, which `exchangeFn` finds by `@fieldParentPtr`.
 pub const Transport = struct {
-    context: ?*anyopaque,
     /// Send `query`, a whole message, and return the answer to it in
     /// `answer`, its id and question checked.
-    exchangeFn: *const fn (io: Io, context: ?*anyopaque, query: []const u8, answer: []u8) ExchangeError![]u8,
+    exchangeFn: *const fn (io: Io, t: *Transport, query: []const u8, answer: []u8) ExchangeError![]u8,
 
-    pub fn exchange(t: Transport, io: Io, query: []const u8, answer: []u8) ExchangeError![]u8 {
-        return t.exchangeFn(io, t.context, query, answer);
+    pub fn exchange(t: *Transport, io: Io, query: []const u8, answer: []u8) ExchangeError![]u8 {
+        return t.exchangeFn(io, t, query, answer);
     }
 };
 
@@ -48,8 +50,8 @@ pub const ExchangeError = error{
     Canceled,
 };
 
-pub fn resolver(d: *const Dns) Resolver {
-    return .{ .context = erased.erase(d), .lookupFn = lookupFn, .serviceFn = serviceFn };
+pub fn resolver(d: *Dns) Resolver {
+    return .{ .interface = &d.resolving };
 }
 
 /// The ids of queries: random, so an answer cannot be guessed.
@@ -67,8 +69,8 @@ const Found = union(enum) {
     no_name,
 };
 
-fn lookupFn(io: Io, context: ?*anyopaque, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress) Resolver.LookupError![]IpAddress {
-    const d: *const Dns = erased.restore(Dns, context);
+fn lookupFn(io: Io, interface: *Resolver.Interface, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress) Resolver.LookupError![]IpAddress {
+    const d: *Dns = @alignCast(@fieldParentPtr("resolving", interface));
     var candidates = d.config.candidates(host);
     var name_buf: [dns.max_name]u8 = undefined;
     while (candidates.next(&name_buf)) |name| {
@@ -243,8 +245,8 @@ pub fn https(d: *const Dns, io: Io, gpa: Allocator, host: []const u8) (NameError
     return null;
 }
 
-fn serviceFn(io: Io, context: ?*anyopaque, gpa: Allocator, name: []const u8) Resolver.ServiceError!?Resolver.Binding {
-    const d: *const Dns = erased.restore(Dns, context);
+fn serviceFn(io: Io, interface: *Resolver.Interface, gpa: Allocator, name: []const u8) Resolver.ServiceError!?Resolver.Binding {
+    const d: *Dns = @alignCast(@fieldParentPtr("resolving", interface));
     return d.https(io, gpa, name) catch |err| switch (err) {
         error.Canceled => error.Canceled,
         error.OutOfMemory => error.OutOfMemory,
@@ -280,6 +282,8 @@ pub const Stub = struct {
     /// Private: what keeps each wait's deadline.
     deadlines: reactor.net.Deadlines,
     unenforced: sync.Counter = .init(.fromRaw(0)),
+    /// Private: the transport's function.
+    exchanging: Transport = .{ .exchangeFn = exchange },
 
     /// A stub asking `servers`, each on port 53 unless it names another.
     pub fn init(servers: []const IpAddress, options: Options) Stub {
@@ -312,16 +316,16 @@ pub const Stub = struct {
         s.* = undefined;
     }
 
-    pub fn transport(s: *Stub) Transport {
-        return .{ .context = s, .exchangeFn = exchange };
+    pub fn transport(s: *Stub) *Transport {
+        return &s.exchanging;
     }
 
     fn keeper(s: *Stub) Timed.Keeper {
         return .{ .deadlines = &s.deadlines, .unenforced = &s.unenforced };
     }
 
-    fn exchange(io: Io, context: ?*anyopaque, query: []const u8, answer: []u8) ExchangeError![]u8 {
-        const s: *Stub = erased.restore(Stub, context);
+    fn exchange(io: Io, t: *Transport, query: []const u8, answer: []u8) ExchangeError![]u8 {
+        const s: *Stub = @alignCast(@fieldParentPtr("exchanging", t));
         if (s.servers.len == 0) return error.NoAnswer;
         const first: usize = if (s.rotate) turnOf(s.turn.fetchAddWrapping(.fromRaw(1), .monotonic), s.servers.len) else 0;
         for (0..s.attempts) |_| for (0..s.servers.len) |i| {
@@ -506,7 +510,7 @@ test "a stub asks a server over UDP, and over TCP when the answer is truncated" 
     const servers = [_]IpAddress{fake.address};
     var stub: Stub = .init(&servers, .{ .timeout = .literal("2s"), .attempts = 1 });
     defer stub.deinit(io);
-    const d: Dns = .{ .transport = stub.transport() };
+    var d: Dns = .{ .transport = stub.transport() };
     const r = d.resolver();
     var out: [8]IpAddress = undefined;
     const got = try r.lookup(io, "small.test", 443, null, &out);
@@ -563,7 +567,7 @@ test "search domains are tried as resolv.conf orders them" {
     const servers = [_]IpAddress{fake.address};
     var stub: Stub = .init(&servers, .{ .timeout = .literal("2s"), .attempts = 1 });
     defer stub.deinit(io);
-    const d: Dns = .{ .transport = stub.transport(), .config = .parse("search nowhere.test test\n") };
+    var d: Dns = .{ .transport = stub.transport(), .config = .parse("search nowhere.test test\n") };
     var out: [8]IpAddress = undefined;
     const got = try d.resolver().lookup(io, "small", 80, .ip4, &out);
     try testing.expectEqual(1, got.len);
@@ -731,7 +735,7 @@ test "service answers are kept for their time, none included, and a static name 
     const gpa = testing.allocator;
     const entries = [_]zone.Entry{.{ .name = "svc.example", .https = &.{ .{ .priority = 2, .target = "b.example" }, .{ .priority = 1 } } }};
     var z: zone.Zone = .{ .entries = &entries };
-    const d: Dns = .{ .transport = z.transport() };
+    var d: Dns = .{ .transport = z.transport() };
     var cache: Cache = .init(gpa, d.resolver(), .{ .ttl = .literal("60s") });
     defer cache.deinit(io);
     const r = cache.resolver();
@@ -752,8 +756,8 @@ test "service answers are kept for their time, none included, and a static name 
     try testing.expectEqual(@as(u32, 3), z.asked.load(.monotonic));
     // A name a static entry answers is reached at its addresses alone.
     const pinned = [_]Static.Entry{.{ .host = "svc.example", .addresses = &.{.{ .ip4 = .loopback(0) }} }};
-    const s: Static = .{ .entries = &pinned, .fallback = d.resolver() };
+    var s: Static = .{ .entries = &pinned, .fallback = d.resolver() };
     try testing.expectEqual(null, try s.resolver().service(io, gpa, "svc.example", 8443));
-    try testing.expect(s.resolver().serviceFn != null);
+    try testing.expect(s.resolver().readsServices());
     try testing.expectEqual(null, try Resolver.system.service(io, gpa, "svc.example", 443));
 }
