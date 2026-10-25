@@ -373,7 +373,6 @@ environment itself.
   URL is not upgraded by one (RFC 9460 §9.5), and through a proxy, which
   finds the target itself, none is asked for.
 - No NTLM, Negotiate, PAC files or OCSP, and no HTTP cache.
-- No local address or interface to bind a connection to.
 - No public suffix list: a `CookieJar` takes one through
   `Options.public_suffix`, and without one refuses a cookie for a domain of
   one label.
@@ -385,8 +384,13 @@ environment itself.
 
 ## Platforms
 
-Linux, macOS and Windows are tested in CI. TCP_NODELAY is set on every socket,
-SO_NOSIGPIPE where the system has it, and TCP keepalive when asked. On
+Linux, macOS and Windows are tested in CI. A socket's options are reactor's
+(`Dial.socket` for the client, `socket` in a server's options): TCP_NODELAY
+on by default, keepalive and its timings, the buffers and the traffic class
+when asked, set before a client's connect, and SO_NOSIGPIPE where the system
+has it. A refused option is returned by name, never passed over. `Dial`
+also takes a local address (only the name's addresses of its family are
+then tried) and an interface. On
 Windows, with no task to spare, a read timeout cannot be kept: `Io.Threaded`
 refuses a timed socket read there, and the client counts it in
 `timeouts_unenforced`. For the same reason a request with `expect_continue`

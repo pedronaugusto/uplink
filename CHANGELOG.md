@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- A connection's socket options are reactor's: `Dial.socket` (and `dial.Options.socket`), a `reactor.net.SocketOptions` with `nodelay` on by default, replaces `Dial.nodelay` and `Dial.keepalive`, and adds keepalive's interval and probe count, the buffers and the traffic class. A server's `socket` option replaces its `keepalive`. `net.sys.tune` is gone. A refused option was passed over; a dial now returns it at once (`DialError.OptionUnsupported`), and a server closes that connection and tells its observer (`option_refused`). The client's errors (`Client` calls, `Outgoing.FinishError`, `transport.Connection.OpenError`) gain `OptionUnsupported`, `AccessDenied` and `AddressFamilyMismatch`.
+
+### Changed
+
+- reactor 0.8.5, for its socket options.
+
+### Added
+
+- `Dial.local_address` and `Dial.interface`: a connection from a local address or through an interface, by reactor's connect. With a local address only the name's addresses of its family are tried, and a name with none is `DialError.AddressFamilyMismatch`. A dial whose every address was refused to this process is `DialError.AccessDenied`, where it was `ConnectionFailed`.
+
 ## [0.9.3] - 2026-10-22
 
 ### Changed

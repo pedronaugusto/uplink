@@ -27,7 +27,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const sys = @import("../net/sys.zig");
+const reactor = @import("reactor");
 const Context = @import("Context.zig");
 const Connection = @import("Connection.zig");
 
@@ -193,7 +193,11 @@ fn serveOpened(s: *Server, io: Io, stream: Io.net.Stream) void {
         _ = k.open.fetchSub(1, .acq_rel);
         io.futexWake(u32, &k.open.raw, 1);
     }
-    sys.tune(io, stream.socket.handle, .{ .nodelay = true, .keepalive = s.context.options.keepalive });
+    reactor.net.setOptions(stream.socket, s.context.options.socket) catch |err| {
+        if (s.context.options.observer) |o| o.emit(.{ .option_refused = .{ .error_name = @errorName(err) } });
+        stream.close(io);
+        return;
+    };
     if (s.context.options.observer) |o| o.emit(.{ .accepted = .{ .remote = stream.socket.address } });
     Connection.serve(&s.context, s.handler, io, stream);
 }

@@ -97,6 +97,13 @@ pub const SendError = error{
     InvalidHeader,
     NameNotResolved,
     ConnectionFailed,
+    /// A socket option `Dial.socket` asked for is one the system has none
+    /// of, or refuses.
+    OptionUnsupported,
+    /// Every address was refused to this process.
+    AccessDenied,
+    /// The name has no address of `Dial.local_address`'s family.
+    AddressFamilyMismatch,
     /// A timeout ran out: `Diagnostics.timeout` says which.
     TimedOut,
     /// The TLS handshake failed: `Diagnostics.tls_error` says why.

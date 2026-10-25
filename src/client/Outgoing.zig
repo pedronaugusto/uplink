@@ -95,6 +95,13 @@ pub const FinishError = error{
     InvalidHeader,
     NameNotResolved,
     ConnectionFailed,
+    /// A socket option `Dial.socket` asked for is one the system has none
+    /// of, or refuses.
+    OptionUnsupported,
+    /// Every address was refused to this process.
+    AccessDenied,
+    /// The name has no address of `Dial.local_address`'s family.
+    AddressFamilyMismatch,
     TimedOut,
     TlsFailed,
     ClientCertificateRejected,
