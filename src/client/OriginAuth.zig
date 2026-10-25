@@ -11,6 +11,7 @@
 //! until that request settles.
 
 const std = @import("std");
+const sync = @import("../sync.zig");
 const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -27,7 +28,7 @@ gpa: Allocator,
 entries: aegis.BlockingGuarded(std.ArrayList(*Entry)),
 /// The number of listed answers, readable without the lock: a client that
 /// never answered a challenge pays nothing per request.
-live: std.atomic.Value(u32) = .init(0),
+live: sync.Gauge = .init(.fromRaw(0)),
 
 /// One origin's answer.
 pub const Entry = struct {
@@ -87,7 +88,7 @@ fn find(entries: *const std.ArrayList(*Entry), url: url_mod.Url) ?*Entry {
 /// `target` at `url`, when the origin has an answer, and hold the answer
 /// for the request, which must `settle` it. Returns the answer held.
 pub fn writeField(oa: *OriginAuth, io: Io, w: *Io.Writer, url: url_mod.Url, method: []const u8, target: []const u8) Io.Writer.Error!?*Entry {
-    if (oa.live.load(.acquire) == 0) return null;
+    if (oa.live.load(.acquire).eql(.fromRaw(0))) return null;
     var held = oa.entries.acquireUncancelable(io);
     defer held.deinit(io);
     const e = find(held.value(), url) orelse return null;
@@ -218,7 +219,7 @@ fn list(oa: *OriginAuth, io: Io, e: *Entry) Allocator.Error!void {
     // More answers than a u32 counts are more than memory holds.
     const grown = aegis.int.cast(u32, entries.items.len + 1) catch return error.OutOfMemory;
     entries.appendAssumeCapacity(e);
-    oa.live.store(grown, .release);
+    oa.live.store(.fromRaw(grown), .release);
 }
 
 /// Drop the list's reference to `e`, already out of the list.
@@ -241,7 +242,7 @@ pub fn settle(oa: *OriginAuth, io: Io, e: *Entry, credentials: ?Credentials, acc
             _ = entries.swapRemove(i);
             break;
         };
-        oa.live.store(aegis.int.cast(u32, entries.items.len) catch unreachable, .release); // unreachable: the list was counted into a u32 when it grew
+        oa.live.store(.fromRaw(aegis.int.cast(u32, entries.items.len) catch unreachable), .release); // unreachable: the list was counted into a u32 when it grew
         oa.unlist(e);
     }
     held.deinit(io);

@@ -8,6 +8,7 @@
 //! goes, and the server says so by allowing one stream at once.
 
 const std = @import("std");
+const sync = @import("../../sync.zig");
 const Io = std.Io;
 const wire = @import("uplink.wire");
 const h2 = wire.h2;
@@ -318,7 +319,7 @@ fn answer(session: *Session, handler: Handler, st: *Stream) void {
     var response: Response = .init(session.socket, head.method.eql(.HEAD), false, request.headers.getKnown(.@"accept-encoding"));
     response.stream = st;
     defer response.release(io);
-    _ = context.counters.requests.fetchAdd(1, .monotonic);
+    sync.bump(&context.counters.requests);
     const arrived = Io.Clock.awake.now(io);
     handler.handle(io, &request, &response) catch |err| {
         if (context.options.observer) |o| o.emit(.{ .failed = .{ .method = head.method.name, .path = target.path, .error_name = @errorName(err), .head_sent = response.headSent() } });

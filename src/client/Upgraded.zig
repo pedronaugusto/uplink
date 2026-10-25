@@ -63,7 +63,7 @@ pub fn unbind(u: *Upgraded) void {
 
 /// Close the stream; TLS close_notify is sent as a courtesy.
 pub fn close(u: *Upgraded, io: Io) void {
-    _ = u.ctx.counters.in_use.fetchSub(1, .monotonic);
+    _ = u.ctx.counters.in_use.fetchSubWrapping(.fromRaw(1), .monotonic);
     u.pool.close(io, .{ .h1 = u.conn });
     u.* = undefined;
 }

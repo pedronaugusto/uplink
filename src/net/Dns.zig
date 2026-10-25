@@ -10,6 +10,7 @@
 //! asked (`Options.resolver`).
 
 const std = @import("std");
+const sync = @import("../sync.zig");
 const reactor = @import("reactor");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -257,6 +258,14 @@ pub const max_records = 16;
 
 /// The configured name servers, asked over UDP and over TCP when an answer
 /// is truncated: each in turn, `attempts` rounds, each wait `timeout`.
+/// The server a query starts at on its turn: the turns go round the
+/// servers, whatever the count has reached.
+fn turnOf(turn: sync.Events, servers: usize) usize {
+    // aegis: no-danger: the count only picks where a query starts; nothing reads it as a count
+    const round = turn.raw() % servers;
+    return aegis.int.cast(usize, round) catch unreachable; // unreachable: below the number of servers, a usize
+}
+
 pub const Stub = struct {
     servers: []const IpAddress,
     timeout: Duration = .literal("5s"),
@@ -264,10 +273,10 @@ pub const Stub = struct {
     /// Start each query at the next server in turn.
     rotate: bool = false,
     /// Private: the next server to start at, under `rotate`.
-    turn: std.atomic.Value(u32) = .init(0),
+    turn: sync.Counter = .init(.fromRaw(0)),
     /// Private: what keeps each wait's deadline.
     deadlines: reactor.net.Deadlines,
-    unenforced: std.atomic.Value(u64) = .init(0),
+    unenforced: sync.Counter = .init(.fromRaw(0)),
 
     /// A stub asking `servers`, each on port 53 unless it names another.
     pub fn init(servers: []const IpAddress, options: Options) Stub {
@@ -311,7 +320,7 @@ pub const Stub = struct {
     fn exchange(io: Io, context: ?*anyopaque, query: []const u8, answer: []u8) ExchangeError![]u8 {
         const s: *Stub = @ptrCast(@alignCast(context.?)); // safe: `transport` passes a Stub
         if (s.servers.len == 0) return error.NoAnswer;
-        const first: usize = if (s.rotate) s.turn.fetchAdd(1, .monotonic) % s.servers.len else 0;
+        const first: usize = if (s.rotate) turnOf(s.turn.fetchAddWrapping(.fromRaw(1), .monotonic), s.servers.len) else 0;
         for (0..s.attempts) |_| for (0..s.servers.len) |i| {
             const server = s.servers[(first + i) % s.servers.len];
             const got = s.overUdp(io, server, query, answer) catch |err| switch (err) {

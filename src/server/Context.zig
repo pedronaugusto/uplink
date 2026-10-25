@@ -3,6 +3,7 @@
 //! and the list of connections being served, which `shutdown` walks.
 
 const std = @import("std");
+const sync = @import("../sync.zig");
 const aegis = @import("aegis");
 const reactor = @import("reactor");
 const Allocator = std.mem.Allocator;
@@ -37,9 +38,10 @@ tickets: ?cloak.tls.TicketKeys,
 /// Private: the connections being served.
 live: aegis.BlockingGuarded(Live),
 /// Private: set by `stop`.
-stopping: std.atomic.Value(bool) = .init(false),
-/// Private: set when the server is stopping and no connection is left.
-drained: Io.Event = .unset,
+stopping: sync.Latch = .init(.clear),
+/// Private: signaled when a connection leaves the live list or ends, for
+/// the accept loop's wait for room and `stop`'s wait for the last one.
+changed: aegis.Condition = .initLimit(std.math.maxInt(usize)),
 counters: Counters = .{},
 
 /// How plain connections may speak HTTP/2.
@@ -188,12 +190,10 @@ pub const Timeout = enum { head, idle, activity, handshake };
 
 /// What a server has done, counted as it went.
 pub const Counters = struct {
-    accepted: std.atomic.Value(u64) = .init(0),
-    requests: std.atomic.Value(u64) = .init(0),
-    /// Connections open now.
-    open: std.atomic.Value(u32) = .init(0),
+    accepted: sync.Counter = .init(.fromRaw(0)),
+    requests: sync.Counter = .init(.fromRaw(0)),
     /// Timeouts no task and no `Io` could keep.
-    timeouts_unenforced: std.atomic.Value(u64) = .init(0),
+    timeouts_unenforced: sync.Counter = .init(.fromRaw(0)),
 };
 
 /// The connections being served: each is on the list while it lives, and
@@ -201,6 +201,9 @@ pub const Counters = struct {
 const Live = struct {
     list: std.DoublyLinkedList = .{},
     count: u32 = 0,
+    /// Connections open: counted from their accept, before their task
+    /// starts and their entry joins the list, until they end.
+    open: u32 = 0,
 };
 
 /// One connection on the live list: what `stop` needs of it.
@@ -285,7 +288,42 @@ pub fn keeper(c: *Context) Timed.Keeper {
 
 /// Whether the server is stopping.
 pub fn isStopping(c: *const Context) bool {
-    return c.stopping.load(.acquire);
+    return c.stopping.load(.acquire) == .set;
+}
+
+/// Count a connection open, from its accept.
+pub fn opened(c: *Context, io: Io) void {
+    var held = c.live.acquireUncancelable(io);
+    defer held.deinit(io);
+    held.value().open += 1;
+}
+
+/// Count a connection ended, and wake a wait for room.
+pub fn ended(c: *Context, io: Io) void {
+    {
+        var held = c.live.acquireUncancelable(io);
+        defer held.deinit(io);
+        held.value().open -= 1;
+    }
+    c.changed.broadcast(io);
+}
+
+/// The connections open now.
+pub fn openNow(c: *Context, io: Io) u32 {
+    var held = c.live.acquireUncancelable(io);
+    defer held.deinit(io);
+    return held.value().open;
+}
+
+/// Wait while `max` connections are open.
+pub fn waitForRoom(c: *Context, io: Io, max: u32) Io.Cancelable!void {
+    var held = try c.live.acquire(io);
+    defer held.deinit(io);
+    while (held.value().open >= max) c.changed.wait(io, &held, .none) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        // No deadline, and no limit on the waiters.
+        error.Timeout, error.WaiterLimit => unreachable,
+    };
 }
 
 /// Put `entry` on the live list.
@@ -304,7 +342,7 @@ pub fn leave(c: *Context, io: Io, entry: *Entry) void {
     const live = held.value();
     live.list.remove(&entry.node);
     live.count -= 1;
-    if (live.count == 0 and c.isStopping()) c.drained.set(io);
+    if (live.count == 0 and c.isStopping()) c.changed.broadcast(io);
 }
 
 /// `entry`'s socket is closing: nothing ends it from here on.
@@ -327,18 +365,18 @@ pub fn setIdle(c: *Context, io: Io, entry: *Entry, idle: bool) bool {
 /// Stop: end the connections waiting for a request at once, let the rest
 /// finish for up to `Timeouts.shutdown`, then end their sockets under them.
 pub fn stop(c: *Context, io: Io) void {
-    c.stopping.store(true, .release);
+    c.stopping.store(.set, .release);
     c.abort(io, .idle);
-    const until = Io.Clock.awake.now(io).addDuration(span.toIo(c.options.timeouts.shutdown));
-    while (!c.drained.isSet()) {
-        // A wait can wake early: it is tried again until the grace is out.
-        c.drained.waitTimeout(io, .{ .deadline = .{ .raw = until, .clock = .awake } }) catch |err| switch (err) {
-            error.Timeout => if (Io.Clock.awake.now(io).nanoseconds >= until.nanoseconds) break,
-            // The caller is canceled: what is left ends now.
-            error.Canceled => break,
-        };
-    }
+    c.drain(io, .{ .deadline = .{ .raw = Io.Clock.awake.now(io).addDuration(span.toIo(c.options.timeouts.shutdown)), .clock = .awake } });
     c.abort(io, .all);
+}
+
+/// Wait for the live list to empty, until `grace` ends. A cancel of the
+/// caller ends it too: what is left ends now.
+fn drain(c: *Context, io: Io, grace: Io.Timeout) void {
+    var held = c.live.acquireUncancelable(io);
+    defer held.deinit(io);
+    while (held.value().count != 0) c.changed.wait(io, &held, grace) catch return;
 }
 
 /// End the sockets of the idle connections, or of all of them.
@@ -346,7 +384,6 @@ fn abort(c: *Context, io: Io, which: enum { idle, all }) void {
     var held = c.live.acquireUncancelable(io);
     defer held.deinit(io);
     const live = held.value();
-    if (live.count == 0) c.drained.set(io);
     var it = live.list.first;
     while (it) |node| : (it = node.next) {
         const entry: *Entry = @fieldParentPtr("node", node);

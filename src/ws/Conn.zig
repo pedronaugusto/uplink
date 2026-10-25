@@ -19,6 +19,7 @@
 //! A connection must not move once it is used.
 
 const std = @import("std");
+const sync = @import("../sync.zig");
 const aegis = @import("aegis");
 const warp = @import("warp");
 const Allocator = std.mem.Allocator;
@@ -42,7 +43,7 @@ reading: Reading = .{},
 /// Private: what writers share, under its lock.
 writing: aegis.BlockingGuarded(Writing),
 /// Private: a close frame was sent.
-close_sent: std.atomic.Value(bool) = .init(false),
+close_sent: sync.Latch = .init(.clear),
 /// The close the peer sent, once it has: its code (1005 when it gave
 /// none) and reason.
 peer_close: ?PeerClose = null,
@@ -532,7 +533,7 @@ pub fn send(c: *Conn, io: Io, kind: Kind, payload: []const u8) WriteError!void {
     var held = c.writing.acquire(io) catch return error.Canceled;
     defer held.deinit(io);
     const w = held.value();
-    if (c.close_sent.load(.acquire)) return error.Closed;
+    if (c.close_sent.load(.acquire) == .set) return error.Closed;
     const opcode: ws.Opcode = if (kind == .text) .text else .binary;
     if (c.deflate != null) {
         const coded = try c.compress(w, payload, true);
@@ -627,7 +628,7 @@ fn fragment(c: *Conn, io: Io, mw: *MessageWriter, parts: []const []const u8, spl
     var held = c.writing.acquire(io) catch return error.Canceled;
     defer held.deinit(io);
     const w = held.value();
-    if (c.close_sent.load(.acquire)) return error.Closed;
+    if (c.close_sent.load(.acquire) == .set) return error.Closed;
     const first = mw.opcode != .continuation;
     // The frame's payload in one piece: compressed, or gathered.
     w.gathered.clearRetainingCapacity();
@@ -679,7 +680,7 @@ fn sendControl(c: *Conn, io: Io, opcode: ws.Opcode, payload: []const u8) WriteEr
     if (payload.len > 125) return error.PayloadTooLarge;
     var held = c.writing.acquire(io) catch return error.Canceled;
     defer held.deinit(io);
-    if (c.close_sent.load(.acquire)) return error.Closed;
+    if (c.close_sent.load(.acquire) == .set) return error.Closed;
     try c.frame(io, held.value(), .{ .opcode = opcode, .len = payload.len }, payload);
     c.transport.flushFn(c.transport.context, io) catch return c.streamFailed();
 }
@@ -691,7 +692,7 @@ fn sendClose(c: *Conn, io: Io, code: u16, reason: []const u8) WriteError!void {
     @memcpy(payload[2..][0..n], reason[0..n]);
     var held = c.writing.acquire(io) catch return error.Canceled;
     defer held.deinit(io);
-    if (c.close_sent.swap(true, .acq_rel)) return error.Closed;
+    if (c.close_sent.swap(.set, .acq_rel) == .set) return error.Closed;
     try c.frame(io, held.value(), .{ .opcode = .close, .len = 2 + n }, payload[0 .. 2 + n]);
     c.transport.flushFn(c.transport.context, io) catch return c.streamFailed();
 }

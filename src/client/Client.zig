@@ -7,6 +7,7 @@
 //! has made a request: connections point at its shared state.
 
 const std = @import("std");
+const sync = @import("../sync.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const Request = @import("Request.zig");
@@ -98,7 +99,7 @@ pub fn begin(c: *Client, io: Io, request: Request) SendError!Outgoing {
     if (request.diagnostics) |d| d.stage = .write;
     run.sent = true;
     const expect = request.expect_continue and (length orelse 1) != 0;
-    if (lease.reused) _ = s.context.counters.reused.fetchAdd(1, .monotonic);
+    if (lease.reused) sync.bump(&s.context.counters.reused);
     switch (lease.kind) {
         .h1 => |conn| {
             run.writeHead(io, conn, r, if (length) |n| .{ .length = n } else .chunked, expect) catch
@@ -134,10 +135,10 @@ pub const Stats = struct {
 pub fn stats(c: *const Client) Stats {
     const k = &c.shared.context.counters;
     return .{
-        .connections_opened = k.opened.load(.monotonic),
-        .reused = k.reused.load(.monotonic),
+        .connections_opened = k.opened.load(.monotonic).raw(),
+        .reused = k.reused.load(.monotonic).raw(),
         .idle = c.shared.pool.count(),
-        .in_use = k.in_use.load(.monotonic),
-        .timeouts_unenforced = k.timeouts_unenforced.load(.monotonic),
+        .in_use = k.in_use.load(.monotonic).raw(),
+        .timeouts_unenforced = k.timeouts_unenforced.load(.monotonic).raw(),
     };
 }

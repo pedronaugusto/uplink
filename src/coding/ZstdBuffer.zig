@@ -16,7 +16,7 @@ const Allocator = std.mem.Allocator;
 const ZstdBuffer = @This();
 
 /// Private: the buffer kept for the next body.
-kept: std.atomic.Value(?[*]u8) = .init(null),
+kept: aegis.Guarded(?[*]u8) = .init(null),
 /// The largest frame window a body may ask for.
 max_window: aegis.units.Bytes(u32),
 /// Private: the length of every buffer, the decoder's state included.
@@ -64,20 +64,34 @@ pub fn split(z: *const ZstdBuffer, buffer: []u8) struct { []u8, *State } {
 
 /// A buffer: the one kept, or a new one.
 pub fn acquire(z: *ZstdBuffer, gpa: Allocator) Allocator.Error![]u8 {
-    if (z.kept.swap(null, .acq_rel)) |b| return b[0..z.len];
+    {
+        var held = z.kept.acquire();
+        defer held.deinit();
+        if (held.value().*) |b| {
+            held.value().* = null;
+            return b[0..z.len];
+        }
+    }
     return gpa.alignedAlloc(u8, .@"64", z.len);
 }
 
 /// Give a buffer back: kept when none is, freed otherwise.
 pub fn release(z: *ZstdBuffer, gpa: Allocator, buffer: []u8) void {
     std.debug.assert(buffer.len == z.len);
-    if (z.kept.cmpxchgStrong(null, buffer.ptr, .acq_rel, .acquire) == null) return;
+    {
+        var held = z.kept.acquire();
+        defer held.deinit();
+        if (held.value().* == null) {
+            held.value().* = buffer.ptr;
+            return;
+        }
+    }
     gpa.free(aligned(buffer));
 }
 
 /// Free the kept buffer.
 pub fn deinit(z: *ZstdBuffer, gpa: Allocator) void {
-    if (z.kept.load(.acquire)) |b| gpa.free(aligned(b[0..z.len]));
+    if (z.kept.teardown().*) |b| gpa.free(aligned(b[0..z.len]));
     z.* = undefined;
 }
 

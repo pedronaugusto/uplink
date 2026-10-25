@@ -7,6 +7,7 @@
 //! else; its write buffer is borrowed while it answers.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const cloak = @import("cloak");
 const tls = @import("../tls.zig");
@@ -43,7 +44,7 @@ phase: Phase = .head,
 /// clock.
 until: ?Io.Timestamp = null,
 /// Why the first operation that failed did; `failed` reads it.
-failure: std.atomic.Value(Failure) = .init(.none),
+failure: aegis.Atomic(Failure) = .init(.none),
 /// HTTP/2: one task reads while the streams' tasks write, each write
 /// within the activity timeout whatever the reading task waits for.
 multiplexed: bool = false,
@@ -193,12 +194,8 @@ fn expired(io: Io, until: Io.Timeout) bool {
 
 /// Wait out `until`, which nothing ends sooner but a cancelation.
 fn waitOut(io: Io, until: Io.Timeout) Io.Cancelable!bool {
-    var never: Io.Event = .unset;
-    never.waitTimeout(io, until) catch |err| return switch (err) {
-        error.Timeout => false,
-        error.Canceled => error.Canceled,
-    };
-    unreachable; // unreachable: nothing sets the event
+    try until.sleep(io);
+    return false;
 }
 
 /// The task serving the connection was canceled: no operation follows.

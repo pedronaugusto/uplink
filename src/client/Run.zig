@@ -13,6 +13,7 @@
 //! response.
 
 const std = @import("std");
+const sync = @import("../sync.zig");
 const Io = std.Io;
 const span = @import("../span.zig");
 const Duration = span.Duration;
@@ -249,7 +250,7 @@ pub fn acquire(run: *Run, io: Io, r: Context.Route) Error!Lease {
         switch (got) {
             .expired => |k| c.pool.close(io, k),
             .shared => |h| {
-                _ = c.context.counters.in_use.fetchAdd(1, .monotonic);
+                _ = c.context.counters.in_use.fetchAddWrapping(.fromRaw(1), .monotonic);
                 if (c.context.observer) |o| o.emit(.{ .reused = .{ .host = r.host(), .port = r.port } });
                 return .{ .kind = .{ .h2 = h }, .reused = true };
             },
@@ -268,7 +269,7 @@ pub fn acquire(run: *Run, io: Io, r: Context.Route) Error!Lease {
                     c.pool.close(io, .{ .h1 = conn });
                     continue;
                 }
-                _ = c.context.counters.in_use.fetchAdd(1, .monotonic);
+                _ = c.context.counters.in_use.fetchAddWrapping(.fromRaw(1), .monotonic);
                 if (c.context.observer) |o| o.emit(.{ .reused = .{ .host = r.host(), .port = r.port } });
                 return .{ .kind = .{ .h1 = conn }, .reused = true };
             },
@@ -280,7 +281,7 @@ pub fn acquire(run: *Run, io: Io, r: Context.Route) Error!Lease {
                         else => |e| e,
                     };
                 };
-                _ = c.context.counters.in_use.fetchAdd(1, .monotonic);
+                _ = c.context.counters.in_use.fetchAddWrapping(.fromRaw(1), .monotonic);
                 if (!conn.speaksH2()) return .{ .kind = .{ .h1 = conn }, .reused = false };
                 return .{ .kind = .{ .h2 = try run.multiplex(io, conn) }, .reused = false };
             },
@@ -293,14 +294,14 @@ pub fn acquire(run: *Run, io: Io, r: Context.Route) Error!Lease {
 fn multiplex(run: *Run, io: Io, conn: *Connection) Error!*H2 {
     const c = run.shared;
     const h = H2.create(&c.context, io, conn) catch |err| {
-        _ = c.context.counters.in_use.fetchSub(1, .monotonic);
+        _ = c.context.counters.in_use.fetchSubWrapping(.fromRaw(1), .monotonic);
         c.pool.close(io, .{ .h1 = conn });
         return err;
     };
-    h.users.store(1, .monotonic);
+    h.users.store(.fromRaw(1), .monotonic);
     c.pool.share(io, h) catch {
-        _ = c.context.counters.in_use.fetchSub(1, .monotonic);
-        h.users.store(0, .monotonic);
+        _ = c.context.counters.in_use.fetchSubWrapping(.fromRaw(1), .monotonic);
+        h.users.store(.fromRaw(0), .monotonic);
         c.pool.close(io, .{ .h2 = h });
         return error.OutOfMemory;
     };
@@ -346,7 +347,7 @@ fn attempt(run: *Run, io: Io) Error!Response {
             }
             return err;
         };
-        if (lease.reused) _ = c.context.counters.reused.fetchAdd(1, .monotonic);
+        if (lease.reused) sync.bump(&c.context.counters.reused);
         return response;
     }
 }
@@ -411,7 +412,7 @@ pub fn switchToH2(run: *Run, io: Io, switched: *Response, lease: *Lease) H2Error
         error.OutOfMemory => error.OutOfMemory,
         error.ConnectionFailed => conn.writeError(),
     };
-    up.h2.users.store(1, .monotonic);
+    up.h2.users.store(.fromRaw(1), .monotonic);
     c.pool.share(io, up.h2) catch {
         up.h2.abandon();
         return error.OutOfMemory;
@@ -708,7 +709,7 @@ fn writeFields(run: *Run, io: Io, w: *Io.Writer, r: Context.Route, absolute_form
 /// else from the answers the client keeps for the origin; none when the
 /// caller wrote the field.
 fn writeAuthorization(run: *Run, io: Io, w: *Io.Writer) Io.Writer.Error!void {
-    if (run.request.auth == null and run.shared.origin_auth.live.load(.acquire) == 0) return;
+    if (run.request.auth == null and run.shared.origin_auth.live.load(.acquire).eql(.fromRaw(0))) return;
     if (named(run.request.headers, "authorization") and !run.left_origin) return;
     if (run.request.auth) |a| if (!run.left_origin) {
         try w.writeAll("Authorization: ");

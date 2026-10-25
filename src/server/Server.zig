@@ -25,6 +25,8 @@
 //! its connections point at it.
 
 const std = @import("std");
+const aegis = @import("aegis");
+const sync = @import("../sync.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const reactor = @import("reactor");
@@ -55,12 +57,13 @@ handler: Handler,
 tasks: Io.Group = .init,
 /// Private: the accept loop, when it runs as a task of its own.
 acceptor: Io.Group = .init,
-/// Private: set when the accept loop has stopped.
-accepting_done: Io.Event = .unset,
+/// Private: whether the accept loop has stopped, and the wait for it.
+accepting_done: aegis.BlockingGuarded(bool) = .init(false),
+accepting_ended: aegis.Condition = .initLimit(std.math.maxInt(usize)),
 /// Private: whether `serve` or `shutdown` has taken the accept loop's
 /// group to cancel: one of them, once, since a group is not canceled from
 /// two tasks at once.
-acceptor_taken: std.atomic.Value(bool) = .init(false),
+acceptor_taken: sync.Latch = .init(.clear),
 
 /// A server answering every request with `handler`.
 pub fn init(gpa: Allocator, options: Options, handler: Handler) Server {
@@ -86,14 +89,15 @@ pub const Stats = struct {
     timeouts_unenforced: u64,
 };
 
-/// The server's counts now.
-pub fn stats(s: *const Server) Stats {
+/// The server's counts now. The connections open are read under the lock
+/// their count is kept under.
+pub fn stats(s: *Server, io: Io) Stats {
     const k = &s.context.counters;
     return .{
-        .accepted = k.accepted.load(.monotonic),
-        .requests = k.requests.load(.monotonic),
-        .open = k.open.load(.monotonic),
-        .timeouts_unenforced = k.timeouts_unenforced.load(.monotonic),
+        .accepted = k.accepted.load(.monotonic).raw(),
+        .requests = k.requests.load(.monotonic).raw(),
+        .open = s.context.openNow(io),
+        .timeouts_unenforced = k.timeouts_unenforced.load(.monotonic).raw(),
     };
 }
 
@@ -114,7 +118,7 @@ pub fn serve(s: *Server, io: Io, listener: *Io.net.Server) ServeError!void {
         acceptLoop(s, io, listener, &result);
         return result;
     };
-    s.accepting_done.wait(io) catch |err| {
+    s.awaitAccepting(io) catch |err| {
         s.reapAcceptor(io);
         return err;
     };
@@ -125,13 +129,34 @@ pub fn serve(s: *Server, io: Io, listener: *Io.net.Server) ServeError!void {
 /// Cancel the accept loop's task and wait for it, unless the other of
 /// `serve` and `shutdown` has.
 fn reapAcceptor(s: *Server, io: Io) void {
-    if (!s.acceptor_taken.swap(true, .acq_rel)) s.acceptor.cancel(io);
+    if (s.acceptor_taken.swap(.set, .acq_rel) == .clear) s.acceptor.cancel(io);
+}
+
+/// Wait for the accept loop to stop.
+fn awaitAccepting(s: *Server, io: Io) Io.Cancelable!void {
+    var held = try s.accepting_done.acquire(io);
+    defer held.deinit(io);
+    while (!held.value().*) s.accepting_ended.wait(io, &held, .none) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        // No deadline, and no limit on the waiters.
+        error.Timeout, error.WaiterLimit => unreachable,
+    };
+}
+
+/// Say the accept loop has stopped.
+fn acceptingStopped(s: *Server, io: Io) void {
+    {
+        var held = s.accepting_done.acquireUncancelable(io);
+        defer held.deinit(io);
+        held.value().* = true;
+    }
+    s.accepting_ended.broadcast(io);
 }
 
 fn acceptLoop(s: *Server, io: Io, listener: *Io.net.Server, result: *ServeError!void) void {
-    defer s.accepting_done.set(io);
+    defer s.acceptingStopped(io);
     while (!s.context.isStopping()) {
-        if (s.context.options.max_connections) |max| s.waitForRoom(io, max) catch |err| {
+        if (s.context.options.max_connections) |max| s.context.waitForRoom(io, max) catch |err| {
             result.* = err;
             return;
         };
@@ -154,7 +179,7 @@ fn acceptLoop(s: *Server, io: Io, listener: *Io.net.Server, result: *ServeError!
         }
         // Counted open before its task starts, so the next turn's wait for
         // room sees it.
-        s.opened();
+        s.opened(io);
         s.tasks.concurrent(io, serveOpened, .{ s, io, stream }) catch {
             // No task to spare: this connection is served here, to its end.
             s.serveOpened(io, stream);
@@ -162,37 +187,22 @@ fn acceptLoop(s: *Server, io: Io, listener: *Io.net.Server, result: *ServeError!
     }
 }
 
-/// Wait while `max` connections are open. A connection's end wakes it.
-fn waitForRoom(s: *Server, io: Io, max: u32) Io.Cancelable!void {
-    const open = &s.context.counters.open;
-    while (true) {
-        const now = open.load(.acquire);
-        if (now < max) return;
-        try io.futexWait(u32, &open.raw, now);
-    }
-}
-
 /// Serve `stream`, which the server now owns, to its end on the caller's
 /// task: every request on it, until the client closes it, a timeout, an
 /// answer that closes it, or `shutdown`.
 pub fn serveConnection(s: *Server, io: Io, stream: Io.net.Stream) void {
-    s.opened();
+    s.opened(io);
     s.serveOpened(io, stream);
 }
 
-fn opened(s: *Server) void {
-    const k = &s.context.counters;
-    _ = k.accepted.fetchAdd(1, .monotonic);
-    _ = k.open.fetchAdd(1, .acq_rel);
+fn opened(s: *Server, io: Io) void {
+    sync.bump(&s.context.counters.accepted);
+    s.context.opened(io);
 }
 
 /// Serve a connection already counted open, and count it closed.
 fn serveOpened(s: *Server, io: Io, stream: Io.net.Stream) void {
-    const k = &s.context.counters;
-    defer {
-        _ = k.open.fetchSub(1, .acq_rel);
-        io.futexWake(u32, &k.open.raw, 1);
-    }
+    defer s.context.ended(io);
     reactor.net.setOptions(stream.socket, s.context.options.socket) catch |err| {
         if (s.context.options.observer) |o| o.emit(.{ .option_refused = .{ .error_name = @errorName(err) } });
         stream.close(io);
@@ -207,7 +217,7 @@ fn serveOpened(s: *Server, io: Io, stream: Io.net.Stream) void {
 /// `Connection: close`) for up to `Timeouts.shutdown`, then end the rest.
 /// Call it from a task other than `serve`'s; `serve` then returns.
 pub fn shutdown(s: *Server, io: Io) void {
-    s.context.stopping.store(true, .release);
+    s.context.stopping.store(.set, .release);
     // A task of its own takes its accept's cancel; inline, the accept
     // returns at the next connection, which it closes.
     s.reapAcceptor(io);

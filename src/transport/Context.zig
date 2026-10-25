@@ -4,6 +4,7 @@
 //! points at it, so the client must not move once it has opened one.
 
 const std = @import("std");
+const sync = @import("../sync.zig");
 const aegis = @import("aegis");
 const reactor = @import("reactor");
 const Allocator = std.mem.Allocator;
@@ -245,7 +246,8 @@ pub const Proxies = struct {
     };
 
     const EnvSlot = struct {
-        state: enum(u8) { unread, none, some, invalid } = .unread,
+        /// Read once, under the arena's lock, and published here.
+        state: aegis.Atomic(enum(u8) { unread, none, some, invalid }) = .init(.unread),
         slot: Slot = undefined,
         /// The user and password of `slot`, wiped before they are freed.
         credential: ?aegis.SecretBytes = null,
@@ -260,7 +262,7 @@ pub const Proxies = struct {
     pub fn deinit(p: *Proxies, io: Io) void {
         if (p.choice == .fixed) p.fixed.auth.deinit(io);
         for (&p.from_env) |*e| {
-            if (e.state == .some) e.slot.auth.deinit(io);
+            if (e.state.load(.acquire) == .some) e.slot.auth.deinit(io);
             if (e.credential) |*c| c.deinit();
         }
         var held = p.arena.acquireUncancelable(io);
@@ -283,8 +285,8 @@ pub const Proxies = struct {
             .fixed => return &p.fixed,
             .environment => |e| {
                 const slot = &p.from_env[@intFromBool(url.secure)];
-                if (@atomicLoad(@TypeOf(slot.state), &slot.state, .acquire) == .unread) try p.read(io, e, url.secure);
-                switch (slot.state) {
+                if (slot.state.load(.acquire) == .unread) try p.read(io, e, url.secure);
+                switch (slot.state.load(.acquire)) {
                     .unread => unreachable, // unreachable: `read` leaves it read
                     .none => return null,
                     .invalid => return error.InvalidProxy,
@@ -300,22 +302,22 @@ pub const Proxies = struct {
         var held = p.arena.acquireUncancelable(io);
         defer held.deinit(io);
         const slot = &p.from_env[@intFromBool(secure)];
-        if (slot.state != .unread) return;
+        if (slot.state.load(.acquire) != .unread) return;
         const a = held.value().allocator();
         if (p.no_proxy == null) p.no_proxy = try a.dupe(u8, Proxy.noProxyValue(e.env, e.rules));
         const value = Proxy.environmentValue(e.env, secure, e.rules) orelse {
-            @atomicStore(@TypeOf(slot.state), &slot.state, .none, .release);
+            slot.state.store(.none, .release);
             return;
         };
         const proxy = Proxy.parseKept(p.gpa, a, &slot.credential, value, e.rules) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidProxy => {
-                @atomicStore(@TypeOf(slot.state), &slot.state, .invalid, .release);
+                slot.state.store(.invalid, .release);
                 return;
             },
         };
         slot.slot = .{ .proxy = proxy };
-        @atomicStore(@TypeOf(slot.state), &slot.state, .some, .release);
+        slot.state.store(.some, .release);
     }
 };
 
@@ -323,14 +325,14 @@ pub const Proxies = struct {
 /// decision reads together, each one atomic.
 pub const Counters = struct {
     /// Connections made.
-    opened: std.atomic.Value(u64) = .init(0),
+    opened: sync.Counter = .init(.fromRaw(0)),
     /// Exchanges that went over a kept connection.
-    reused: std.atomic.Value(u64) = .init(0),
+    reused: sync.Counter = .init(.fromRaw(0)),
     /// Connections an exchange holds now.
-    in_use: std.atomic.Value(u32) = .init(0),
+    in_use: sync.Gauge = .init(.fromRaw(0)),
     /// Timeouts asked for that could not be kept, for want of a task to
     /// keep them or an `Io` that bounds the operation.
-    timeouts_unenforced: std.atomic.Value(u64) = .init(0),
+    timeouts_unenforced: sync.Counter = .init(.fromRaw(0)),
 };
 
 /// The system's authorities, read once, at the first verifying handshake

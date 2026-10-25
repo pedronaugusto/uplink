@@ -424,7 +424,7 @@ fn drain(r: *Response, io: Io) void {
 /// otherwise; the connection the pool puts out to make room is closed too,
 /// and one idle past its time.
 pub fn release(io: Io, ctx: *Context, pool: *Pool, conn: *Connection, reusable: bool) void {
-    _ = ctx.counters.in_use.fetchSub(1, .monotonic);
+    _ = ctx.counters.in_use.fetchSubWrapping(.fromRaw(1), .monotonic);
     if (!reusable) return pool.close(io, .{ .h1 = conn });
     conn.park(io);
     const kept = pool.keep(io, .{ .h1 = conn });
@@ -434,7 +434,7 @@ pub fn release(io: Io, ctx: *Context, pool: *Pool, conn: *Connection, reusable: 
 /// Give back an exchange's share of an HTTP/2 connection, its stream
 /// finished.
 pub fn releaseShared(io: Io, ctx: *Context, pool: *Pool, h: *H2) void {
-    _ = ctx.counters.in_use.fetchSub(1, .monotonic);
+    _ = ctx.counters.in_use.fetchSubWrapping(.fromRaw(1), .monotonic);
     pool.unshare(io, h);
 }
 

@@ -16,6 +16,7 @@
 //! connection given back is handed straight to the first waiter.
 
 const std = @import("std");
+const sync = @import("../sync.zig");
 const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -31,9 +32,11 @@ gpa: Allocator,
 /// Private: the idle connections and the limited routes, reached only
 /// through the lock beside them.
 state: aegis.BlockingGuarded(State),
+/// Private: broadcast when a waiter is granted its route, under `state`.
+grants: aegis.Condition = .initLimit(std.math.maxInt(usize)),
 /// `State.len`, readable without the lock: `Client.stats` reads it on its
 /// own, and a counter beside the lock is the design, not a second owner.
-idle_count: std.atomic.Value(u32) = .init(0),
+idle_count: sync.Gauge = .init(.fromRaw(0)),
 options: Options,
 
 /// What the lock guards.
@@ -104,7 +107,6 @@ const RouteState = struct {
 /// An exchange waiting for its route.
 const Waiter = struct {
     node: std.DoublyLinkedList.Node = .{},
-    event: Io.Event = .unset,
     granted: Grant = .none,
 
     const Grant = union(enum) { none, open, idle: Kind };
@@ -163,23 +165,23 @@ pub const AcquireError = error{
 pub fn acquire(p: *Pool, io: Io, route: *const Route, deadline: ?Io.Timestamp, waited: *bool) AcquireError!Acquired {
     waited.* = false;
     var w: Waiter = .{};
+    var held = p.state.acquireUncancelable(io);
+    defer held.deinit(io);
     const state = enlist: {
-        var held = p.state.acquireUncancelable(io);
-        defer held.deinit(io);
         const s = held.value();
         var i: usize = 0;
         while (i < s.multiplexed.items.len) : (i += 1) {
             const m = &s.multiplexed.items[i];
             const h = m.h;
             if (!h.conn.route.eql(route)) continue;
-            const unused = h.users.load(.acquire) == 0;
+            const unused = h.users.load(.acquire).eql(.fromRaw(0));
             // One idle past its time, or that can carry nothing more, goes.
             if (unused and (!h.usable(io) or p.expiredAt(.{ .kind = .{ .h2 = h }, .since = m.since }, awake.now(io)))) {
                 _ = s.multiplexed.swapRemove(i);
                 return .{ .expired = .{ .h2 = h } };
             }
             if (!h.canOpen(io)) continue;
-            _ = h.users.fetchAdd(1, .monotonic);
+            _ = h.users.fetchAddWrapping(.fromRaw(1), .monotonic);
             m.since = null;
             return .{ .shared = h };
         }
@@ -195,25 +197,23 @@ pub fn acquire(p: *Pool, io: Io, route: *const Route, deadline: ?Io.Timestamp, w
     };
     waited.* = true;
     const timeout: Io.Timeout = if (deadline) |d| .{ .deadline = .{ .raw = d, .clock = .awake } } else .none;
-    const outcome = w.event.waitTimeout(io, timeout);
-    var held = p.state.acquireUncancelable(io);
-    defer held.deinit(io);
-    const s = held.value();
-    switch (w.granted) {
-        .none => {
-            state.waiters.remove(&w.node);
-            p.forget(s, state);
-            outcome catch |err| return switch (err) {
-                error.Timeout => error.TimedOut,
-                error.Canceled => error.Canceled,
-            };
-            unreachable; // unreachable: a waiter is woken only once granted
-        },
+    while (w.granted == .none) p.grants.wait(io, &held, timeout) catch |err| {
         // Granted as the wait gave up: the grant is taken all the same; a
         // canceled exchange gives it back through the caller's cleanup.
-        .open => return .open,
-        .idle => |k| return .{ .idle = k },
-    }
+        if (w.granted != .none) break;
+        state.waiters.remove(&w.node);
+        p.forget(held.value(), state);
+        return switch (err) {
+            error.Timeout => error.TimedOut,
+            error.Canceled => error.Canceled,
+            error.WaiterLimit => unreachable, // unreachable: the waiters have no limit
+        };
+    };
+    return switch (w.granted) {
+        .none => unreachable, // unreachable: the wait ends granted, or returned above
+        .open => .open,
+        .idle => |k| .{ .idle = k },
+    };
 }
 
 /// The idle connection last kept for `route`, under the lock.
@@ -282,7 +282,7 @@ pub fn keep(p: *Pool, io: Io, k: Kind) Kept {
         if (findState(s, k.route())) |state| if (state.waiters.popFirst()) |node| {
             const w: *Waiter = @fieldParentPtr("node", node);
             w.granted = .{ .idle = k };
-            w.event.set(io);
+            p.grants.broadcast(io);
             return .{};
         };
     }
@@ -307,7 +307,7 @@ pub fn keep(p: *Pool, io: Io, k: Kind) Kept {
     }
     s.idle[s.len] = .{ .kind = k, .since = now };
     s.len += 1;
-    p.idle_count.store(@intCast(s.len), .monotonic); // safe: `len` is at most `max_idle`, a u16
+    p.idle_count.store(.fromRaw(@intCast(s.len)), .monotonic); // safe: `len` is at most `max_idle`, a u16
     return kept;
 }
 
@@ -326,7 +326,7 @@ pub fn unshare(p: *Pool, io: Io, h: *H2) void {
         var held = p.state.acquireUncancelable(io);
         defer held.deinit(io);
         const s = held.value();
-        const last = h.users.fetchSub(1, .acq_rel) == 1;
+        const last = h.users.fetchSubWrapping(.fromRaw(1), .acq_rel).eql(.fromRaw(1));
         if (!last) break :blk false;
         for (s.multiplexed.items, 0..) |*m, i| if (m.h == h) {
             if (h.usable(io)) {
@@ -372,7 +372,7 @@ pub fn closed(p: *Pool, io: Io, route: *const Route) void {
     if (limited.waiters.popFirst()) |node| {
         const w: *Waiter = @fieldParentPtr("node", node);
         w.granted = .open;
-        w.event.set(io);
+        p.grants.broadcast(io);
         return;
     }
     limited.open -= 1;
@@ -388,7 +388,7 @@ fn removeAt(p: *Pool, s: *State, i: usize) Idle {
     const entry = s.idle[i];
     @memmove(s.idle[i .. s.len - 1], s.idle[i + 1 .. s.len]);
     s.len -= 1;
-    p.idle_count.store(@intCast(s.len), .monotonic); // safe: `len` is at most `max_idle`, a u16
+    p.idle_count.store(.fromRaw(@intCast(s.len)), .monotonic); // safe: `len` is at most `max_idle`, a u16
     return entry;
 }
 
@@ -404,7 +404,7 @@ pub fn drain(p: *Pool, io: Io) ?Kind {
 
 /// How many connections are idle, without the lock.
 pub fn count(p: *const Pool) u32 {
-    return p.idle_count.load(.monotonic);
+    return p.idle_count.load(.monotonic).raw();
 }
 
 const testing = std.testing;

@@ -4,6 +4,7 @@
 //! next or closed.
 
 const std = @import("std");
+const sync = @import("../sync.zig");
 const aegis = @import("aegis");
 const Io = std.Io;
 const wire = @import("uplink.wire");
@@ -195,7 +196,7 @@ fn serveOne(c: *Connection) bool {
     defer response.release(io);
     const keep_alive = h1.keepAlive(rh.version, &rh.headers);
     if (!keep_alive) response.closeAfter();
-    _ = s.counters.requests.fetchAdd(1, .monotonic);
+    sync.bump(&s.counters.requests);
 
     c.handler.handle(io, &request, &response) catch |err| {
         if (options.observer) |o| o.emit(.{ .failed = .{ .method = rh.method.name, .path = target.path, .error_name = @errorName(err), .head_sent = response.headSent() } });

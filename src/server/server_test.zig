@@ -103,7 +103,7 @@ test "a client's requests are answered over one kept connection" {
         try testing.expectEqualStrings("hello", body);
     }
     try testing.expectEqual(@as(u64, 1), client.stats().connections_opened);
-    try testing.expectEqual(@as(u64, 10), running.server.stats().requests);
+    try testing.expectEqual(@as(u64, 10), running.server.stats(io).requests);
 }
 
 test "a body longer than the buffer is chunked, and one that fits goes with its length" {
@@ -311,7 +311,7 @@ test "shutdown ends idle connections at once and lets an answer under way finish
     // The client keeps its connection; the server ends it at shutdown.
     running.halt();
     defer running.free();
-    try testing.expectEqual(@as(u32, 0), running.server.stats().open);
+    try testing.expectEqual(@as(u32, 0), running.server.stats(io).open);
 }
 
 fn item(io: Io, request: *Request, response: *Response) anyerror!void {
@@ -583,7 +583,7 @@ test "shutdown lets an answer under way finish, telling its client the connectio
     try w.interface.writeAll("GET / HTTP/1.1\r\nHost: x\r\n\r\n");
     try w.interface.flush();
     // Once the handler runs, shut down.
-    while (running.server.stats().requests == 0) try io.sleep(.fromMilliseconds(1), .awake);
+    while (running.server.stats(io).requests == 0) try io.sleep(.fromMilliseconds(1), .awake);
     const Stop = struct {
         fn run(r: *Running) Io.Cancelable!void {
             r.halt();
@@ -805,7 +805,7 @@ test "past max_connections a connection waits for one to end" {
     var r = first.reader(io, &rbuf);
     _ = try r.interface.peekDelimiterInclusive('o');
     // The first is open and kept: a second is accepted by the system only.
-    try testing.expectEqual(@as(u32, 1), running.server.stats().open);
+    try testing.expectEqual(@as(u32, 1), running.server.stats(io).open);
     const Second = struct {
         fn run(rn: *Running, out: *[]u8) Io.Cancelable!void {
             out.* = rn.raw(testing.allocator, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n") catch &.{};
@@ -814,13 +814,13 @@ test "past max_connections a connection waits for one to end" {
     var second_out: []u8 = &.{};
     var second = io.concurrent(Second.run, .{ running, &second_out }) catch return error.SkipZigTest;
     try io.sleep(.fromMilliseconds(100), .awake);
-    try testing.expectEqual(@as(u64, 1), running.server.stats().accepted);
+    try testing.expectEqual(@as(u64, 1), running.server.stats(io).accepted);
     first.close(io);
     // glint-ignore: Z026 -- the task returns nothing the test checks
     second.await(io) catch {};
     defer gpa.free(second_out);
     try testing.expect(std.mem.endsWith(u8, second_out, "hello"));
-    try testing.expectEqual(@as(u64, 2), running.server.stats().accepted);
+    try testing.expectEqual(@as(u64, 2), running.server.stats(io).accepted);
 }
 
 /// `curl` with `args` against the running server; its output, or null
@@ -918,7 +918,7 @@ test "the client speaks HTTP/2 by prior knowledge, its requests over one connect
         try testing.expectEqual(0, body.len);
     }
     try testing.expectEqual(@as(u64, 1), client.stats().connections_opened);
-    try testing.expectEqual(@as(u64, 7), running.server.stats().requests);
+    try testing.expectEqual(@as(u64, 7), running.server.stats(io).requests);
 }
 
 test "a request in HTTP/1.1 asks to upgrade, and the connection goes on in HTTP/2, as curl's does" {
@@ -959,7 +959,7 @@ test "a request in HTTP/1.1 asks to upgrade, and the connection goes on in HTTP/
         try testing.expectEqualStrings("over h2", body);
     }
     try testing.expectEqual(@as(u64, 1), client.stats().connections_opened);
-    try testing.expectEqual(@as(u64, 4), running.server.stats().requests);
+    try testing.expectEqual(@as(u64, 4), running.server.stats(io).requests);
 
     // A `HEAD` that switches a connection has no body on stream 1.
     var other: Client = .init(gpa, .{ .http2 = .upgrade });

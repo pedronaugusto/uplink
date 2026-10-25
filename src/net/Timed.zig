@@ -15,6 +15,7 @@
 //! writes, are not allowed.
 
 const std = @import("std");
+const sync = @import("../sync.zig");
 const reactor = @import("reactor");
 const Io = std.Io;
 const Deadlines = reactor.net.Deadlines;
@@ -27,7 +28,7 @@ reads: Side,
 writes: Side,
 /// Private: the socket is counted among those whose deadlines nothing
 /// could keep.
-counted: std.atomic.Value(bool) = .init(false),
+counted: sync.Latch = .init(.clear),
 
 /// One direction's operations: the deadline `Deadlines` keeps for the one
 /// under way, and how deadlines are kept. Only the task doing that
@@ -53,7 +54,7 @@ const Mode = enum {
 pub const Keeper = struct {
     deadlines: *Deadlines,
     /// Sockets whose deadlines no task and no `Io` could keep.
-    unenforced: *std.atomic.Value(u64),
+    unenforced: *sync.Counter,
 };
 
 /// Why an operation did not complete.
@@ -107,7 +108,7 @@ pub fn perform(t: *Timed, io: Io, keeper: Keeper, op: Io.Operation, deadline: ?I
                 // This `Io` cannot bound a socket operation: from here on
                 // this side runs unbounded, the socket counted once.
                 side.mode = .unenforced;
-                if (!t.counted.swap(true, .monotonic)) _ = keeper.unenforced.fetchAdd(1, .monotonic);
+                if (t.counted.swap(.set, .monotonic) == .clear) sync.bump(keeper.unenforced);
                 return io.operate(op);
             },
         },
@@ -167,7 +168,7 @@ test "a read and a write under way at once each end at their own deadline" {
     defer server.close(io);
     var deadlines: Deadlines = .init(.fromMilliseconds(20));
     defer deadlines.deinit(io);
-    var unenforced: std.atomic.Value(u64) = .init(0);
+    var unenforced: sync.Counter = .init(.fromRaw(0));
     const keeper: Keeper = .{ .deadlines = &deadlines, .unenforced = &unenforced };
     var timed: Timed = .init(client.socket.handle);
     defer timed.deinit(io, keeper);

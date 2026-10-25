@@ -15,6 +15,7 @@
 //! a write the server is not taking yet.
 
 const std = @import("std");
+const sync = @import("../sync.zig");
 const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -37,7 +38,7 @@ shared: aegis.BlockingGuarded(Shared),
 /// Private: woken when the token is given back or a stream's state moves.
 changed: aegis.Condition = .init(),
 /// The exchanges using the connection now.
-users: std.atomic.Value(u32) = .init(0),
+users: sync.Gauge = .init(.fromRaw(0)),
 /// Private: what `create` allocated besides this value.
 memory: []u8,
 /// Private: the bytes the task holding the send role is writing, outside

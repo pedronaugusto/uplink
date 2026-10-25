@@ -18,6 +18,7 @@
 //! idle gives them back, keeping only what its TLS sessions need.
 
 const std = @import("std");
+const sync = @import("../sync.zig");
 const aegis = @import("aegis");
 const reactor = @import("reactor");
 const builtin = @import("builtin");
@@ -74,9 +75,9 @@ deadline: ?Io.Timestamp = null,
 /// Private: the low-speed window.
 speed: Speed = .{},
 /// Private: which limit the deadline last armed is.
-armed: std.atomic.Value(Diagnostics.Timeout) = .init(.activity),
+armed: aegis.Atomic(Diagnostics.Timeout) = .init(.activity),
 /// Why the first operation that failed did; `failed` reads it.
-failure: std.atomic.Value(Failure) = .init(.none),
+failure: aegis.Atomic(Failure) = .init(.none),
 /// Private: HTTP/2: exchanges read and write it at once, one reading
 /// while others write. No exchange's deadline bounds it, a write keeps
 /// the activity timeout alone, and the low-speed window counts what is
@@ -232,8 +233,8 @@ fn openOnce(ctx: *Context, io: Io, route: Context.Route, options: OpenOptions, a
             else => |e| e,
         };
     };
-    if (!dialed.timeout_enforced) _ = ctx.counters.timeouts_unenforced.fetchAdd(1, .monotonic);
-    _ = ctx.counters.opened.fetchAdd(1, .monotonic);
+    if (!dialed.timeout_enforced) sync.bump(&ctx.counters.timeouts_unenforced);
+    sync.bump(&ctx.counters.opened);
     if (diagnostics) |d| d.peer = dialed.peer;
     if (ctx.observer) |o| o.emit(.{ .connected = .{
         .host = first_host,
@@ -992,7 +993,7 @@ fn socksLookup(conn: *Connection, ipv4: bool, until: ?Io.Timestamp) OpenError!Io
         error.TimedOut => conn.timedOutOpen(),
         error.InvalidHostName, error.NameNotResolved => error.ProxyHostUnreachable,
     };
-    if (!bounded) _ = conn.ctx.counters.timeouts_unenforced.fetchAdd(1, .monotonic);
+    if (!bounded) sync.bump(&conn.ctx.counters.timeouts_unenforced);
     var address: ?Io.net.IpAddress = null;
     for (addresses) |a| {
         if (address == null or (!ipv4 and address.? == .ip4 and a == .ip6)) address = a;

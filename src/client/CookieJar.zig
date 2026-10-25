@@ -18,6 +18,7 @@
 
 const std = @import("std");
 const span = @import("../span.zig");
+const sync = @import("../sync.zig");
 const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -34,7 +35,7 @@ options: Options,
 state: aegis.BlockingGuarded(State),
 /// Private: cookies kept in all, and readable without the lock: a request
 /// with no cookie to send reads it alone, and pays for no lock.
-total: std.atomic.Value(u32) = .init(0),
+total: sync.Gauge = .init(.fromRaw(0)),
 
 /// What the lock guards.
 const State = struct {
@@ -116,7 +117,7 @@ fn freeCookie(jar: *CookieJar, c: *Cookie) void {
 
 /// How many cookies are kept, expired ones not yet met included.
 pub fn count(jar: *const CookieJar) u32 {
-    return jar.total.load(.monotonic);
+    return jar.total.load(.monotonic).raw();
 }
 
 /// Seconds since the epoch, now: the calendar clock in the seconds a
@@ -188,18 +189,18 @@ fn storeAt(jar: *CookieJar, io: Io, url: url_mod.Url, set_cookie: []const u8, no
         seq = old.seq;
         _ = list.orderedRemove(i);
         jar.freeCookie(old);
-        _ = jar.total.fetchSub(1, .monotonic);
+        _ = jar.total.fetchSubWrapping(.fromRaw(1), .monotonic);
         break;
     }
     if (expires) |e| if (e <= now) return jar.dropEmpty(s, gop.key_ptr.*);
     // Room for every cookie in the list a request sends, so sending never
     // allocates or drops one.
-    try s.scratch.ensureTotalCapacity(jar.gpa, jar.total.load(.monotonic) + 1);
+    try s.scratch.ensureTotalCapacity(jar.gpa, (jar.total.load(.monotonic).add(.fromRaw(1)) catch return error.OutOfMemory).raw());
     const c = try jar.make(sc, gop.key_ptr.*, path, expires, host_only, seq);
     errdefer jar.freeCookie(c);
     try list.append(jar.gpa, c);
     if (seq == s.next_seq) s.next_seq += 1;
-    _ = jar.total.fetchAdd(1, .monotonic);
+    _ = jar.total.fetchAddWrapping(.fromRaw(1), .monotonic);
     jar.enforceLimits(s, list, now);
 }
 
@@ -276,10 +277,10 @@ fn enforceLimits(jar: *CookieJar, s: *State, list: *std.ArrayList(*Cookie), now:
                 oldest = i;
             };
             jar.freeCookie(list.orderedRemove(oldest));
-            _ = jar.total.fetchSub(1, .monotonic);
+            _ = jar.total.fetchSubWrapping(.fromRaw(1), .monotonic);
         }
     }
-    while (jar.total.load(.monotonic) > jar.options.max_total) {
+    while (jar.total.load(.monotonic).compare(.fromRaw(jar.options.max_total)) == .gt) {
         var oldest: ?struct { list: *std.ArrayList(*Cookie), index: usize } = null;
         var it = s.domains.valueIterator();
         while (it.next()) |l| for (l.items, 0..) |c, i| {
@@ -287,7 +288,7 @@ fn enforceLimits(jar: *CookieJar, s: *State, list: *std.ArrayList(*Cookie), now:
         };
         const o = oldest orelse break;
         jar.freeCookie(o.list.orderedRemove(o.index));
-        _ = jar.total.fetchSub(1, .monotonic);
+        _ = jar.total.fetchSubWrapping(.fromRaw(1), .monotonic);
     }
 }
 
@@ -296,7 +297,7 @@ fn purgeExpired(jar: *CookieJar, list: *std.ArrayList(*Cookie), now: i64) void {
     while (i < list.items.len) {
         if (list.items[i].expired(now)) {
             jar.freeCookie(list.orderedRemove(i));
-            _ = jar.total.fetchSub(1, .monotonic);
+            _ = jar.total.fetchSubWrapping(.fromRaw(1), .monotonic);
         } else i += 1;
     }
 }
@@ -315,7 +316,7 @@ fn dropEmpty(jar: *CookieJar, s: *State, domain: []const u8) void {
 /// session-long cookie and a persistent one alike; expired ones are
 /// dropped as they are met.
 pub fn writeField(jar: *CookieJar, io: Io, w: *Io.Writer, url: url_mod.Url) Io.Writer.Error!bool {
-    if (jar.total.load(.monotonic) == 0) return false;
+    if (jar.total.load(.monotonic).eql(.fromRaw(0))) return false;
     var host_buf: [Io.net.HostName.max_len]u8 = undefined;
     if (url.host.len > host_buf.len) return false;
     const host = std.ascii.lowerString(&host_buf, url.host);
@@ -406,7 +407,7 @@ pub fn clear(jar: *CookieJar, io: Io) void {
         jar.gpa.free(kv.key_ptr.*);
     }
     s.domains.clearRetainingCapacity();
-    jar.total.store(0, .monotonic);
+    jar.total.store(.fromRaw(0), .monotonic);
 }
 
 /// Forget the session cookies, as a browser does when it closes.
@@ -420,7 +421,7 @@ pub fn clearSession(jar: *CookieJar, io: Io) void {
         while (i < list.items.len) {
             if (list.items[i].expires == null) {
                 jar.freeCookie(list.orderedRemove(i));
-                _ = jar.total.fetchSub(1, .monotonic);
+                _ = jar.total.fetchSubWrapping(.fromRaw(1), .monotonic);
             } else i += 1;
         }
     }
@@ -535,15 +536,15 @@ fn put(jar: *CookieJar, io: Io, sc: cookie.SetCookie, domain: []const u8, path: 
         if (old.host_only != host_only or !std.mem.eql(u8, old.name, sc.name) or !std.mem.eql(u8, old.path, path)) continue;
         _ = list.orderedRemove(i);
         jar.freeCookie(old);
-        _ = jar.total.fetchSub(1, .monotonic);
+        _ = jar.total.fetchSubWrapping(.fromRaw(1), .monotonic);
         break;
     }
-    try s.scratch.ensureTotalCapacity(jar.gpa, jar.total.load(.monotonic) + 1);
+    try s.scratch.ensureTotalCapacity(jar.gpa, (jar.total.load(.monotonic).add(.fromRaw(1)) catch return error.OutOfMemory).raw());
     const c = try jar.make(sc, gop.key_ptr.*, path, expires, host_only, s.next_seq);
     errdefer jar.freeCookie(c);
     try list.append(jar.gpa, c);
     s.next_seq += 1;
-    _ = jar.total.fetchAdd(1, .monotonic);
+    _ = jar.total.fetchAddWrapping(.fromRaw(1), .monotonic);
     jar.enforceLimits(s, list, now);
 }
 
