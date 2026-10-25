@@ -1177,7 +1177,7 @@ fn fromCache(run: *Run, io: Io) Error!?Response {
 /// `Age` and its body's length, its body from the store.
 fn serve(run: *Run, io: Io, cache: *Cache, entry: Cache.Entry, age: u32, status: Response.CacheStatus) Error!Response {
     const c = run.shared;
-    const head = std.fmt.allocPrint(c.context.gpa, "{s}Age: {d}\r\nContent-Length: {d}\r\n\r\n", .{ entry.head, age, entry.body.len() }) catch {
+    const head = c.context.gpa.print("{s}Age: {d}\r\nContent-Length: {d}\r\n\r\n", .{ entry.head, age, entry.body.len() }) catch {
         cache.store.release(io, &entry);
         return error.OutOfMemory;
     };

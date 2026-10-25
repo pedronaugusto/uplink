@@ -543,9 +543,14 @@ point. The shape is in the README; what the design depends on is:
   files** need a JavaScript engine. **OCSP** is gone from the ecosystem in favour of
   short-lived certificates. **0-RTT** carries replay risk.
 - **No client pipelining.** Head-of-line blocking and broken intermediaries.
-- **No HTTP cache, no JSON.** A store is a different concern, a layer above the
-  client; JSON belongs to the JSON library, and uplink hands over readers and
-  bytes.
+- **No JSON.** JSON belongs to the JSON library, and uplink hands over
+  readers and bytes.
+- **The cache sits in the run** (`client/Cache.zig`, RFC 9111): each hop of a
+  request asks it, so a redirect's 301 is cached as its target is. A response
+  goes into the store as the caller reads it, content-coded as it came (one
+  decoder for the network and the store), and is kept only when its body ended
+  whole. A store that fails costs the cache, never the request
+  (`cache_failed`). No ranges: a 206 is not stored.
 - **No `.netrc`**, no bandwidth limit (the caller throttles its reader or
   writer), no IDNA (callers pass punycode).
 - **No event loop of its own.** uplink makes only `Io` calls on sockets, apart

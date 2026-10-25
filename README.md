@@ -152,7 +152,13 @@ store is told whether it was taken, as git's credential helpers want. The answer
 forgotten. `Credentials.Netrc` is such a store over a `.netrc`'s text, which
 the caller reads: the host's machine, or the file's default. A
 `CookieJar` keeps cookies by RFC 6265bis and reads and writes the Netscape
-cookie file. A `Prepare` hook sees every attempt before it is written, so a
+cookie file. A `Cache` (`Options.cache`) is an HTTP cache by RFC 9111, private
+or shared, in a `Store` (`Cache.Memory`, bounded by bytes, or the caller's):
+a fresh stored response is served with its `Age`, a stale one revalidated with
+its validators, a 304 bringing its head up to date; `Vary` keeps a variant per
+value, an unsafe method's success invalidates, `only-if-cached` and
+`stale-if-error` are kept, and a body is stored as it is read, only when
+read whole. `Response.cache` says where a response came from. A `Prepare` hook sees every attempt before it is written, so a
 signature is made again for each redirect and retry, and an `Observer` is
 told every step with its timing. `Response.url` is where the redirects led,
 `Response.trailers` a chunked body's trailer fields, and `Response.upgrade`
@@ -372,7 +378,8 @@ environment itself.
 - HTTPS records are read for an `https` origin dialed directly: an `http`
   URL is not upgraded by one (RFC 9460 §9.5), and through a proxy, which
   finds the target itself, none is asked for.
-- No NTLM, Negotiate, PAC files or OCSP, and no HTTP cache.
+- No NTLM, Negotiate, PAC files or OCSP. The HTTP cache serves no ranges:
+  a 206 is not stored.
 - No public suffix list: a `CookieJar` takes one through
   `Options.public_suffix`, and without one refuses a cookie for a domain of
   one label.

@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- An HTTP cache (RFC 9111): `Client.Options.cache`, a `Cache` over a `Store` (`Cache.Memory`, bounded by bytes, least recently used out first; or the caller's), private by default or shared. A fresh stored response is served with its `Age`, without the network; a stale one with validators is asked about (`If-None-Match`, `If-Modified-Since`) and a 304 brings its head up to date (§3.2); `Vary` keeps a variant per value of the fields it names; an unsafe method's success removes its URL and its same-origin `Location` and `Content-Location` (§4.4); `only-if-cached` with nothing usable is a 504 the cache makes; `stale-if-error` serves the stale response to a 5xx; a body is stored as the caller reads it, as it came, and kept only when read whole. `Response.cache` says where a response came from; the observer gets `cache` and, when the store fails, `cache_failed`, the request going on without it. `wire.cache` gains a request's directives, `storable`, `lifetime` (with §4.2.2's heuristic), `currentAge` and `use`. The bench gains `client/cache/hit` and `client/cache/revalidated`, compiled.
+
 ## [0.10.0] - 2026-10-25
 
 ### Breaking

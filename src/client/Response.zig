@@ -383,7 +383,9 @@ pub const StoredOptions = struct {
 /// Write the body, as it is read, to `cache`'s store as `writing`: kept
 /// at `deinit` when it ended whole. Before the first `reader`.
 pub fn storeInto(r: *Response, cache: *Cache, writing: Cache.Writing) void {
-    std.debug.assert(!r.started and r.tee == null and r.stored == null);
+    std.debug.assert(!r.started);
+    std.debug.assert(r.tee == null);
+    std.debug.assert(r.stored == null);
     r.tee = .{ .cache = cache, .writing = writing };
 }
 

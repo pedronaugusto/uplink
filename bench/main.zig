@@ -24,6 +24,10 @@
 //! - `client/keepalive/auth`: the same with an answer to a 401 kept and
 //!   sent with every request.
 //! - `client/redirect`: a request redirected once.
+//! - `client/cache/hit`: a 1 KiB response served fresh from the client's
+//!   cache in memory, the server asked once.
+//! - `client/cache/revalidated`: a 1 KiB response, stale at once, asked
+//!   about with its entity tag and served from the cache on the 304.
 //! - `client/concurrent/<tasks>`: that many tasks through one client.
 //! - `client/download/<body>`: one body read through; `gzip` is
 //!   English-like text decoded as it arrives.
@@ -140,6 +144,8 @@ fn measure(gpa: std.mem.Allocator, io: Io, out: *Io.Writer, selected: bench.Opti
         .{ .name = "client/keepalive/cookies", .unit = "request", .initial = 1000, .run = Context.keepAlive(.cookies) },
         .{ .name = "client/keepalive/auth", .unit = "request", .initial = 1000, .run = Context.keepAlive(.auth) },
         .{ .name = "client/redirect", .unit = "request", .initial = 1000, .run = Context.keepAlive(.redirect) },
+        .{ .name = "client/cache/hit", .unit = "request", .initial = 1000, .run = Context.keepAlive(.cache_hit) },
+        .{ .name = "client/cache/revalidated", .unit = "request", .initial = 1000, .run = Context.keepAlive(.cache_revalidated) },
         .{ .name = "client/concurrent/16", .unit = "request", .initial = 16 * 64, .smoke = 16, .run = Context.concurrent(0) },
         .{ .name = "client/concurrent/128", .unit = "request", .initial = 128 * 16, .smoke = 128, .run = Context.concurrent(1) },
         .{ .name = "client/download/big", .unit = "body", .run = Context.download(.big) },
@@ -153,7 +159,7 @@ fn measure(gpa: std.mem.Allocator, io: Io, out: *Io.Writer, selected: bench.Opti
 }
 
 /// Which request a keep-alive row sends.
-const Keep = enum { empty, kib, cookies, auth, redirect };
+const Keep = enum { empty, kib, cookies, auth, redirect, cache_hit, cache_revalidated };
 
 /// Which body a download row reads.
 const Body = enum { big, chunked, gzip };
@@ -197,6 +203,9 @@ const Context = struct {
     jar: uplink.CookieJar,
     jarred: uplink.Client,
     answered: uplink.Client,
+    memory: uplink.Cache.Memory,
+    cache: uplink.Cache,
+    cached: uplink.Client,
     crowd: [task_counts.len]uplink.Client,
     downloads: uplink.Client,
     resolver_entries: [2]uplink.net.Resolver.Static.Entry,
@@ -262,6 +271,9 @@ const Context = struct {
         c.jar = .init(gpa, .{});
         c.jarred = .init(gpa, .{ .cookies = &c.jar, .resolver = c.static.resolver() });
         c.answered = .init(gpa, .{ .credentials = Answer.credentials() });
+        c.memory = .init(gpa, .literal("16MiB"));
+        c.cache = .init(c.memory.store(), .{});
+        c.cached = .init(gpa, .{ .cache = &c.cache });
         for (&c.crowd, task_counts) |*client, tasks| client.* = .init(gpa, .{ .pool = .{ .max_idle_per_route = @intCast(tasks), .max_idle = @intCast(tasks) } });
         c.downloads = .init(gpa, .{});
         try fillJar(&c.jar, io);
@@ -274,6 +286,8 @@ const Context = struct {
         c.downloads.deinit(io);
         for (&c.crowd) |*client| client.deinit(io);
         c.answered.deinit(io);
+        c.cached.deinit(io);
+        c.memory.deinit(io);
         c.jarred.deinit(io);
         c.jar.deinit(io);
         c.plain.deinit(io);
@@ -364,6 +378,8 @@ const Context = struct {
                     // send the kept answer.
                     .auth => .{ &c.answered, "127.0.0.1", "private" },
                     .cookies => .{ &c.jarred, "www.bench.test", "0" },
+                    .cache_hit => .{ &c.cached, "127.0.0.1", "cached" },
+                    .cache_revalidated => .{ &c.cached, "127.0.0.1", "tagged" },
                 };
                 const url = std.mem.print(&url_buf, "http://{s}:{d}/{s}", .{ host, c.server.port, path }) catch unreachable; // unreachable: the longest URL is 36 bytes
                 for (0..units) |_| try exchange(client, c.io, url);
