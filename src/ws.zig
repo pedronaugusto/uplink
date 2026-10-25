@@ -9,6 +9,7 @@
 //! does the rest.
 
 const std = @import("std");
+const erased = @import("erased.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const wire = @import("uplink.wire");
@@ -126,17 +127,17 @@ pub fn accept(out: *Accepted, gpa: Allocator, io: Io, request: *ServerRequest, r
 }
 
 fn flushAccepted(context: ?*anyopaque, _: Io) Io.Writer.Error!void {
-    const a: *Accepted = @ptrCast(@alignCast(context.?)); // safe: `accept` passes its Accepted
+    const a: *Accepted = erased.restore(Accepted, context);
     return a.stream.flush();
 }
 
 fn readableAccepted(context: ?*anyopaque, io: Io, timeout: Io.Duration) Io.Cancelable!Timed.Readiness {
-    const a: *Accepted = @ptrCast(@alignCast(context.?)); // safe: `accept` passes its Accepted
+    const a: *Accepted = erased.restore(Accepted, context);
     return a.stream.awaitReadable(io, timeout);
 }
 
 fn canceledAccepted(context: ?*anyopaque) bool {
-    const a: *Accepted = @ptrCast(@alignCast(context.?)); // safe: `accept` passes its Accepted
+    const a: *Accepted = erased.restore(Accepted, context);
     return a.stream.canceled();
 }
 
@@ -309,17 +310,17 @@ pub fn connect(out: *Opened, client: *Client, gpa: Allocator, io: Io, url: []con
 }
 
 fn flushOpened(context: ?*anyopaque, io: Io) Io.Writer.Error!void {
-    const o: *Opened = @ptrCast(@alignCast(context.?)); // safe: `connect` passes its Opened
+    const o: *Opened = erased.restore(Opened, context);
     o.stream.flush(io) catch return error.WriteFailed;
 }
 
 fn readableOpened(context: ?*anyopaque, io: Io, timeout: Io.Duration) Io.Cancelable!Timed.Readiness {
-    const o: *Opened = @ptrCast(@alignCast(context.?)); // safe: `connect` passes its Opened
+    const o: *Opened = erased.restore(Opened, context);
     return o.stream.awaitReadable(io, timeout);
 }
 
 fn canceledOpened(context: ?*anyopaque) bool {
-    const o: *Opened = @ptrCast(@alignCast(context.?)); // safe: `connect` passes its Opened
+    const o: *Opened = erased.restore(Opened, context);
     return o.stream.readFailure() == error.Canceled;
 }
 

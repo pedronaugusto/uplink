@@ -15,6 +15,7 @@
 //! writes, are not allowed.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const sync = @import("../sync.zig");
 const reactor = @import("reactor");
 const Io = std.Io;
@@ -35,7 +36,7 @@ counted: sync.Latch = .init(.clear),
 /// direction's operation touches it.
 const Side = struct {
     watch: Deadlines.Watch,
-    mode: Mode = .unwatched,
+    mode: Modes.Runtime(void) = .init({}),
 };
 
 const Mode = enum {
@@ -48,6 +49,30 @@ const Mode = enum {
     /// Asked for, and nothing could keep them.
     unenforced,
 };
+
+/// What decides how a side's deadlines are kept.
+const Change = enum {
+    /// `Deadlines` took the side's watch.
+    watched,
+    /// `Deadlines` could not: the `Io` keeps them.
+    unwatchable,
+    /// The `Io` cannot bound the operation either.
+    unbounded,
+    /// The socket is done with; nothing is under way.
+    released,
+};
+
+/// How a side's deadlines come to be kept: decided by its first operation
+/// with one, given up on only when the `Io` cannot keep them, and forgotten
+/// when the socket is.
+const Modes = aegis.state.Machine(Mode, Change, .{ .initial = .unwatched, .edges = &.{
+    .{ .from = .unwatched, .on = .watched, .to = .deadlines },
+    .{ .from = .unwatched, .on = .unwatchable, .to = .operate },
+    .{ .from = .operate, .on = .unbounded, .to = .unenforced },
+    .{ .from = .deadlines, .on = .released, .to = .unwatched },
+    .{ .from = .operate, .on = .released, .to = .unwatched },
+    .{ .from = .unenforced, .on = .released, .to = .unwatched },
+} });
 
 /// What keeps the deadlines of a set of sockets, and counts the ones that
 /// could not be kept.
@@ -71,10 +96,14 @@ pub fn init(handle: Io.net.Socket.Handle) Timed {
 
 /// Stop keeping deadlines; nothing may be under way.
 pub fn deinit(t: *Timed, io: Io, keeper: Keeper) void {
-    for ([_]*Side{ &t.reads, &t.writes }) |side| {
-        if (side.mode == .deadlines) keeper.deadlines.remove(io, &side.watch);
-        side.mode = .unwatched;
-    }
+    for ([_]*Side{ &t.reads, &t.writes }) |side| switch (side.mode.current()) {
+        .unwatched => {},
+        .deadlines => {
+            keeper.deadlines.remove(io, &side.watch);
+            _ = side.mode.step(.released) catch unreachable; // unreachable: watched until now
+        },
+        .operate, .unenforced => _ = side.mode.step(.released) catch unreachable, // unreachable: kept until now
+    };
 }
 
 /// Whether a deadline fired on the socket, which is then never to be used
@@ -91,12 +120,12 @@ pub fn perform(t: *Timed, io: Io, keeper: Keeper, op: Io.Operation, deadline: ?I
         .net_read, .net_receive, .file_read_streaming => &t.reads,
         else => &t.writes,
     };
-    if (side.mode == .unenforced) return io.operate(op);
+    if (side.mode.current() == .unenforced) return io.operate(op);
     if (at.nanoseconds <= Io.Clock.awake.now(io).nanoseconds) return error.TimedOut;
     // A deadline that fired on the other side has aborted the socket.
     if (t.fired()) return error.TimedOut;
-    if (side.mode == .unwatched) side.mode = if (keeper.deadlines.add(io, &side.watch)) .deadlines else .operate;
-    switch (side.mode) {
+    if (side.mode.current() == .unwatched) _ = side.mode.step(if (keeper.deadlines.add(io, &side.watch)) .watched else .unwatchable) catch unreachable; // unreachable: unwatched until now
+    switch (side.mode.current()) {
         .deadlines => return keeper.deadlines.operate(io, &side.watch, op, .{ .raw = at, .clock = .awake }) catch |err| switch (err) {
             error.Timeout => error.TimedOut,
             error.Canceled => error.Canceled,
@@ -107,7 +136,7 @@ pub fn perform(t: *Timed, io: Io, keeper: Keeper, op: Io.Operation, deadline: ?I
             error.ConcurrencyUnavailable => {
                 // This `Io` cannot bound a socket operation: from here on
                 // this side runs unbounded, the socket counted once.
-                side.mode = .unenforced;
+                _ = side.mode.step(.unbounded) catch unreachable; // unreachable: the Io kept them until now
                 if (t.counted.swap(.set, .monotonic) == .clear) sync.bump(keeper.unenforced);
                 return io.operate(op);
             },

@@ -10,6 +10,7 @@
 //! An address literal never reaches a resolver: `lookup` answers it itself.
 
 const std = @import("std");
+const erased = @import("../erased.zig");
 const aegis = @import("aegis");
 const reactor = @import("reactor");
 const Allocator = std.mem.Allocator;
@@ -193,19 +194,19 @@ pub const Static = struct {
     };
 
     pub fn resolver(s: *const Static) Resolver {
-        return .{ .context = @constCast(s), .lookupFn = staticLookup, .serviceFn = if (s.fallback.serviceFn != null) staticService else null }; // safe: the lookups only read through the pointer
+        return .{ .context = erased.erase(s), .lookupFn = staticLookup, .serviceFn = if (s.fallback.serviceFn != null) staticService else null };
     }
 
     /// A name listed is reached at the addresses given, so it has no
     /// binding to send it elsewhere; the rest are the fallback's.
     fn staticService(io: Io, context: ?*anyopaque, gpa: Allocator, name: []const u8) ServiceError!?Binding {
-        const s: *const Static = @ptrCast(@alignCast(context.?)); // safe: `resolver` passes a Static
+        const s: *const Static = erased.restore(Static, context);
         for (s.entries) |e| if (std.ascii.eqlIgnoreCase(e.host, originOf(name))) return null;
         return s.fallback.serviceFn.?(io, s.fallback.context, gpa, name);
     }
 
     fn staticLookup(io: Io, context: ?*anyopaque, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress) LookupError![]IpAddress {
-        const s: *const Static = @ptrCast(@alignCast(context.?)); // safe: `resolver` passes a Static
+        const s: *const Static = erased.restore(Static, context);
         for (s.entries) |e| {
             if (!std.ascii.eqlIgnoreCase(e.host, host)) continue;
             if (e.port) |p| if (p != port) continue;
@@ -348,7 +349,7 @@ pub const Cache = struct {
     }
 
     fn cacheService(io: Io, context: ?*anyopaque, gpa: Allocator, name: []const u8) ServiceError!?Binding {
-        const c: *Cache = @ptrCast(@alignCast(context.?)); // safe: `resolver` passes a Cache
+        const c: *Cache = erased.restore(Cache, context);
         var key_buf: [dns.max_name]u8 = undefined;
         if (name.len > key_buf.len) return null;
         const key = std.ascii.lowerString(&key_buf, name);
@@ -419,7 +420,7 @@ pub const Cache = struct {
     }
 
     fn cacheLookup(io: Io, context: ?*anyopaque, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress) LookupError![]IpAddress {
-        const c: *Cache = @ptrCast(@alignCast(context.?)); // safe: `resolver` passes a Cache
+        const c: *Cache = erased.restore(Cache, context);
         var key_buf: [Io.net.HostName.max_len]u8 = undefined;
         if (host.len > key_buf.len) return error.InvalidHostName;
         const key = std.ascii.lowerString(&key_buf, host);
@@ -511,7 +512,7 @@ const Counting = struct {
     }
 
     fn answer(_: Io, context: ?*anyopaque, _: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress) LookupError![]IpAddress {
-        const self: *Counting = @ptrCast(@alignCast(context.?)); // safe: the test passes a Counting
+        const self: *Counting = erased.restore(Counting, context);
         self.calls += 1;
         const all = [_]IpAddress{ .{ .ip4 = .{ .bytes = .{ 10, 0, 0, 1 }, .port = port } }, .{ .ip6 = .loopback(port) } };
         return pick(&all, family, out);

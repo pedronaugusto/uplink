@@ -7,6 +7,7 @@
 //! buffers; one given back beyond that is freed.
 
 const std = @import("std");
+const place = @import("../place.zig");
 const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -97,7 +98,7 @@ pub fn release(p: *BufferPool, io: Io, buffer: []u8) void {
     const class = Class.fitting(buffer.len).?;
     std.debug.assert(buffer.len == class.len());
     const i = @backingInt(class);
-    const node: *Node = @ptrCast(@alignCast(buffer.ptr)); // safe: every buffer the pool hands out is aligned for a Node and longer than one
+    const node = place.one(Node, buffer.ptr, 0); // every buffer the pool hands out is aligned for a Node and longer than one
     {
         var held = p.lists.acquireUncancelable(io);
         defer held.deinit(io);
@@ -120,8 +121,7 @@ pub fn kept(p: *BufferPool, io: Io, class: Class) u32 {
 }
 
 fn bytesOf(node: *Node, len: usize) []align(alignment.toByteUnits()) u8 {
-    const ptr: [*]align(alignment.toByteUnits()) u8 = @ptrCast(@alignCast(node)); // safe: a node is the first bytes of a buffer the pool allocated with this alignment
-    return ptr[0..len];
+    return place.front(alignment, node)[0..len];
 }
 
 const testing = std.testing;

@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- A dial's stream has its one owner: `net.Dialed.stream` is an `aegis.own.OwnedIo` over the stream, closed by `stream.deinit(io)` and reached with `stream.borrow()`, which checks in Debug that it is closed once and not moved once in use. A client connection and a server's socket keep it the same way.
+- Time is aegis's where it comes in: `wire.date` reads and writes `wire.date.Second`, an instant on the calendar clock, where it took and gave seconds as an `i64`; `wire.cookie.SetCookie.expires`, `wire.cache.Times`, `currentAge` and `Cache.Meta` are in it too. `policy.retryAfter` takes one.
+- `Server.stats` takes the `Io`: the connections open are counted under the lock the accept loop's wait for room and `shutdown`'s wait for the last connection share, where a futex waited on a bare counter.
+- `transport.Body.state` is a state machine (`state.current()` reads it): a body ends once, read whole or in one of its failures.
+
+### Changed
+
+- On preflight 0.18.1, under the aegis pack: the counters, gauges and flags are aegis's atomic cells over domains of their own; an exchange waiting for its route, the accept loop's end and `shutdown`'s drain wait on an aegis `Condition` under the lock of the state they wait for, where each had an `Io.Event`; the ticket key a server draws is an aegis `Secret`; the zstd buffer kept for the next body is guarded. A socket's deadline mode, a response's life, a server socket's phase and a multipart body's parts are aegis state machines, and the response's framing is chosen in one place for HTTP/1 and HTTP/2. Every pointer a vtable carries as its context is erased and restored in one place, and every typed view of uplink's own buffers is placed in one; the conformance and CI programs read their files through `aegis.own.readFile`.
+
 ## [0.10.1] - 2026-10-25
 
 ### Added

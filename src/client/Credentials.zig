@@ -5,6 +5,7 @@
 //! one, as git's `approve` and `reject` do.
 
 const std = @import("std");
+const erased = @import("../erased.zig");
 const Io = std.Io;
 const wire = @import("uplink.wire");
 const auth = wire.auth;
@@ -70,11 +71,11 @@ pub const Netrc = struct {
 
     /// The store, reading `n`, which must outlive the client.
     pub fn credentials(n: *const Netrc) Credentials {
-        return .{ .context = @constCast(n), .fillFn = fillNetrc }; // safe: a fill only reads through the pointer
+        return .{ .context = erased.erase(n), .fillFn = fillNetrc };
     }
 
     fn fillNetrc(_: Io, context: ?*anyopaque, query: Query) FillError!?Secret {
-        const n: *const Netrc = @ptrCast(@alignCast(context.?)); // safe: `credentials` passes its Netrc
+        const n: *const Netrc = erased.restore(Netrc, context);
         if (query.scheme == .bearer) return null;
         // The client copies the secret before this returns, so a quoted
         // value may be unescaped into a buffer on the stack.

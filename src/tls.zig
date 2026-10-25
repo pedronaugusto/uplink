@@ -5,6 +5,7 @@
 //! a client offers, and the shape of a connection's buffers.
 
 const std = @import("std");
+const erased = @import("erased.zig");
 const aegis = @import("aegis");
 const warp = @import("warp");
 const Allocator = std.mem.Allocator;
@@ -180,13 +181,13 @@ pub const Decoding = enum { zstd, zlib };
 /// outlive the handshakes the codec serves.
 pub fn decoder(algorithm: Decoding, gpa: *const Allocator) Codec {
     return switch (algorithm) {
-        .zstd => .{ .algorithm = .zstd, .context = @constCast(gpa), .decompress = decodeZstd }, // safe: the decoder only reads the allocator through it
-        .zlib => .{ .algorithm = .zlib, .context = @constCast(gpa), .decompress = decodeZlib }, // safe: as above
+        .zstd => .{ .algorithm = .zstd, .context = erased.erase(gpa), .decompress = decodeZstd },
+        .zlib => .{ .algorithm = .zlib, .context = erased.erase(gpa), .decompress = decodeZlib },
     };
 }
 
 fn decodeZstd(context: ?*anyopaque, input: []const u8, out: []u8) cloak.tls.certificate_compression.Error!void {
-    const gpa: *const Allocator = @ptrCast(@alignCast(context.?)); // safe: `decoder` passes an allocator
+    const gpa: *const Allocator = erased.restore(Allocator, context);
     const d = gpa.create(warp.zstd.Decompressor) catch return error.Failed;
     defer gpa.destroy(d);
     d.* = .init;
@@ -196,7 +197,7 @@ fn decodeZstd(context: ?*anyopaque, input: []const u8, out: []u8) cloak.tls.cert
 }
 
 fn decodeZlib(context: ?*anyopaque, input: []const u8, out: []u8) cloak.tls.certificate_compression.Error!void {
-    const gpa: *const Allocator = @ptrCast(@alignCast(context.?)); // safe: `decoder` passes an allocator
+    const gpa: *const Allocator = erased.restore(Allocator, context);
     const d = gpa.create(warp.Decompressor) catch return error.Failed;
     defer gpa.destroy(d);
     d.* = .init;
@@ -240,7 +241,7 @@ pub fn keyLog(writer: *Io.Writer) cloak.tls.Connection.KeyLog {
 }
 
 fn writeKeyLog(context: ?*anyopaque, line: []const u8) void {
-    const writer: *Io.Writer = @ptrCast(@alignCast(context.?)); // safe: `keyLog` is the only way to make this sink, and it passes a writer
+    const writer: *Io.Writer = erased.restore(Io.Writer, context);
     // A capture that cannot be written is the caller's to notice; it must not fail the handshake it describes.
     writer.writeAll(line) catch return;
 }

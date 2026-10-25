@@ -9,6 +9,7 @@
 //! nothing once it is warm.
 
 const std = @import("std");
+const place = @import("../place.zig");
 const aegis = @import("aegis");
 const warp = @import("warp");
 const Allocator = std.mem.Allocator;
@@ -154,7 +155,7 @@ pub const Pool = struct {
             break :taken null;
         } orelse try p.gpa.alignedAlloc(u8, .@"64", len);
         const codec = codecLen(p.settings, coding);
-        const e: *Encoder = @ptrCast(@alignCast(block.ptr + (len - @sizeOf(Encoder)))); // safe: the block ends with room for an Encoder, aligned for it
+        const e = place.one(Encoder, block.ptr, len - @sizeOf(Encoder)); // the block ends with room for an Encoder, aligned for it
         const stage = block[codec..][0..stage_len];
         const memory: []align(64) u8 = block[0..codec];
         e.* = .{ .coding = coding, .block = block, .state = undefined, .writer_ = undefined };
@@ -180,7 +181,7 @@ pub const Pool = struct {
             defer held.deinit(io);
             const lists = held.value();
             if (lists.counts[i] < p.max_free) {
-                const node: *Node = @ptrCast(block.ptr); // safe: a block is 64-aligned and far longer than a Node
+                const node = place.one(Node, block.ptr, 0); // a block is 64-aligned and far longer than a Node
                 node.* = .{ .next = lists.free[i] };
                 lists.free[i] = node;
                 lists.counts[i] += 1;
@@ -191,8 +192,7 @@ pub const Pool = struct {
     }
 
     fn blockOf(node: *Node, len: usize) []align(64) u8 {
-        const ptr: [*]align(64) u8 = @ptrCast(@alignCast(node)); // safe: a node is the first bytes of a block allocated 64-aligned
-        return ptr[0..len];
+        return place.front(.@"64", node)[0..len];
     }
 };
 

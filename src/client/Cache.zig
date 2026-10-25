@@ -16,6 +16,7 @@
 //! (`cache_failed`).
 
 const std = @import("std");
+const erased = @import("../erased.zig");
 const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -253,11 +254,11 @@ pub const Memory = struct {
     };
 
     fn of(context: *anyopaque) *Memory {
-        return @ptrCast(@alignCast(context)); // safe: `store` gives its own
+        return erased.restore(Memory, context);
     }
 
     fn itemOf(handle: *anyopaque) *Item {
-        return @ptrCast(@alignCast(handle)); // safe: every handle is one of this store's items
+        return erased.restore(Item, handle);
     }
 
     fn entryOf(i: *Item) Entry {

@@ -17,6 +17,7 @@
 //! reads it.
 
 const std = @import("std");
+const place = @import("../../place.zig");
 const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -93,7 +94,7 @@ pub fn init(context: *Context, socket: *Socket, max_concurrent: u32) Allocator.E
     var at: usize = 0;
     const take = struct {
         fn slice(comptime T: type, m: []u8, offset: *usize, size: usize, n: usize) []T {
-            const p: [*]T = @ptrCast(@alignCast(m.ptr + offset.*)); // safe: each part starts 64-aligned inside the block
+            const p = place.many(T, m.ptr, offset.*); // each part starts 64-aligned inside the block
             offset.* += size;
             return p[0..n];
         }
@@ -142,7 +143,7 @@ pub fn deinit(s: *Session) void {
     shared.streams.deinit(s.context.gpa);
     shared.outbox.deinit();
     s.sending.deinit(s.context.gpa);
-    s.context.gpa.free(@as([]align(64) u8, @alignCast(s.memory))); // safe: `init` allocated it 64-aligned
+    s.context.gpa.free(place.aligned(.@"64", s.memory));
     s.* = undefined;
 }
 

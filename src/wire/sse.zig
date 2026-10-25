@@ -53,11 +53,13 @@ pub const Parser = struct {
     id_buf: [max_id]u8 = undefined,
     id_len: u16 = 0,
     /// Private: the line state.
+    // aegis: hot-loop: the place in an event stream's line grammar, set per byte read
     state: State = .bom,
     bom_seen: u2 = 0,
     after_cr: bool = false,
     name_buf: [8]u8 = undefined,
     name_len: u8 = 0,
+    // aegis: hot-loop: which field a line names, set as its name is read byte by byte
     field: Field = .ignored,
     /// Private: a `retry` value being read, and whether it is all digits.
     retry_value: u64 = 0,

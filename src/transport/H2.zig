@@ -15,6 +15,7 @@
 //! a write the server is not taking yet.
 
 const std = @import("std");
+const place = @import("../place.zig");
 const sync = @import("../sync.zig");
 const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
@@ -162,7 +163,7 @@ fn allocate(ctx: *Context, conn: *Connection) Allocator.Error!*H2 {
     var at: usize = 0;
     const take = struct {
         fn slice(comptime T: type, m: []u8, offset: *usize, size: usize, n: usize) []T {
-            const p: [*]T = @ptrCast(@alignCast(m.ptr + offset.*)); // safe: each part starts 64-aligned inside the block
+            const p = place.many(T, m.ptr, offset.*); // each part starts 64-aligned inside the block
             offset.* += size;
             return p[0..n];
         }
@@ -219,7 +220,7 @@ pub fn abandon(h: *H2) void {
     for (shared.streams.items) |st| h.ctx.gpa.destroy(st);
     shared.streams.deinit(h.ctx.gpa);
     shared.outbox.deinit();
-    h.ctx.gpa.free(@as([]align(64) u8, @alignCast(h.memory))); // safe: `allocate` allocated it 64-aligned
+    h.ctx.gpa.free(place.aligned(.@"64", h.memory));
     h.ctx.gpa.destroy(h);
 }
 
@@ -237,7 +238,7 @@ pub fn close(h: *H2, io: Io) void {
     shared.outbox.deinit();
     h.sending.deinit(h.ctx.gpa);
     h.conn.close(io);
-    h.ctx.gpa.free(@as([]align(64) u8, @alignCast(h.memory))); // safe: `create` allocated it 64-aligned
+    h.ctx.gpa.free(place.aligned(.@"64", h.memory));
     h.ctx.gpa.destroy(h);
 }
 

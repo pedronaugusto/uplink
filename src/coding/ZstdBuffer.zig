@@ -9,6 +9,7 @@
 //! owns it; there is no state beside it for a lock to guard.
 
 const std = @import("std");
+const place = @import("../place.zig");
 const aegis = @import("aegis");
 const warp = @import("warp");
 const Allocator = std.mem.Allocator;
@@ -59,7 +60,8 @@ pub fn split(z: *const ZstdBuffer, buffer: []u8) struct { []u8, *State } {
     std.debug.assert(buffer.len == z.len);
     const read = readLen(z.max_window);
     const at = std.mem.alignForward(usize, read, @alignOf(State));
-    return .{ buffer[0..read], @ptrCast(@alignCast(buffer.ptr + at)) }; // safe: buffers are 64-aligned, `at` is aligned for State, and `len` holds a State past it
+    // Buffers are 64-aligned, `at` is aligned for State, and `len` holds a State past it.
+    return .{ buffer[0..read], place.one(State, buffer.ptr, at) };
 }
 
 /// A buffer: the one kept, or a new one.
@@ -96,7 +98,7 @@ pub fn deinit(z: *ZstdBuffer, gpa: Allocator) void {
 }
 
 fn aligned(buffer: []u8) []align(64) u8 {
-    return @alignCast(buffer); // safe: every zstd buffer is allocated 64-aligned
+    return place.aligned(.@"64", buffer);
 }
 
 test "a buffer given back is the next one taken, and a second given back is freed" {

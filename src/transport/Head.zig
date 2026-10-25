@@ -9,6 +9,7 @@
 //! parses a response in it, and the server a request.
 
 const std = @import("std");
+const layout = @import("../place.zig");
 const Io = std.Io;
 const wire = @import("uplink.wire");
 const h1 = wire.h1;
@@ -122,7 +123,7 @@ pub fn bytes(h: *const Head) []u8 {
 /// Where the head's fields go.
 pub fn fields(h: *const Head) []Field {
     const at = std.mem.alignForward(usize, h.len, @alignOf(Field));
-    const ptr: [*]Field = @ptrCast(@alignCast(h.buffer.ptr + at)); // safe: pool buffers are 64-aligned, `at` is aligned for a Field, and the buffer has room for `max_fields` of them
+    const ptr = layout.many(Field, h.buffer.ptr, at); // pool buffers are 64-aligned, `at` is aligned for a Field, and the buffer has room for `max_fields` of them
     return ptr[0..h.max_fields];
 }
 

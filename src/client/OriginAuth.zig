@@ -11,6 +11,7 @@
 //! until that request settles.
 
 const std = @import("std");
+const erased = @import("../erased.zig");
 const sync = @import("../sync.zig");
 const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
@@ -298,13 +299,13 @@ const Store = struct {
     }
 
     fn fillFn(_: Io, context: ?*anyopaque, _: Credentials.Query) Credentials.FillError!?Credentials.Secret {
-        const s: *Store = @ptrCast(@alignCast(context.?)); // safe: the tests pass a Store
+        const s: *Store = erased.restore(Store, context);
         s.filled += 1;
         return s.secret;
     }
 
     fn doneFn(_: Io, context: ?*anyopaque, _: Credentials.Query, _: Credentials.Secret, accepted: bool) void {
-        const s: *Store = @ptrCast(@alignCast(context.?)); // safe: the tests pass a Store
+        const s: *Store = erased.restore(Store, context);
         if (accepted) s.taken += 1 else s.refused += 1;
     }
 };

@@ -7,6 +7,7 @@
 //! none pays for no clock reads.
 
 const std = @import("std");
+const erased = @import("../erased.zig");
 const Io = std.Io;
 const Duration = @import("../span.zig").Duration;
 
@@ -68,7 +69,7 @@ test "an observer is handed each event" {
         n: u32 = 0,
         const Self = @This();
         fn on(context: ?*anyopaque, event: Event) void {
-            const self: *Self = @ptrCast(@alignCast(context.?)); // safe: the test passes its own counter
+            const self: *Self = erased.restore(Self, context);
             switch (event) {
                 .head => |h| if (h.status == 200) {
                     self.n += 1;

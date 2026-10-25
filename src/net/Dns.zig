@@ -10,6 +10,7 @@
 //! asked (`Options.resolver`).
 
 const std = @import("std");
+const erased = @import("../erased.zig");
 const sync = @import("../sync.zig");
 const reactor = @import("reactor");
 const Allocator = std.mem.Allocator;
@@ -48,7 +49,7 @@ pub const ExchangeError = error{
 };
 
 pub fn resolver(d: *const Dns) Resolver {
-    return .{ .context = @constCast(d), .lookupFn = lookupFn, .serviceFn = serviceFn }; // safe: a lookup only reads through the pointer
+    return .{ .context = erased.erase(d), .lookupFn = lookupFn, .serviceFn = serviceFn };
 }
 
 /// The ids of queries: random, so an answer cannot be guessed.
@@ -67,7 +68,7 @@ const Found = union(enum) {
 };
 
 fn lookupFn(io: Io, context: ?*anyopaque, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress) Resolver.LookupError![]IpAddress {
-    const d: *const Dns = @ptrCast(@alignCast(context.?)); // safe: `resolver` passes a Dns
+    const d: *const Dns = erased.restore(Dns, context);
     var candidates = d.config.candidates(host);
     var name_buf: [dns.max_name]u8 = undefined;
     while (candidates.next(&name_buf)) |name| {
@@ -204,7 +205,7 @@ pub fn https(d: *const Dns, io: Io, gpa: Allocator, host: []const u8) (NameError
             .name_error => return error.NoName,
             else => return error.NoAnswer,
         }
-        var kept: [max_records]Resolver.Binding.Record = undefined;
+        var kept: aegis.bounded.Array(Resolver.Binding.Record, max_records) = .init;
         var targets: [max_records][dns.max_name]u8 = undefined;
         var n: usize = 0;
         var alias: ?[]const u8 = null;
@@ -223,14 +224,16 @@ pub fn https(d: *const Dns, io: Io, gpa: Allocator, host: []const u8) (NameError
             // A target of "." is the record's own name (§2.5.2).
             const target = if (s.target.len == 0) name else s.target;
             @memcpy(targets[n][0..target.len], target);
-            // In order of priority; equal ones in the answer's order.
-            var at = n;
-            while (at > 0 and kept[at - 1].service.priority > s.priority) : (at -= 1) kept[at] = kept[at - 1];
-            kept[at] = .{ .target = targets[n][0..target.len], .service = s };
+            var record: Resolver.Binding.Record = .{ .target = targets[n][0..target.len], .service = s };
+            kept.append(&record) catch unreachable; // unreachable: fewer than `max_records` were kept, checked above
             n += 1;
+            // In order of priority; equal ones in the answer's order.
+            const list = kept.items();
+            var at = list.len - 1;
+            while (at > 0 and list[at - 1].service.priority > s.priority) : (at -= 1) std.mem.swap(Resolver.Binding.Record, &list[at], &list[at - 1]);
         }
         // RFC 9460 §2.4.2: ServiceMode records beside an alias are ignored.
-        if (n != 0 and alias == null) return try Resolver.Binding.init(gpa, kept[0..n]);
+        if (n != 0 and alias == null) return try Resolver.Binding.init(gpa, kept.items());
         // An alias to the root, or to nowhere new, means no service.
         const next = alias orelse return null;
         if (next.len == 0 or std.ascii.eqlIgnoreCase(next, name)) return null;
@@ -241,7 +244,7 @@ pub fn https(d: *const Dns, io: Io, gpa: Allocator, host: []const u8) (NameError
 }
 
 fn serviceFn(io: Io, context: ?*anyopaque, gpa: Allocator, name: []const u8) Resolver.ServiceError!?Resolver.Binding {
-    const d: *const Dns = @ptrCast(@alignCast(context.?)); // safe: `resolver` passes a Dns
+    const d: *const Dns = erased.restore(Dns, context);
     return d.https(io, gpa, name) catch |err| switch (err) {
         error.Canceled => error.Canceled,
         error.OutOfMemory => error.OutOfMemory,
@@ -318,7 +321,7 @@ pub const Stub = struct {
     }
 
     fn exchange(io: Io, context: ?*anyopaque, query: []const u8, answer: []u8) ExchangeError![]u8 {
-        const s: *Stub = @ptrCast(@alignCast(context.?)); // safe: `transport` passes a Stub
+        const s: *Stub = erased.restore(Stub, context);
         if (s.servers.len == 0) return error.NoAnswer;
         const first: usize = if (s.rotate) turnOf(s.turn.fetchAddWrapping(.fromRaw(1), .monotonic), s.servers.len) else 0;
         for (0..s.attempts) |_| for (0..s.servers.len) |i| {

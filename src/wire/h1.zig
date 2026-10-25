@@ -381,6 +381,7 @@ pub fn keepAlive(version: Version, headers: *const Headers) bool {
 /// bytes are consumed here, and the data between them is handed to the
 /// caller in place, never copied.
 pub const ChunkedDecoder = struct {
+    // aegis: hot-loop: the decoder's place in the chunk grammar, set per byte read
     state: State = .size,
     lenience: Lenience = .response,
     /// Data bytes left in the current chunk, or the size being read.
@@ -391,6 +392,7 @@ pub const ChunkedDecoder = struct {
     /// Trailer bytes so far.
     trailer_len: u32 = 0,
     /// Where a strict read is inside a chunk extension.
+    // aegis: hot-loop: the place in an extension's grammar, set per byte read
     ext: Extension = .name_start,
 
     /// The grammar of a chunk extension, read strictly (RFC 9112 §7.1.1):

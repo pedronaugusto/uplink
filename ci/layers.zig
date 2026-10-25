@@ -44,6 +44,12 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "sync", .patterns = &.{
         "src/sync.zig",
     } },
+    .{ .name = "erased", .patterns = &.{
+        "src/erased.zig",
+    } },
+    .{ .name = "place", .patterns = &.{
+        "src/place.zig",
+    } },
     .{ .name = "tls", .patterns = &.{
         "src/tls.zig",
     } },

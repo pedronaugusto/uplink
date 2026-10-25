@@ -11,6 +11,7 @@
 //! points into it.
 
 const std = @import("std");
+const place = @import("../place.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const wire = @import("uplink.wire");
@@ -239,7 +240,7 @@ pub fn trailers(r: *Response) ?fields.Headers {
     const bytes = r.body.trailerBytes() orelse return null;
     // `bytes` starts the pool buffer, which is aligned past a Field's need.
     const end = std.mem.alignForward(usize, bytes.len, @alignOf(fields.Field));
-    const field_ptr: [*]fields.Field = @ptrCast(@alignCast(r.body.trailer.ptr + end)); // safe: pool buffers are 64-aligned and `end` is aligned for a Field, with room for `trailer_fields` of them
+    const field_ptr = place.many(fields.Field, r.body.trailer.ptr, end); // pool buffers are 64-aligned and `end` is aligned for a Field, with room for `trailer_fields` of them
     const parsed = h1.parseTrailer(bytes, field_ptr[0..Body.trailer_fields]) catch return null;
     r.trailer_fields = parsed;
     return parsed;
@@ -279,7 +280,7 @@ pub fn collect(r: *Response, gpa: Allocator, io: Io, limit: Io.Limit) CollectErr
 
 /// Why the last read of the body failed.
 pub fn failure(r: *const Response) ReadError {
-    return switch (r.body.state) {
+    return switch (r.body.state.current()) {
         .incomplete => error.BodyIncomplete,
         .malformed => error.HttpProtocolError,
         .too_large => unreachable, // unreachable: the client caps no body
@@ -308,7 +309,7 @@ pub fn deinit(r: *Response, io: Io) void {
         // Kept only when the body ended whole, every byte of it through the
         // tee, and the store took all of it; before a drain reads the rest
         // past it.
-        if (r.body.state == .done and !t.dropped) {
+        if (r.body.state.current() == .done and !t.dropped) {
             // glint-ignore: Z026 -- a store that fails costs the cache, never the response; the observer heard of a failed begin
             t.cache.store.commit(io, t.writing) catch {};
         } else t.cache.store.abort(io, t.writing);
@@ -536,7 +537,7 @@ pub fn receive(io: Io, ctx: *Context, pool: *Pool, conn: *Connection, options: R
 /// under any other, or under codings uplink cannot read, is handed over as
 /// it came, `Content-Encoding` and all.
 fn planDecoding(r: *Response, io: Io) Allocator.Error!void {
-    if (r.body.state == .done) return;
+    if (r.body.state.current() == .done) return;
     const codings = coding.Codings.of(&r.headers) catch return;
     if (codings.len == 0 or !Decoder.decodes(codings.slice())) return;
     r.decoder = try .init(io, r.ctx.gpa, &r.ctx.buffers, &r.ctx.zstd, codings.slice());

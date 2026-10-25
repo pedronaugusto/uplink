@@ -2,6 +2,7 @@
 //! called with the request and the response that answers it.
 
 const std = @import("std");
+const erased = @import("../erased.zig");
 const Io = std.Io;
 const Request = @import("Request.zig");
 const Response = @import("Response.zig");
@@ -26,10 +27,10 @@ pub fn handle(h: Handler, io: Io, request: *Request, response: *Response) anyerr
 pub fn init(context: anytype, comptime function: fn (@TypeOf(context), Io, *Request, *Response) anyerror!void) Handler {
     const Context = @TypeOf(context);
     return .{
-        .context = @ptrCast(@constCast(context)), // safe: erased here and restored as the same type in `call`
+        .context = erased.erase(context),
         .handleFn = struct {
-            fn call(erased: ?*anyopaque, io: Io, request: *Request, response: *Response) anyerror!void {
-                const typed: Context = @ptrCast(@alignCast(erased)); // safe: `init` erased a pointer of this type
+            fn call(opaque_context: ?*anyopaque, io: Io, request: *Request, response: *Response) anyerror!void {
+                const typed: Context = erased.restore(@typeInfo(Context).pointer.child, opaque_context);
                 return function(typed, io, request, response);
             }
         }.call,

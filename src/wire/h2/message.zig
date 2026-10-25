@@ -152,7 +152,7 @@ pub fn copy(buffer: []u8, fields: []const hpack.Field) error{NoSpaceLeft}![]Fiel
     const fields_at = std.mem.alignForward(usize, bytes, @alignOf(Field));
     if (fields_at + fields.len * @sizeOf(Field) > buffer.len) return error.NoSpaceLeft;
     std.debug.assert(std.mem.isAligned(@intFromPtr(buffer.ptr), @alignOf(Field))); // safe: the address is only tested for alignment
-    const out: [*]Field = @ptrCast(@alignCast(buffer.ptr + fields_at)); // safe: `buffer` is aligned for a Field (asserted) and so is `fields_at`, inside it
+    const out: [*]Field = @ptrCast(@alignCast(buffer.ptr + fields_at)); // aegis: internal: `buffer` is aligned for a Field (asserted) and so is `fields_at`, inside it
     var at: usize = 0;
     for (fields, 0..) |f, i| {
         @memcpy(buffer[at..][0..f.name.len], f.name);

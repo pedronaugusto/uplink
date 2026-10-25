@@ -39,7 +39,7 @@ secure: bool = false,
 session_buffers: [2][]u8 = .{ &.{}, &.{} },
 /// Which wait the next operation is part of; on a multiplexed connection,
 /// the next read.
-phase: Phase = .head,
+phase: Phases.Runtime(void) = .init({}),
 /// The end of the handshake, the idle wait or the head, on the awake
 /// clock.
 until: ?Io.Timestamp = null,
@@ -61,6 +61,42 @@ pub const Phase = enum {
     /// HTTP/2 with streams open: a read waits as long as they take.
     h2,
 };
+
+/// What starts a phase: the next wait the connection does, or the handler
+/// taking it over.
+pub const Start = enum { handshake, idle, head, answer, h2, hijack };
+
+/// Which wait an operation belongs to. TLS's handshake comes first and only
+/// first; a handler that takes the connection over ends it; any other wait
+/// may follow any other.
+const Phases = aegis.state.Machine(Phase, Start, .{ .initial = .head, .terminal = &.{.hijacked}, .edges = &phase_edges });
+const phase_edges = edges: {
+    const Edge = aegis.state.Edge(Phase, Start);
+    const waits = [_]Phase{ .idle, .head, .answer, .h2 };
+    var list: [4 + waits.len * (waits.len + 1)]Edge = undefined;
+    var n: usize = 0;
+    list[n] = .{ .from = .head, .on = .handshake, .to = .handshake };
+    n += 1;
+    for ([_]Phase{ .idle, .head, .h2 }) |to| {
+        list[n] = .{ .from = .handshake, .on = @field(Start, @tagName(to)), .to = to };
+        n += 1;
+    }
+    for (waits) |from| {
+        for (waits) |to| {
+            list[n] = .{ .from = from, .on = @field(Start, @tagName(to)), .to = to };
+            n += 1;
+        }
+        list[n] = .{ .from = from, .on = .hijack, .to = .hijacked };
+        n += 1;
+    }
+    const all = list;
+    break :edges all;
+};
+
+/// Begin the phase `start` starts.
+pub fn enter(c: *Socket, start: Start) void {
+    _ = c.phase.step(start) catch unreachable; // unreachable: the handshake starts first, and nothing follows a takeover
+}
 
 /// Why an operation failed.
 pub const Failure = enum(u8) { none, timed_out, canceled, broken };
@@ -89,13 +125,13 @@ pub fn init(context: *Context, io: Io, stream: Io.net.Stream) Socket {
 
 /// Start the wait for a head: until the head timeout from now.
 pub fn startHead(c: *Socket, io: Io) void {
-    c.phase = .head;
+    c.enter(.head);
     c.until = if (c.context.options.timeouts.head) |d| Io.Clock.awake.now(io).addDuration(span.toIo(d)) else null;
 }
 
 /// Start the wait between requests: until the idle timeout from now.
 pub fn startIdle(c: *Socket, io: Io) void {
-    c.phase = .idle;
+    c.enter(.idle);
     c.until = if (c.context.options.timeouts.idle) |d| Io.Clock.awake.now(io).addDuration(span.toIo(d)) else null;
 }
 
@@ -113,7 +149,7 @@ pub fn adopt(c: *Socket, io: Io) void {
 
 /// Serve HTTP/2 streams: reads wait as long as the streams take.
 pub fn startH2(c: *Socket) void {
-    c.phase = .h2;
+    c.enter(.h2);
     c.until = null;
 }
 
@@ -126,7 +162,7 @@ pub fn alpn(c: *const Socket) []const u8 {
 
 /// Answer a request: each operation ends at the activity timeout.
 pub fn startAnswer(c: *Socket) void {
-    c.phase = .answer;
+    c.enter(.answer);
     c.until = null;
 }
 
@@ -263,7 +299,7 @@ pub fn handshake(c: *Socket, options: tls.ServerOptions) error{Failed}!void {
         pool.release(io, read_buffer);
         return error.Failed;
     };
-    c.phase = .handshake;
+    c.enter(.handshake);
     c.until = if (s.options.timeouts.handshake) |t| Io.Clock.awake.now(io).addDuration(span.toIo(t)) else null;
     const tickets = s.ticketKeys(io) catch |err| {
         if (err == error.Canceled) c.note(.canceled);
@@ -351,7 +387,7 @@ pub fn failed(c: *const Socket) Failure {
 /// the activity timeout alone.
 fn deadline(c: *Socket, op: Io.Operation) ?Io.Timestamp {
     if (c.multiplexed and op != .net_read) return c.activityDeadline();
-    return switch (c.phase) {
+    return switch (c.phase.current()) {
         .handshake, .idle, .head => c.until,
         .hijacked, .h2 => null,
         .answer => c.activityDeadline(),

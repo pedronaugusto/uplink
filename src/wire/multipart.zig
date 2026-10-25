@@ -10,6 +10,7 @@
 //! line or its quoted string.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const fields = @import("fields.zig");
 
@@ -196,13 +197,33 @@ pub const Reader = struct {
     delimiter_len: usize,
     /// Private: where a part's head is kept.
     head_buffer: []u8,
-    state: State = .preamble,
+    state: Parts.Runtime(void) = .init({}),
     /// The current part's data.
     interface: Io.Reader,
     /// Private: why the last read failed.
     failure: ?ReadError = null,
 
     const State = enum { preamble, body, between, done };
+    const Event = enum {
+        /// A part's head was read: its data follows.
+        part,
+        /// What comes before the first boundary is read as data, to skip.
+        skip,
+        /// A part's data ended at a boundary.
+        delimiter,
+        /// The closing boundary.
+        closed,
+    };
+    /// Where a body is: before its first boundary, in a part's data,
+    /// between parts, or past its closing boundary.
+    const Parts = aegis.state.Machine(State, Event, .{ .initial = .preamble, .terminal = &.{.done}, .edges = &.{
+        .{ .from = .preamble, .on = .part, .to = .body },
+        .{ .from = .preamble, .on = .skip, .to = .body },
+        .{ .from = .preamble, .on = .closed, .to = .done },
+        .{ .from = .body, .on = .delimiter, .to = .between },
+        .{ .from = .between, .on = .part, .to = .body },
+        .{ .from = .between, .on = .closed, .to = .done },
+    } });
 
     /// A reader of the body `in` gives, between `boundary`s, keeping each
     /// part's head in `head_buffer`, and using `buffer` for the part's
@@ -229,7 +250,7 @@ pub const Reader = struct {
 
     /// Move to the next part and read its head, or null after the last.
     pub fn next(r: *Reader) ReadError!?PartHead {
-        switch (r.state) {
+        switch (r.state.current()) {
             .done => return null,
             .preamble => {
                 // The first boundary may start the body, without the CRLF
@@ -240,7 +261,7 @@ pub const Reader = struct {
                 // Skip what is left of the current part.
                 r.interface.seek = 0;
                 r.interface.end = 0;
-                while (r.state == .body) _ = try r.dataSlice(std.math.maxInt(usize));
+                while (r.state.current() == .body) _ = try r.dataSlice(std.math.maxInt(usize));
             },
             .between => {},
         }
@@ -248,7 +269,7 @@ pub const Reader = struct {
         const after = try r.peek(2);
         if (std.mem.eql(u8, after, "--")) {
             r.in.toss(2);
-            r.state = .done;
+            _ = r.state.step(.closed) catch unreachable; // unreachable: at a boundary, before a part or between two
             return null;
         }
         while (true) {
@@ -259,7 +280,7 @@ pub const Reader = struct {
         if (!std.mem.eql(u8, try r.peek(2), "\r\n")) return error.Malformed;
         r.in.toss(2);
         const head = try r.readHead();
-        r.state = .body;
+        _ = r.state.step(.part) catch unreachable; // unreachable: at a boundary, before a part or between two
         return head;
     }
 
@@ -285,8 +306,8 @@ pub const Reader = struct {
             }
         }
         // A preamble: the boundary follows a CRLF.
-        r.state = .body;
-        while (r.state == .body) _ = try r.dataSlice(std.math.maxInt(usize));
+        _ = r.state.step(.skip) catch unreachable; // unreachable: only the preamble is skipped
+        while (r.state.current() == .body) _ = try r.dataSlice(std.math.maxInt(usize));
     }
 
     /// The next part head's fields, up to its blank line.
@@ -337,7 +358,7 @@ pub const Reader = struct {
             if (std.mem.find(u8, buffered, d)) |at| {
                 if (at == 0) {
                     r.in.toss(d.len);
-                    r.state = .between;
+                    _ = r.state.step(.delimiter) catch unreachable; // unreachable: only a part's data is read
                     return &.{};
                 }
                 const n = @min(at, limit);
@@ -361,7 +382,7 @@ pub const Reader = struct {
 
     fn stream(io_r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
         const r: *Reader = @alignCast(@fieldParentPtr("interface", io_r)); // safe: this vtable is installed only on a Reader's interface
-        if (r.state != .body) return error.EndOfStream;
+        if (r.state.current() != .body) return error.EndOfStream;
         const bytes = r.dataSlice(limit.toInt() orelse std.math.maxInt(usize)) catch |err| {
             r.failure = err;
             return error.ReadFailed;

@@ -16,6 +16,7 @@
 //! layer reads from the one before it.
 
 const std = @import("std");
+const place = @import("../place.zig");
 const warp = @import("warp");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -117,7 +118,8 @@ pub fn start(d: *Decoder, source: *Io.Reader, zstd: *const ZstdBuffer) *Io.Reade
 }
 
 fn flateOf(l: *const Layer) *Flate {
-    return @ptrCast(@alignCast(l.buffer.ptr + flateSplit(l.buffer.len).state_at)); // safe: pool buffers are 64-aligned and the split aligns the state's place for it, inside the buffer
+    // Pool buffers are 64-aligned and the split aligns the state's place for it, inside the buffer.
+    return place.one(Flate, l.buffer.ptr, flateSplit(l.buffer.len).state_at);
 }
 
 /// What a flate layer for `coding` accepts: gzip's members, every one; for

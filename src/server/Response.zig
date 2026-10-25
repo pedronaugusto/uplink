@@ -52,7 +52,7 @@ fields_len: usize = 0,
 /// Private: the body's buffer, from the pool once `writer` is asked for.
 body_buffer: []u8 = &.{},
 /// Private: where the response stands.
-state: State = .open,
+state: Stages.Runtime(void) = .init({}),
 /// Private: the length the handler declared, of the body as written.
 declared: ?u64 = null,
 /// Private: the framing the head chose.
@@ -97,6 +97,29 @@ const State = enum {
     /// The connection was handed to the handler.
     hijacked,
 };
+
+const Event = enum {
+    /// The head went out.
+    head,
+    /// The response is done.
+    finish,
+    /// The handler takes the connection over.
+    hijack,
+};
+
+/// A response's life: its head, then its body, ended or taken over.
+const Stages = aegis.state.Machine(State, Event, .{ .initial = .open, .terminal = &.{ .ended, .hijacked }, .edges = &.{
+    .{ .from = .open, .on = .head, .to = .streaming },
+    .{ .from = .open, .on = .finish, .to = .ended },
+    .{ .from = .open, .on = .hijack, .to = .hijacked },
+    .{ .from = .streaming, .on = .finish, .to = .ended },
+    .{ .from = .streaming, .on = .hijack, .to = .hijacked },
+} });
+
+/// Take `event`'s edge; every caller is at a state it leaves from.
+fn advance(r: *Response, event: Event) void {
+    _ = r.state.step(event) catch unreachable; // unreachable: each caller is open or streaming, as its event needs
+}
 
 const Framing = enum {
     none,
@@ -146,7 +169,7 @@ pub fn init(socket: *Socket, head_only: bool, http1_0: bool, accept_encoding: ?[
 /// `Connection` field that names `close` closes the connection after the
 /// response.
 pub fn header(r: *Response, name: []const u8, value: []const u8) Error!void {
-    if (r.state != .open) return error.HeadSent;
+    if (r.state.current() != .open) return error.HeadSent;
     h1.checkHeader(.{ .name = name, .value = value }) catch return error.InvalidHeader;
     if (std.ascii.eqlIgnoreCase(name, "content-length") or std.ascii.eqlIgnoreCase(name, "transfer-encoding")) return error.InvalidHeader;
     if (std.ascii.eqlIgnoreCase(name, "date")) r.has_date = true;
@@ -181,7 +204,7 @@ fn reserve(r: *Response, buffer: *[]u8, len: usize, need: usize) Error!void {
 /// must be exactly this long. A body sent compressed is chunked instead,
 /// and still held to the length declared.
 pub fn setLength(r: *Response, length: u64) Error!void {
-    if (r.state != .open) return error.HeadSent;
+    if (r.state.current() != .open) return error.HeadSent;
     r.declared = length;
 }
 
@@ -194,7 +217,7 @@ pub fn closeAfter(r: *Response) void {
 /// fits goes out with its length counted.
 pub fn writer(r: *Response, io: Io) Error!*Io.Writer {
     r.socket.adopt(io);
-    if (r.state == .hijacked or r.state == .ended) return error.HeadSent;
+    if (r.state.current() == .hijacked or r.state.current() == .ended) return error.HeadSent;
     if (r.body_buffer.len == 0) {
         r.body_buffer = try r.socket.context.buffers.acquire(io, .small);
         r.interface.buffer = r.body_buffer;
@@ -205,7 +228,7 @@ pub fn writer(r: *Response, io: Io) Error!*Io.Writer {
 /// Send `body` whole, and end the response.
 pub fn send(r: *Response, io: Io, body: []const u8) Error!void {
     r.socket.adopt(io);
-    if (r.state != .open) return error.HeadSent;
+    if (r.state.current() != .open) return error.HeadSent;
     if (r.declared) |n| if (n != body.len) return error.BodyNotAllowed;
     return r.sendWhole(body);
 }
@@ -218,7 +241,7 @@ pub fn send(r: *Response, io: Io, body: []const u8) Error!void {
 /// under a coding pushes as much as the coding has put out.
 pub fn flush(r: *Response, io: Io) Error!void {
     r.socket.adopt(io);
-    switch (r.state) {
+    switch (r.state.current()) {
         .open => {
             r.compressible = false;
             try r.sendHead(.chunked, null);
@@ -232,7 +255,7 @@ pub fn flush(r: *Response, io: Io) Error!void {
 
 /// Add a field to the trailer of a chunked body, sent at `end`.
 pub fn trailer(r: *Response, name: []const u8, value: []const u8) Error!void {
-    if (r.state == .ended or r.state == .hijacked) return error.HeadSent;
+    if (r.state.current() == .ended or r.state.current() == .hijacked) return error.HeadSent;
     h1.checkHeader(.{ .name = name, .value = value }) catch return error.InvalidHeader;
     try r.appendField(&r.trailer_buffer, &r.trailer_len, name, value);
 }
@@ -242,7 +265,7 @@ pub fn trailer(r: *Response, name: []const u8, value: []const u8) Error!void {
 /// pushed to the client.
 pub fn end(r: *Response, io: Io) Error!void {
     r.socket.adopt(io);
-    switch (r.state) {
+    switch (r.state.current()) {
         .ended => return,
         .hijacked => {
             // A taken-over stream ends with the handler, as a connection
@@ -275,7 +298,7 @@ pub fn end(r: *Response, io: Io) Error!void {
     if (r.declared != null and r.remaining != 0) return r.finishShort();
     if (r.stream) |st| {
         if (!st.ended) try r.endH2(st);
-        r.state = .ended;
+        r.advance(.finish);
         return;
     }
     if (r.framing == .chunked) {
@@ -284,7 +307,7 @@ pub fn end(r: *Response, io: Io) Error!void {
         w.writeAll(r.trailer_buffer[0..r.trailer_len]) catch return r.fail();
         w.writeAll("\r\n") catch return r.fail();
     }
-    r.state = .ended;
+    r.advance(.finish);
     r.flushOut() catch return r.fail();
 }
 
@@ -304,7 +327,7 @@ fn endH2(r: *Response, st: *Session.Stream) Error!void {
 /// so it sees a truncation, never a short success.
 fn finishShort(r: *Response) Error {
     r.broken = true;
-    r.state = .ended;
+    r.advance(.finish);
     if (r.stream) |st| {
         st.reset(r.socket.io, .internal_error);
         return error.BodyIncomplete;
@@ -335,11 +358,11 @@ fn sendWhole(r: *Response, body: []const u8) Error!void {
         r.remaining = 0;
         if (r.stream) |st| {
             if (!st.ended) st.writeData(r.socket.io, coded, true) catch |err| return r.failStream(err);
-            r.state = .ended;
+            r.advance(.finish);
             return;
         }
         if (!r.head_only) r.out().writeAll(coded) catch return r.fail();
-        r.state = .ended;
+        r.advance(.finish);
         r.flushOut() catch return r.fail();
         return;
     }
@@ -352,11 +375,11 @@ fn sendWhole(r: *Response, body: []const u8) Error!void {
             r.remaining = 0;
             st.writeData(r.socket.io, body, true) catch |err| return r.failStream(err);
         } else if (!st.ended) try r.endH2(st);
-        r.state = .ended;
+        r.advance(.finish);
         return;
     }
     try r.bodyBytes(&.{body}, 1);
-    r.state = .ended;
+    r.advance(.finish);
     r.flushOut() catch return r.fail();
 }
 
@@ -403,12 +426,12 @@ pub const Hijacked = struct {
 /// ways, until either end ends it.
 pub fn hijack(r: *Response, io: Io) Error!Hijacked {
     r.socket.adopt(io);
-    if (r.state != .open) return error.HeadSent;
+    if (r.state.current() != .open) return error.HeadSent;
     if (r.stream) |st| {
         if (@backingInt(r.status) / 100 != 2) return error.HeadSent;
         // The stream carries another protocol's bytes: never coded.
         r.compressible = false;
-        try r.sendHeadH2(st, .chunked, null);
+        try r.sendHead(.chunked, null);
         r.body_buffer = try r.socket.context.buffers.acquire(io, .small);
         r.tunnel.buffer = r.body_buffer;
         // What the stream carries is read as a connection would be,
@@ -416,26 +439,26 @@ pub fn hijack(r: *Response, io: Io) Error!Hijacked {
         r.tunnel_in = try r.socket.context.buffers.acquire(io, .record);
         const in = st.reader(io);
         in.buffer = r.tunnel_in;
-        r.state = .hijacked;
+        r.advance(.hijack);
         return .{ .reader = in, .writer = &r.tunnel, .socket = r.socket, .stream = st, .response = r };
     }
     try r.sendHead(.none, null);
     r.flushOut() catch return r.fail();
-    r.state = .hijacked;
+    r.advance(.hijack);
     r.socket.hijacked = true;
-    r.socket.phase = .hijacked;
+    r.socket.enter(.hijack);
     return .{ .reader = r.socket.reader(), .writer = r.socket.writer(), .socket = r.socket, .response = r };
 }
 
 /// Whether the head has gone out.
 pub fn headSent(r: *const Response) bool {
-    return r.state != .open;
+    return r.state.current() != .open;
 }
 
 /// Whether the connection can carry another exchange after this response.
 pub fn keepsConnection(r: *const Response) bool {
-    if (r.stream != null) return r.state == .ended and !r.broken;
-    return r.state == .ended and !r.closing and !r.broken and r.framing != .close;
+    if (r.stream != null) return r.state.current() == .ended and !r.broken;
+    return r.state.current() == .ended and !r.closing and !r.broken and r.framing != .close;
 }
 
 /// Give back the response's buffers and its encoder.
@@ -454,7 +477,7 @@ pub fn release(r: *Response, io: Io) void {
 /// Forget everything set, for an answer the server writes in its place
 /// (a 500 after a handler failed before its head went out).
 pub fn reset(r: *Response, io: Io) void {
-    std.debug.assert(r.state == .open);
+    std.debug.assert(r.state.current() == .open);
     r.release(io);
     const kept = r.*;
     r.* = .init(kept.socket, kept.head_only, kept.http1_0, kept.accept_encoding);
@@ -522,21 +545,27 @@ fn coding(r: *const Response, length: ?u64) ?Encoder.Coding {
     return null;
 }
 
+/// How the body goes, for the framing the caller has: none for a status
+/// that has none or a head alone, its length where it is known and no
+/// coding streams it, else HTTP/2's frames, HTTP/1.0's close or chunks.
+fn framingFor(r: *const Response, want: Framing, streamed: ?Encoder.Coding) Framing {
+    if (bodiless(r.status) or want == .none) return .none;
+    if (want == .length) return .length;
+    if (r.declared != null and streamed == null) return .length;
+    if (r.stream != null) return .frames;
+    return if (r.http1_0) .close else .chunked;
+}
+
 /// Write the head. `want` is the framing the caller has: `length` when the
 /// length is known (`declared`), `chunked` while streaming, `none` for a
 /// head alone. `coded` is the coding a whole body was put under.
 fn sendHead(r: *Response, want: Framing, coded: ?Encoder.Coding) Error!void {
-    std.debug.assert(r.state == .open);
-    if (r.stream) |st| return r.sendHeadH2(st, want, coded);
-    const code = @backingInt(r.status);
+    std.debug.assert(r.state.current() == .open);
     // A body streamed under a coding is chunked, whatever its length.
     const streamed = if (want == .chunked) r.coding(r.declared) else null;
-    r.framing = if (bodiless(r.status) or want == .none)
-        .none
-    else switch (want) {
-        .length => .length,
-        else => if (r.declared != null and streamed == null) .length else if (r.http1_0) .close else .chunked,
-    };
+    r.framing = r.framingFor(want, streamed);
+    if (r.stream) |st| return r.sendHeadH2(st, streamed, coded);
+    const code = @backingInt(r.status);
     if (r.framing == .close) r.closing = true;
     if (r.socket.context.isStopping()) r.closing = true;
     if (streamed) |c| try r.startEncoder(c);
@@ -562,21 +591,14 @@ fn sendHead(r: *Response, want: Framing, coded: ?Encoder.Coding) Error!void {
     if (r.closing and code != 101) w.writeAll("Connection: close\r\n") catch return r.fail();
     w.writeAll(r.fields_buffer[0..r.fields_len]) catch return r.fail();
     w.writeAll("\r\n") catch return r.fail();
-    r.state = .streaming;
+    r.advance(.head);
 }
 
 /// The head as HTTP/2 HEADERS: the status and the fields with lower-case
 /// names, those of a connection's own left out; the stream ends with them
 /// when no body follows.
-fn sendHeadH2(r: *Response, st: *Session.Stream, want: Framing, coded: ?Encoder.Coding) Error!void {
+fn sendHeadH2(r: *Response, st: *Session.Stream, streamed: ?Encoder.Coding, coded: ?Encoder.Coding) Error!void {
     const code = @backingInt(r.status);
-    const streamed = if (want == .chunked) r.coding(r.declared) else null;
-    r.framing = if (bodiless(r.status) or want == .none)
-        .none
-    else switch (want) {
-        .length => .length,
-        else => if (r.declared != null and streamed == null) .length else .frames,
-    };
     if (streamed) |c| try r.startEncoder(c);
     var list: [max_h2_fields]hpack.Field = undefined;
     var n: usize = 0;
@@ -606,7 +628,7 @@ fn sendHeadH2(r: *Response, st: *Session.Stream, want: Framing, coded: ?Encoder.
     n = wire.h2.message.appendLines(&list, n, r.fields_buffer[0..r.fields_len]) catch return error.HeadTooLarge;
     const end_stream = r.framing == .none or r.head_only or (r.framing == .length and r.declared.? == 0);
     st.writeHeaders(r.socket.io, list[0..n], end_stream) catch |err| return r.failStream(err);
-    r.state = .streaming;
+    r.advance(.head);
 }
 
 /// The most fields an HTTP/2 head carries.
@@ -661,7 +683,7 @@ fn frame(r: *Response, data: []const []const u8, splat: usize, total: u64) Error
 
 fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
     const r: *Response = @alignCast(@fieldParentPtr("interface", w)); // safe: this vtable is installed only on a Response's interface
-    switch (r.state) {
+    switch (r.state.current()) {
         .open => r.sendHead(.chunked, null) catch return error.WriteFailed,
         .streaming => {},
         .ended, .hijacked => return error.WriteFailed,

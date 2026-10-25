@@ -6,6 +6,7 @@
 //! points into it.
 
 const std = @import("std");
+const place = @import("../place.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const wire = @import("uplink.wire");
@@ -181,7 +182,7 @@ pub fn failure(r: *const Request) ReadError {
         error.StreamClosed => error.ConnectionFailed,
         error.Canceled => error.Canceled,
     } else error.BadContentEncoding;
-    return switch (r.body.state) {
+    return switch (r.body.state.current()) {
         .incomplete => error.BodyIncomplete,
         .malformed => error.HttpProtocolError,
         .too_large => error.BodyTooLarge,
@@ -206,7 +207,7 @@ pub fn cookie(r: *const Request, name: []const u8) ?[]const u8 {
 /// does not parse, 413 for a body past `Options.max_body`; null when the
 /// body was not at fault.
 pub fn bodyFault(r: *const Request) ?std.http.Status {
-    if (r.stream == null) switch (r.body.state) {
+    if (r.stream == null) switch (r.body.state.current()) {
         .malformed => return .bad_request,
         .too_large => return .payload_too_large,
         .incomplete, .read_failed, .reading, .done => {},
@@ -233,7 +234,7 @@ pub fn trailers(r: *Request) ?fields.Headers {
     }
     const bytes = r.body.trailerBytes() orelse return null;
     const end = std.mem.alignForward(usize, bytes.len, @alignOf(fields.Field));
-    const field_ptr: [*]fields.Field = @ptrCast(@alignCast(r.body.trailer.ptr + end)); // safe: pool buffers are 64-aligned and `end` is aligned for a Field, with room for `trailer_fields` of them
+    const field_ptr = place.many(fields.Field, r.body.trailer.ptr, end); // pool buffers are 64-aligned and `end` is aligned for a Field, with room for `trailer_fields` of them
     const parsed = h1.parseTrailer(bytes, field_ptr[0..Body.trailer_fields]) catch return null;
     r.trailer_fields = parsed;
     return parsed;
