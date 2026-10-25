@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const Io = std.Io;
+const aegis = @import("aegis");
 const reactor = @import("reactor");
 const uplink = @import("uplink");
 const cloak = @import("cloak");
@@ -41,9 +42,9 @@ pub fn main(init: std.process.Init) !void {
     defer if (key) |k| k.deinit();
     var credentials: [1]cloak.tls.Credential = undefined;
     if (tls_files) |files| {
-        const cert = try cwd.readFileAlloc(io, files[0], gpa, .limited(1 << 20));
+        const cert = try aegis.own.readFile(io, cwd, files[0], gpa, .literal("1MiB"));
         defer gpa.free(cert);
-        const key_pem = try cwd.readFileAlloc(io, files[1], gpa, .limited(1 << 20));
+        const key_pem = try aegis.own.readFile(io, cwd, files[1], gpa, .literal("1MiB"));
         defer gpa.free(key_pem);
         key = try cloak.PrivateKey.parse(gpa, key_pem, .{});
         identity = try cloak.Identity.initPem(gpa, cert, key.?, .{});

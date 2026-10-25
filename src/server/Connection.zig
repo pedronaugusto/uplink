@@ -172,7 +172,7 @@ fn serveOne(c: *Connection) bool {
         .version = rh.version,
         .headers = rh.headers,
         .host = target.authority orelse host_field orelse "",
-        .remote = if (c.socket.stream.socket.address == .ip4 or c.socket.stream.socket.address == .ip6) c.socket.stream.socket.address else null,
+        .remote = if (c.socket.stream.borrow().socket.address == .ip4 or c.socket.stream.borrow().socket.address == .ip6) c.socket.stream.borrow().socket.address else null,
         .secure = c.socket.secure,
         .socket = &c.socket,
         .body = .initStrict(c.socket.reader(), framing, head.bodyBuffer()),

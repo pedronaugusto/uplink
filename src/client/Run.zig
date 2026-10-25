@@ -88,7 +88,7 @@ prepared: Prepare.Attempt = undefined,
 has_prepared: bool = false,
 /// When the current attempt was asked for, by the real clock, in seconds:
 /// a stored response's age counts from it.
-requested_at: i64 = 0,
+requested_at: wire.date.Second = .fromRaw(0),
 /// A stale stored variant the current attempt asks the origin about (its
 /// validators sent), held until the answer.
 revalidating: ?Revalidating = null,
@@ -155,7 +155,7 @@ pub fn complete(run: *Run, io: Io, first: ?Response) Error!Response {
     defer run.endRevalidating(io);
     while (true) {
         var response = pending orelse try run.fromCache(io) orelse network: {
-            run.requested_at = Io.Clock.real.now(io).toSeconds();
+            run.requested_at = span.calendar(io);
             const answered = run.attempt(io) catch |err| {
                 if (try run.retryFailure(io, err)) continue;
                 return err;
@@ -1000,7 +1000,7 @@ fn retryStatus(run: *Run, io: Io, response: *Response) Error!Next {
     if (run.tries >= r.max_attempts or !run.body.replayable()) return .done;
     if (!run.method.idempotent() and !policy.notActedOn(response.status)) return .done;
     var wait = r.backoff(run.tries + 1, random(io));
-    if (response.headers.getKnown(.@"retry-after")) |value| if (policy.retryAfter(value, Io.Clock.real.now(io).toSeconds())) |asked| {
+    if (response.headers.getKnown(.@"retry-after")) |value| if (policy.retryAfter(value, span.calendar(io))) |asked| {
         if (asked.compare(r.max_wait) == .gt) return .done;
         wait = asked;
     };
@@ -1149,7 +1149,7 @@ fn fromCache(run: *Run, io: Io) Error!?Response {
         run.cacheFailed(error.StoreFailed);
         return null;
     };
-    const now = Io.Clock.real.now(io).toSeconds();
+    const now = span.calendar(io);
     const age = rules.currentAge(&parsed.headers, .{ .requested = entry.meta.requested, .received = entry.meta.received }, now);
     const life = rules.lifetime(cache.options.kind, parsed.status, &parsed.headers, cache.options.heuristic_cap.raw()) orelse 0;
     switch (rules.use(cache.options.kind, &parsed.headers, life, age, asked)) {
@@ -1223,7 +1223,7 @@ fn throughCache(run: *Run, io: Io, response: Response) Error!Response {
     if (!run.method.eql(.GET)) return r;
     r.cache = .miss;
     if (run.revalidating) |*v| {
-        const now = Io.Clock.real.now(io).toSeconds();
+        const now = span.calendar(io);
         if (status == 304) {
             const merged = mergeHead(c.context.gpa, &v.parsed, &r.headers) catch {
                 run.cacheFailed(error.OutOfMemory);
@@ -1275,7 +1275,7 @@ fn throughCache(run: *Run, io: Io, response: Response) Error!Response {
         return r;
     };
     defer c.context.gpa.free(head);
-    const meta: Cache.Meta = .{ .requested = run.requested_at, .received = Io.Clock.real.now(io).toSeconds(), .vary = vary };
+    const meta: Cache.Meta = .{ .requested = run.requested_at, .received = span.calendar(io), .vary = vary };
     const writing = cache.store.begin(io, run.url_text, meta, head) catch |err| {
         run.cacheFailed(err);
         return r;

@@ -8,6 +8,7 @@
 //! The build has a Zig cache of its own, so no package found in the global
 //! cache stands in for one the project failed to ask for.
 const std = @import("std");
+const aegis = @import("aegis");
 
 pub fn main(init: std.process.Init) !void {
     var arena: std.heap.ArenaAllocator = .init(init.gpa);
@@ -30,7 +31,7 @@ pub fn main(init: std.process.Init) !void {
     const root = try cwd.realPathFileAlloc(io, args[4], a);
     const relative = try std.Io.Dir.path.relativeAlloc(a, directory, null, directory, root);
     std.mem.replaceScalar(u8, relative, '\\', '/');
-    const program = try cwd.readFileAlloc(io, args[5], a, .limited(1024 * 1024));
+    const program = try aegis.own.readFile(io, cwd, args[5], a, .literal("1MiB"));
     try dir.writeFile(io, .{ .sub_path = "src/main.zig", .data = program });
     try dir.writeFile(io, .{ .sub_path = "build.zig.zon", .data = try a.print(manifest, .{std.zig.fmtString(relative)}) });
     try dir.writeFile(io, .{ .sub_path = "build.zig", .data = if (cold) cold_script else script });

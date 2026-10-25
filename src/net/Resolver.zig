@@ -395,16 +395,16 @@ pub const Cache = struct {
     /// Drop every expired service answer, or else the one expiring first.
     fn evictService(c: *Cache, services: *std.StringHashMapUnmanaged(ServiceEntry), now: Io.Timestamp) void {
         var soonest: ?[]const u8 = null;
-        var soonest_at: i96 = std.math.maxInt(i96);
+        var soonest_at: ?Io.Timestamp = null;
         var it = services.iterator();
         while (it.next()) |kv| {
-            const at = kv.value_ptr.expires.nanoseconds;
-            if (at <= now.nanoseconds) {
+            const at = kv.value_ptr.expires;
+            if (at.compare(.lte, now)) {
                 c.dropService(services, kv.key_ptr.*);
                 it = services.iterator();
                 continue;
             }
-            if (at < soonest_at) {
+            if (soonest_at == null or at.compare(.lt, soonest_at.?)) {
                 soonest_at = at;
                 soonest = kv.key_ptr.*;
             }
@@ -473,17 +473,17 @@ pub const Cache = struct {
     /// Drop every expired answer, or else the one expiring first.
     fn evict(c: *Cache, entries: *std.StringHashMapUnmanaged(Entry), now: Io.Timestamp) void {
         var soonest: ?[]const u8 = null;
-        var soonest_at: i96 = std.math.maxInt(i96);
+        var soonest_at: ?Io.Timestamp = null;
         var it = entries.iterator();
         while (it.next()) |kv| {
-            const at = kv.value_ptr.expires.nanoseconds;
-            if (at <= now.nanoseconds) {
+            const at = kv.value_ptr.expires;
+            if (at.compare(.lte, now)) {
                 c.dropAt(entries, kv.key_ptr.*);
                 // The iterator is invalid after a removal: start over.
                 it = entries.iterator();
                 continue;
             }
-            if (at < soonest_at) {
+            if (soonest_at == null or at.compare(.lt, soonest_at.?)) {
                 soonest_at = at;
                 soonest = kv.key_ptr.*;
             }

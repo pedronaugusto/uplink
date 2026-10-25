@@ -106,14 +106,14 @@ pub const Retries = struct {
 };
 
 /// How long a `Retry-After` value asks to wait: seconds, or an HTTP date
-/// against `now` (seconds since the epoch on the real clock). Null when
-/// the value is neither.
-pub fn retryAfter(value: []const u8, now: i64) ?Duration {
+/// against `now` on the calendar clock. Null when the value is neither.
+pub fn retryAfter(value: []const u8, now: date.Second) ?Duration {
     const text = std.mem.trim(u8, value, " \t");
-    if (std.fmt.parseUnsigned(u32, text, 10)) |n| return .fromRaw(@as(u64, n) * std.time.ns_per_s) else |_| {}
+    if (std.fmt.parseUnsigned(u32, text, 10)) |n| return date.Seconds.fromRaw(n).convert(.nanosecond, u64, .exact) catch unreachable else |_| {} // unreachable: a u32 of seconds is 136 years of nanoseconds
     const at = date.parse(text) orelse return null;
-    const seconds: u64 = @intCast(std.math.clamp(at - now, 0, std.math.maxInt(u64) / std.time.ns_per_s)); // safe: clamped to what a span holds
-    return .fromRaw(seconds * std.time.ns_per_s);
+    const ahead = now.saturatingDurationTo(at);
+    if (ahead.compare(.fromRaw(0)) != .gt) return .fromRaw(0);
+    return ahead.convert(.nanosecond, u64, .exact) catch .fromRaw(std.math.maxInt(u64));
 }
 
 /// Whether a status says the server did not act on the request, so even a
@@ -163,9 +163,9 @@ test "backoff grows from its base to its cap, at random below each" {
 }
 
 test "Retry-After is read as seconds or as a date" {
-    try testing.expectEqual(@as(u64, 120 * std.time.ns_per_s), retryAfter(" 120 ", 0).?.raw());
-    try testing.expectEqual(@as(u64, 37 * std.time.ns_per_s), retryAfter("Sun, 06 Nov 1994 08:49:37 GMT", 784111740).?.raw());
-    try testing.expectEqual(@as(u64, 0), retryAfter("Sun, 06 Nov 1994 08:49:37 GMT", 784111800).?.raw());
-    try testing.expectEqual(null, retryAfter("soon", 0));
-    try testing.expectEqual(null, retryAfter("-1", 0));
+    try testing.expectEqual(Duration.literal("120s"), retryAfter(" 120 ", .fromRaw(0)).?);
+    try testing.expectEqual(Duration.literal("37s"), retryAfter("Sun, 06 Nov 1994 08:49:37 GMT", .fromRaw(784111740)).?);
+    try testing.expectEqual(@as(u64, 0), retryAfter("Sun, 06 Nov 1994 08:49:37 GMT", .fromRaw(784111800)).?.raw());
+    try testing.expectEqual(null, retryAfter("soon", .fromRaw(0)));
+    try testing.expectEqual(null, retryAfter("-1", .fromRaw(0)));
 }

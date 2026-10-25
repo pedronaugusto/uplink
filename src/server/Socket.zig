@@ -13,6 +13,7 @@ const tls = @import("../tls.zig");
 const span = @import("../span.zig");
 const Timed = @import("../net/Timed.zig");
 const sys = @import("../net/sys.zig");
+const stream_owner = @import("../net/stream.zig");
 const reactor = @import("reactor");
 const Context = @import("Context.zig");
 
@@ -23,8 +24,8 @@ context: *Context,
 /// Private: the `Io` the connection's task runs on, for the adapters.
 /// Moved only by the task that has the connection to itself (`adopt`).
 io: Io,
-/// Private: the socket.
-stream: Io.net.Stream,
+/// Private: the socket, and its one owner.
+stream: stream_owner.Owned,
 /// Private: the connection's place on the server's live list.
 entry: Context.Entry,
 /// Private: the socket's operations, each ended at its deadline.
@@ -77,7 +78,7 @@ pub fn init(context: *Context, io: Io, stream: Io.net.Stream) Socket {
     return .{
         .context = context,
         .io = io,
-        .stream = stream,
+        .stream = .init(stream),
         .entry = .{ .socket = stream.socket.handle },
         .timed = .init(stream.socket.handle),
         .input = .init(&.{}),
@@ -133,7 +134,7 @@ pub fn startAnswer(c: *Socket) void {
 pub fn awaitReadable(c: *Socket, io: Io, timeout: Io.Duration) Io.Cancelable!Timed.Readiness {
     c.adopt(io);
     if (c.reader().bufferedLen() != 0) return .ready;
-    return Timed.awaitReadable(io, c.stream.socket.handle, &c.input.interface, timeout);
+    return Timed.awaitReadable(io, c.stream.borrow().socket.handle, &c.input.interface, timeout);
 }
 
 /// Wait up to `timeout` for the client to end the connection while a
@@ -155,13 +156,13 @@ pub fn awaitEnd(c: *Socket, io: Io, timeout: Io.Timeout) Io.Cancelable!bool {
         if (r.end == r.buffer.len) return waitOut(io, until);
         // A look that neither waits nor takes answers at once where the
         // system has one: what a query with no time to wait needs.
-        if (sys.peek(c.stream.socket.handle)) |seen| switch (seen) {
+        if (sys.peek(c.stream.borrow().socket.handle)) |seen| switch (seen) {
             .closed => return true,
             .readable => {},
             .idle => if (expired(io, until)) return false,
         };
         var data: [1][]u8 = .{r.buffer[r.end..]};
-        const read: Io.Operation = .{ .net_read = .{ .socket_handle = c.stream.socket.handle, .data = &data } };
+        const read: Io.Operation = .{ .net_read = .{ .socket_handle = c.stream.borrow().socket.handle, .data = &data } };
         const result = io.operateTimeout(read, until) catch |err| switch (err) {
             error.Timeout => return false,
             error.Canceled => return error.Canceled,
@@ -170,7 +171,7 @@ pub fn awaitEnd(c: *Socket, io: Io, timeout: Io.Timeout) Io.Cancelable!bool {
             // have something to read (its end or a reset among them), and the
             // read then finds it.
             error.ConcurrencyUnavailable => blk: {
-                reactor.wait(io, .{ .readable = c.stream.socket.handle }, until) catch |waited| switch (waited) {
+                reactor.wait(io, .{ .readable = c.stream.borrow().socket.handle }, until) catch |waited| switch (waited) {
                     error.Timeout => return false,
                     error.Canceled => return error.Canceled,
                     // A socket the system cannot watch has failed.
@@ -229,7 +230,7 @@ pub fn close(c: *Socket) void {
     c.linger();
     c.timed.deinit(io, c.context.keeper());
     c.context.closing(io, &c.entry);
-    c.stream.close(io);
+    c.stream.deinit(io);
     for ([_][]u8{ c.input.interface.buffer, c.output.interface.buffer }) |b| if (b.len != 0) pool.release(io, b);
 }
 
@@ -242,14 +243,14 @@ fn linger(c: *Socket) void {
     const io = c.io;
     const time = c.context.options.timeouts.linger orelse return;
     if (c.failed() != .none or c.timed.fired()) return;
-    c.stream.shutdown(io, .send) catch return;
+    c.stream.borrow().shutdown(io, .send) catch return;
     const until = Io.Clock.awake.now(io).addDuration(span.toIo(time));
     var buf: [4096]u8 = undefined;
     var data: [1][]u8 = .{&buf};
     while (true) {
         // A deadline that ends the wait aborts the socket, which is
         // closing anyway.
-        const result = c.timed.perform(io, c.context.keeper(), .{ .net_read = .{ .socket_handle = c.stream.socket.handle, .data = &data } }, until) catch return;
+        const result = c.timed.perform(io, c.context.keeper(), .{ .net_read = .{ .socket_handle = c.stream.borrow().socket.handle, .data = &data } }, until) catch return;
         const n = (result.net_read catch return).data_len;
         if (n == 0) return;
     }
@@ -407,7 +408,7 @@ const SocketReader = struct {
         const c = socket(r);
         var iovecs: [8][]u8 = undefined;
         const dest_n, const data_size = try r.writableVector(&iovecs, data);
-        const result = c.perform(.{ .net_read = .{ .socket_handle = c.stream.socket.handle, .data = iovecs[0..dest_n] } }) catch return error.ReadFailed;
+        const result = c.perform(.{ .net_read = .{ .socket_handle = c.stream.borrow().socket.handle, .data = iovecs[0..dest_n] } }) catch return error.ReadFailed;
         const n = (result.net_read catch {
             c.note(.broken);
             return error.ReadFailed;
@@ -432,7 +433,7 @@ const SocketWriter = struct {
         const sw: *SocketWriter = @alignCast(@fieldParentPtr("interface", w)); // safe: this vtable is installed only on a SocketWriter's interface
         const c: *Socket = @alignCast(@fieldParentPtr("output", sw)); // safe: a SocketWriter lives only in a Socket's `output`
         const result = c.perform(.{ .net_write = .{
-            .socket_handle = c.stream.socket.handle,
+            .socket_handle = c.stream.borrow().socket.handle,
             .header = w.buffered(),
             .data = data,
             .splat = splat,

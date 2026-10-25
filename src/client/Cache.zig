@@ -44,12 +44,12 @@ pub fn init(store: Store, options: Options) Cache {
 /// What a store refuses with.
 pub const Error = error{ OutOfMemory, StoreFailed, Canceled };
 
-/// When a stored response was asked for and arrived, by the cache's
-/// clock, in seconds since the epoch, and the request's values of the
-/// fields its `Vary` names (`varyOf`).
+/// When a stored response was asked for and arrived, on the calendar
+/// clock, and the request's values of the fields its `Vary` names
+/// (`varyOf`).
 pub const Meta = struct {
-    requested: i64,
-    received: i64,
+    requested: wire.date.Second,
+    received: wire.date.Second,
     vary: []const u8,
 };
 
@@ -200,8 +200,8 @@ pub const Memory = struct {
         /// Heads a 304 replaced, still readable by those who held the
         /// variant then: freed with it.
         retired: std.ArrayList([]u8) = .empty,
-        requested: i64,
-        received: i64,
+        requested: wire.date.Second,
+        received: wire.date.Second,
         /// The next older variant of the same key.
         next: ?*Item = null,
         node: std.DoublyLinkedList.Node = .{},

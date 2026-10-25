@@ -17,6 +17,7 @@
 //! of a single label (`com`, `local`) is taken as a suffix.
 
 const std = @import("std");
+const span = @import("../span.zig");
 const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -118,9 +119,10 @@ pub fn count(jar: *const CookieJar) u32 {
     return jar.total.load(.monotonic);
 }
 
-/// Seconds since the epoch, now.
+/// Seconds since the epoch, now: the calendar clock in the seconds a
+/// cookie's expiry is written in.
 fn nowOf(io: Io) i64 {
-    return Io.Clock.real.now(io).toSeconds();
+    return span.calendar(io).raw();
 }
 
 /// Take one `Set-Cookie` value from a response to `url`. One the rules
@@ -162,7 +164,7 @@ fn storeAt(jar: *CookieJar, io: Io, url: url_mod.Url, set_cookie: []const u8, no
     const secure = secureContext(url, host);
     if (sc.secure and !secure) return;
     if (!prefixKept(sc, host_only, path)) return;
-    var expires: ?i64 = sc.expires;
+    var expires: ?i64 = if (sc.expires) |at| at.raw() else null;
     if (sc.max_age) |age| expires = expiry(now, age);
 
     var held = jar.state.acquireUncancelable(io);
@@ -508,7 +510,7 @@ fn loadHeader(jar: *CookieJar, io: Io, text: []const u8, now: i64) Allocator.Err
     // curl's `__Host-` asks for a path written as `/`, which a cookie with
     // none has not.
     if (!prefixKept(sc, sc.domain == null, sc.path orelse "")) return;
-    var expires: ?i64 = sc.expires;
+    var expires: ?i64 = if (sc.expires) |at| at.raw() else null;
     if (sc.max_age) |age| expires = expiry(now, age);
     if (expires) |e| if (e <= now) return;
     return jar.put(io, sc, domain, sc.path orelse "/", expires, sc.domain == null, now);

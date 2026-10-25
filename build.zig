@@ -171,6 +171,7 @@ pub fn dev(b: *std.Build, tools: type) void {
                     .{ .name = "uplink", .module = module },
                     .{ .name = "reactor", .module = reactor },
                     .{ .name = "cloak", .module = cloak },
+                    .{ .name = "aegis", .module = aegis },
                 },
             }),
         });
@@ -326,6 +327,7 @@ fn addWireConsumerCheck(b: *std.Build, p: *std.Build, aegis: *std.Build.Dependen
         .root_source_file = p.path("ci/wire_consumer.zig"),
         .target = b.graph.host,
         .optimize = .debug,
+        .imports = &.{.{ .name = "aegis", .module = hostAegis(p) }},
     }) });
     const packages = b.addWriteFiles();
     _ = packages.add("README", "aegis, and nothing else.\n");
@@ -340,6 +342,11 @@ fn addWireConsumerCheck(b: *std.Build, p: *std.Build, aegis: *std.Build.Dependen
     b.step("check-wire-consumer", "Build a project that asks for uplink.wire alone, with only aegis to fetch").dependOn(&run.step);
 }
 
+/// aegis for the programs the build runs on the machine it runs on.
+fn hostAegis(p: *std.Build) *std.Build.Module {
+    return p.dependency("aegis", .{ .target = p.graph.host, .optimize = .debug }).module("aegis");
+}
+
 /// `check-cold-consumer`: a project that depends on uplink as a client, built
 /// from an empty package cache. The first pass of its build has no reactor or cloak,
 /// so uplink's script must declare `uplink` before it asks for reactor, then
@@ -349,6 +356,7 @@ fn addColdConsumerCheck(b: *std.Build, p: *std.Build) void {
         .root_source_file = p.path("ci/wire_consumer.zig"),
         .target = b.graph.host,
         .optimize = .debug,
+        .imports = &.{.{ .name = "aegis", .module = hostAegis(p) }},
     }) });
     const run = b.addRunArtifact(generator);
     run.addArg(b.graph.zig_exe);

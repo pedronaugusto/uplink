@@ -48,7 +48,7 @@ pub const SetCookie = struct {
     name: []const u8,
     value: []const u8,
     /// `Expires`, in seconds since the epoch.
-    expires: ?i64 = null,
+    expires: ?date.Second = null,
     /// `Max-Age`, from when the cookie arrived: zero (written as zero or
     /// less) expires it at once. Held to 2^31-1 seconds. It wins over
     /// `Expires`.
@@ -151,7 +151,7 @@ fn parseMaxAge(text: []const u8) ?MaxAge {
 /// A cookie date (RFC 6265bis §5.1.1): the time, day, month and year found
 /// among the tokens in whatever order, as browsers read `Expires`. Seconds
 /// since the epoch, or null.
-pub fn parseDate(text: []const u8) ?i64 {
+pub fn parseDate(text: []const u8) ?date.Second {
     var time: ?[3]u32 = null;
     var day: ?u32 = null;
     var month: ?u32 = null;
@@ -307,7 +307,7 @@ test "a Set-Cookie value is read as a browser reads it" {
 }
 
 test "cookie dates are found among their tokens in any order" {
-    const want: ?i64 = 784111777;
+    const want: ?date.Second = .fromRaw(784111777);
     for ([_][]const u8{
         "Sun, 06 Nov 1994 08:49:37 GMT",
         "Sunday, 06-Nov-94 08:49:37 GMT",
@@ -321,9 +321,9 @@ test "cookie dates are found among their tokens in any order" {
         };
     }
     for ([_][]const u8{ "", "Sun, 06 Nov 1600 08:49:37 GMT", "31 Feb 2020 00:00:00", "06 Nov 1994", "06 Nov 1994 25:00:00", "06 Xyz 1994 08:49:37" }) |bad| {
-        try testing.expectEqual(@as(?i64, null), parseDate(bad));
+        try testing.expectEqual(@as(?date.Second, null), parseDate(bad));
     }
-    try testing.expectEqual(@as(?i64, 1767225600), parseDate("Thu, 01 Jan 26 00:00:00 GMT"));
+    try testing.expectEqual(@as(?date.Second, .fromRaw(1767225600)), parseDate("Thu, 01 Jan 26 00:00:00 GMT"));
 }
 
 test "domains match without case and only above a label, never for an address" {

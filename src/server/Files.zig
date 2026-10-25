@@ -11,6 +11,7 @@
 //! open is relative to the root. A path is matched with its escapes undone.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const wire = @import("uplink.wire");
 const range = wire.range;
@@ -103,6 +104,9 @@ fn redirectTo(io: Io, request: *const Request, response: *Response, suffix: []co
     return Router.plain(io, response, .moved_permanently, "");
 }
 
+/// A file's modification time to the nanosecond, for its entity tag.
+const Mtime = aegis.units.Instant(.real, .nanosecond, i96);
+
 fn serveFile(f: *Files, io: Io, request: *Request, response: *Response, relative: []const u8) anyerror!void {
     const file = f.root.openFile(io, relative, .{}) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
@@ -112,9 +116,11 @@ fn serveFile(f: *Files, io: Io, request: *Request, response: *Response, relative
     const stat = try file.stat(io);
     if (stat.kind != .file) return Router.plain(io, response, .not_found, "not found\n");
     const size = stat.size;
-    const modified = stat.mtime.toSeconds();
+    // The last whole second, as HTTP dates name it; a file a calendar can
+    // no longer hold is at its end.
+    const modified = wire.date.Second.fromTimestamp(stat.mtime, .down) catch wire.date.Second.fromRaw(std.math.maxInt(i64));
     var etag_buf: [48]u8 = undefined;
-    const etag = try std.mem.print(&etag_buf, "\"{x}-{x}\"", .{ size, @as(u96, @bitCast(stat.mtime.nanoseconds)) });
+    const etag = try std.mem.print(&etag_buf, "\"{x}-{x}\"", .{ size, @as(u96, @bitCast(Mtime.fromTimestamp(stat.mtime, .exact).raw())) });
     var date_buf: [wire.date.formatted_len]u8 = undefined;
     const last_modified = wire.date.format(modified, &date_buf);
 
@@ -123,7 +129,7 @@ fn serveFile(f: *Files, io: Io, request: *Request, response: *Response, relative
     if (h.get("if-match")) |v| {
         if (!matchesEtag(v, etag, .strong)) return precondition(io, response);
     } else if (h.get("if-unmodified-since")) |v| {
-        if (wire.date.parse(v)) |since| if (modified > since) return precondition(io, response);
+        if (wire.date.parse(v)) |since| if (modified.compare(since) == .gt) return precondition(io, response);
     }
     try response.header("ETag", etag);
     try response.header("Last-Modified", last_modified);
@@ -132,7 +138,7 @@ fn serveFile(f: *Files, io: Io, request: *Request, response: *Response, relative
     if (h.get("if-none-match")) |v| {
         if (matchesEtag(v, etag, .weak)) return notModified(io, response);
     } else if (h.get("if-modified-since")) |v| {
-        if (wire.date.parse(v)) |since| if (modified <= since) return notModified(io, response);
+        if (wire.date.parse(v)) |since| if (modified.compare(since) != .gt) return notModified(io, response);
     }
     const content_type = typeOf(relative);
     var spans: [range.max_ranges]range.Span = undefined;
@@ -237,11 +243,11 @@ fn matchesEtag(list: []const u8, etag: []const u8, strength: Strength) bool {
 
 /// Whether `If-Range` lets the ranges stand: the strong tag, or the exact
 /// modification date.
-fn ifRange(cond: []const u8, etag: []const u8, modified: i64) bool {
+fn ifRange(cond: []const u8, etag: []const u8, modified: wire.date.Second) bool {
     const v = std.mem.trim(u8, cond, " \t");
     if (v.len != 0 and (v[0] == '"' or std.mem.startsWith(u8, v, "W/"))) return std.mem.eql(u8, v, etag);
     const date = wire.date.parse(v) orelse return false;
-    return date == modified;
+    return date.eql(modified);
 }
 
 fn precondition(io: Io, response: *Response) anyerror!void {

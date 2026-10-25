@@ -2,7 +2,8 @@
 //! IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`), the obsolete RFC 850 form
 //! (`Sunday, 06-Nov-94 08:49:37 GMT`) and C's asctime (`Sun Nov  6 08:49:37
 //! 1994`) — and IMF-fixdate written, the only form a sender writes. Times
-//! are seconds since the Unix epoch, in UTC.
+//! are aegis instants on the calendar clock (`Second`): whole seconds since
+//! the Unix epoch, in UTC.
 //!
 //! A recipient may read leniently (RFC 9110 §5.6.7): the zone may be
 //! written `UTC` as well as `GMT`, the weekday is checked to be one but not
@@ -10,10 +11,19 @@
 //! 19xx from 70 up and 20xx below.
 
 const std = @import("std");
+const aegis = @import("aegis");
 
-/// The seconds since the epoch `text` names, or null when it is no HTTP date
-/// or no real date and time.
-pub fn parse(text: []const u8) ?i64 {
+/// An instant on the calendar clock, in whole seconds since the epoch: what
+/// an HTTP date names, and what `format` writes.
+pub const Second = aegis.units.Instant(.real, .second, i64);
+/// A span of whole seconds, signed: what two `Second`s are apart.
+pub const Seconds = aegis.units.Duration(.second, i64);
+const Days = aegis.units.Duration(.day, i64);
+const epoch: Second = .fromRaw(0);
+
+/// The instant `text` names, or null when it is no HTTP date or no real date
+/// and time.
+pub fn parse(text: []const u8) ?Second {
     const t = std.mem.trim(u8, text, " \t");
     if (t.len < 24) return null;
     if (t[3] == ',') return parseImf(t);
@@ -22,7 +32,7 @@ pub fn parse(text: []const u8) ?i64 {
 }
 
 /// `Sun, 06 Nov 1994 08:49:37 GMT`.
-fn parseImf(t: []const u8) ?i64 {
+fn parseImf(t: []const u8) ?Second {
     if (t.len != 29 or t[4] != ' ' or t[7] != ' ' or t[11] != ' ' or t[16] != ' ' or t[25] != ' ') return null;
     _ = shortDay(t[0..3]) orelse return null;
     if (!zone(t[26..29])) return null;
@@ -33,7 +43,7 @@ fn parseImf(t: []const u8) ?i64 {
 }
 
 /// `Sunday, 06-Nov-94 08:49:37 GMT`.
-fn parseRfc850(t: []const u8) ?i64 {
+fn parseRfc850(t: []const u8) ?Second {
     const comma = std.mem.findScalar(u8, t, ',') orelse return null;
     if (!longDay(t[0..comma])) return null;
     const rest = t[comma + 1 ..];
@@ -47,7 +57,7 @@ fn parseRfc850(t: []const u8) ?i64 {
 }
 
 /// `Sun Nov  6 08:49:37 1994`: the day of the month space-padded.
-fn parseAsctime(t: []const u8) ?i64 {
+fn parseAsctime(t: []const u8) ?Second {
     if (t.len != 24 or t[7] != ' ' or t[10] != ' ' or t[19] != ' ') return null;
     _ = shortDay(t[0..3]) orelse return null;
     const month = monthOf(t[4..7]) orelse return null;
@@ -58,7 +68,7 @@ fn parseAsctime(t: []const u8) ?i64 {
 }
 
 /// `hh:mm:ss` on a day.
-fn civilAt(year: u32, month: u32, day: u32, clock: []const u8) ?i64 {
+fn civilAt(year: u32, month: u32, day: u32, clock: []const u8) ?Second {
     if (clock[2] != ':' or clock[5] != ':') return null;
     const hour = digits(clock[0..2]) orelse return null;
     const minute = digits(clock[3..5]) orelse return null;
@@ -99,12 +109,13 @@ fn digits(text: []const u8) ?u32 {
     return n;
 }
 
-/// Seconds since the epoch of a UTC date and time, or null for one that
-/// does not exist.
-pub fn civil(year: u32, month: u32, day: u32, hour: u32, minute: u32, second: u32) ?i64 {
+/// The instant of a UTC date and time, or null for one that does not exist.
+pub fn civil(year: u32, month: u32, day: u32, hour: u32, minute: u32, second: u32) ?Second {
     if (year < 1 or month < 1 or month > 12 or day < 1 or hour > 23 or minute > 59 or second > 59) return null;
     if (day > daysIn(year, month)) return null;
-    return daysFromCivil(year, month, day) * std.time.s_per_day + @as(i64, hour) * 3600 + @as(i64, minute) * 60 + second;
+    const midnight = epoch.add(Days.fromRaw(daysFromCivil(year, month, day)).convert(.second, i64, .exact) catch return null) catch return null;
+    const into_day = Seconds.fromRaw(@as(i64, hour) * 3600 + @as(i64, minute) * 60 + second);
+    return midnight.add(into_day) catch null;
 }
 
 fn daysIn(year: u32, month: u32) u32 {
@@ -127,14 +138,16 @@ fn daysFromCivil(year: u32, month: u32, day: u32) i64 {
 /// The longest text `format` writes.
 pub const formatted_len = 29;
 
-/// `seconds` as an IMF-fixdate, in `out`. Years before 1 or after 9999
-/// are clamped to those years' ends.
-pub fn format(seconds: i64, out: *[formatted_len]u8) []const u8 {
-    const lowest = comptime daysFromCivil(1, 1, 1) * std.time.s_per_day;
-    const highest = comptime daysFromCivil(9999, 12, 31) * std.time.s_per_day + std.time.s_per_day - 1;
-    const s = std.math.clamp(seconds, lowest, highest);
-    const days = @divFloor(s, std.time.s_per_day);
-    const in_day: u32 = @intCast(s - days * std.time.s_per_day);
+/// `at` as an IMF-fixdate, in `out`. Years before 1 or after 9999 are
+/// clamped to those years' ends.
+pub fn format(at: Second, out: *[formatted_len]u8) []const u8 {
+    const lowest = comptime civil(1, 1, 1, 0, 0, 0).?;
+    const highest = comptime civil(9999, 12, 31, 23, 59, 59).?;
+    const s: Second = if (at.compare(lowest) == .lt) lowest else if (at.compare(highest) == .gt) highest else at;
+    const since = epoch.saturatingDurationTo(s);
+    const days = since.convert(.day, i64, .down).raw();
+    const midnight = Days.fromRaw(days).convert(.second, i64, .exact) catch unreachable; // unreachable: a day of a year from 1 to 9999 in seconds
+    const in_day = aegis.int.cast(u32, since.saturatingSub(midnight).raw()) catch unreachable; // unreachable: a second of one day, from 0 to 86399
     // civil_from_days, Howard Hinnant's inverse.
     const z = days + 719468;
     const era = @divFloor(z, 146097);
@@ -155,14 +168,14 @@ pub fn format(seconds: i64, out: *[formatted_len]u8) []const u8 {
 const testing = std.testing;
 
 test "the three forms of RFC 9110's example name one instant" {
-    const want: ?i64 = 784111777;
+    const want: ?Second = .fromRaw(784111777);
     try testing.expectEqual(want, parse("Sun, 06 Nov 1994 08:49:37 GMT"));
     try testing.expectEqual(want, parse("Sunday, 06-Nov-94 08:49:37 GMT"));
     try testing.expectEqual(want, parse("Sun Nov  6 08:49:37 1994"));
     try testing.expectEqual(want, parse("  Sun, 06 Nov 1994 08:49:37 UTC "));
-    try testing.expectEqual(@as(?i64, 0), parse("Thu, 01 Jan 1970 00:00:00 GMT"));
-    try testing.expectEqual(@as(?i64, 1767225600), parse("Thursday, 01-Jan-26 00:00:00 GMT"));
-    try testing.expectEqual(@as(?i64, 951782400), parse("Tue Feb 29 00:00:00 2000"));
+    try testing.expectEqual(@as(?Second, .fromRaw(0)), parse("Thu, 01 Jan 1970 00:00:00 GMT"));
+    try testing.expectEqual(@as(?Second, .fromRaw(1767225600)), parse("Thursday, 01-Jan-26 00:00:00 GMT"));
+    try testing.expectEqual(@as(?Second, .fromRaw(951782400)), parse("Tue Feb 29 00:00:00 2000"));
 }
 
 test "a date that is not one of the forms, or not a real date, is refused" {
@@ -181,7 +194,7 @@ test "a date that is not one of the forms, or not a real date, is refused" {
         "Sun Nov 31 08:49:37 1994",
         "Mon Feb 29 00:00:00 1900",
     }) |bad| {
-        testing.expectEqual(@as(?i64, null), parse(bad)) catch |err| {
+        testing.expectEqual(@as(?Second, null), parse(bad)) catch |err| {
             std.debug.print("{s}\n", .{bad});
             return err;
         };
@@ -190,14 +203,14 @@ test "a date that is not one of the forms, or not a real date, is refused" {
 
 test "a written date reads back as the same second, across the calendar" {
     var buf: [formatted_len]u8 = undefined;
-    try testing.expectEqualStrings("Sun, 06 Nov 1994 08:49:37 GMT", format(784111777, &buf));
-    try testing.expectEqualStrings("Thu, 01 Jan 1970 00:00:00 GMT", format(0, &buf));
-    try testing.expectEqualStrings("Wed, 31 Dec 1969 23:59:59 GMT", format(-1, &buf));
-    try testing.expectEqualStrings("Fri, 31 Dec 9999 23:59:59 GMT", format(std.math.maxInt(i64), &buf));
+    try testing.expectEqualStrings("Sun, 06 Nov 1994 08:49:37 GMT", format(.fromRaw(784111777), &buf));
+    try testing.expectEqualStrings("Thu, 01 Jan 1970 00:00:00 GMT", format(.fromRaw(0), &buf));
+    try testing.expectEqualStrings("Wed, 31 Dec 1969 23:59:59 GMT", format(.fromRaw(-1), &buf));
+    try testing.expectEqualStrings("Fri, 31 Dec 9999 23:59:59 GMT", format(.fromRaw(std.math.maxInt(i64)), &buf));
     var prng: std.Random.DefaultPrng = .init(0x0da7e);
     for (0..2000) |_| {
-        const s = prng.random().intRangeAtMost(i64, -2208988800, 4102444800);
-        try testing.expectEqual(@as(?i64, s), parse(format(s, &buf)));
+        const s: Second = .fromRaw(prng.random().intRangeAtMost(i64, -2208988800, 4102444800));
+        try testing.expectEqual(@as(?Second, s), parse(format(s, &buf)));
     }
 }
 
@@ -211,7 +224,7 @@ test "fuzz: any text is a date or is not, and never a crash" {
             const text = inputs.draw(case, &buf, &seeds, 32);
             if (parse(text)) |s| {
                 var out: [formatted_len]u8 = undefined;
-                try testing.expectEqual(@as(?i64, s), parse(format(s, &out)));
+                try testing.expectEqual(@as(?Second, s), parse(format(s, &out)));
             }
         }
     }.one, .{});

@@ -299,7 +299,7 @@ fn answer(session: *Session, handler: Handler, st: *Stream) void {
         .protocol = head.protocol,
         .headers = .init(head.fields),
         .host = head.authority orelse "",
-        .remote = if (session.socket.stream.socket.address == .ip4 or session.socket.stream.socket.address == .ip6) session.socket.stream.socket.address else null,
+        .remote = if (session.socket.stream.borrow().socket.address == .ip4 or session.socket.stream.borrow().socket.address == .ip6) session.socket.stream.borrow().socket.address else null,
         .secure = session.socket.secure,
         .socket = session.socket,
         .body = .init(Io.Reader.ending, .none, &.{}),

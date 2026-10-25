@@ -162,7 +162,7 @@ pub fn freshFor(headers: *const fields.Headers) ?u32 {
         const expires = headers.get("expires") orelse return null;
         const at = date.parse(expires) orelse break :blk 0;
         const now = date.parse(headers.get("date") orelse break :blk 0) orelse break :blk 0;
-        break :blk @intCast(std.math.clamp(at - now, 0, max_seconds));
+        break :blk secondsOf(now.saturatingDurationTo(at));
     };
     return life -| age(headers);
 }
@@ -279,31 +279,36 @@ pub fn lifetime(kind: Kind, status: u16, headers: *const fields.Headers, heurist
     if (headers.get("expires")) |expires| {
         const at = date.parse(expires) orelse return 0;
         const now = date.parse(headers.get("date") orelse return 0) orelse return 0;
-        return @intCast(std.math.clamp(at - now, 0, max_seconds));
+        return secondsOf(now.saturatingDurationTo(at));
     }
     if (!(heuristicallyCacheable(status) or r.public)) return null;
     const modified = date.parse(headers.get("last-modified") orelse return null) orelse return null;
     const dated = date.parse(headers.get("date") orelse return null) orelse return null;
-    if (dated <= modified) return 0;
-    return @intCast(@min(@divTrunc(dated - modified, 10), heuristic_cap));
+    if (dated.compare(modified) != .gt) return 0;
+    return @min(secondsOf(modified.saturatingDurationTo(dated)) / 10, heuristic_cap);
 }
 
-/// When a response was asked for and arrived, in seconds since the epoch,
-/// by the cache's own clock.
+/// A span as the seconds a directive counts: none below zero, and no more
+/// than `max_seconds`.
+fn secondsOf(span: date.Seconds) u32 {
+    return @intCast(std.math.clamp(span.raw(), 0, max_seconds)); // safe: clamped into u32 above
+}
+
+/// When a response was asked for and arrived, by the cache's own clock.
 pub const Times = struct {
-    requested: i64,
-    received: i64,
+    requested: date.Second,
+    received: date.Second,
 };
 
 /// A stored response's current age at `now` (§4.2.3), in seconds.
-pub fn currentAge(headers: *const fields.Headers, times: Times, now: i64) u32 {
+pub fn currentAge(headers: *const fields.Headers, times: Times, now: date.Second) u32 {
     const dated = if (headers.get("date")) |d| date.parse(d) orelse times.received else times.received;
-    const apparent: i64 = @max(0, times.received - dated);
-    const delay: i64 = @max(0, times.received - times.requested);
-    const corrected: i64 = @as(i64, age(headers)) + delay;
+    const apparent: u64 = secondsOf(dated.saturatingDurationTo(times.received));
+    const delay: u64 = secondsOf(times.requested.saturatingDurationTo(times.received));
+    const corrected: u64 = @as(u64, age(headers)) + delay;
     const initial = @max(apparent, corrected);
-    const resident = @max(0, now - times.received);
-    return @intCast(std.math.clamp(initial + resident, 0, max_seconds));
+    const resident: u64 = secondsOf(times.received.saturatingDurationTo(now));
+    return @intCast(@min(initial + resident, max_seconds)); // safe: at most max_seconds, a u32
 }
 
 /// What a stored response may be used for, now (§4.2, §4.2.4, §5.2).
@@ -465,12 +470,12 @@ test "the current age: the larger of the apparent and the corrected age, plus th
     });
     const dated = date.parse("Sun, 06 Nov 1994 08:49:37 GMT").?;
     // Arrived 30 s after its Date, asked for 2 s before: apparent 30, corrected 12.
-    const times: Times = .{ .requested = dated + 28, .received = dated + 30 };
-    try testing.expectEqual(@as(u32, 30), currentAge(&h, times, dated + 30));
-    try testing.expectEqual(@as(u32, 130), currentAge(&h, times, dated + 130));
+    const times: Times = .{ .requested = dated.saturatingAdd(.fromRaw(28)), .received = dated.saturatingAdd(.fromRaw(30)) };
+    try testing.expectEqual(@as(u32, 30), currentAge(&h, times, dated.saturatingAdd(.fromRaw(30))));
+    try testing.expectEqual(@as(u32, 130), currentAge(&h, times, dated.saturatingAdd(.fromRaw(130))));
     // A Date in the future of arrival: the corrected age stands.
-    const early: Times = .{ .requested = dated - 5, .received = dated - 3 };
-    try testing.expectEqual(@as(u32, 12), currentAge(&h, early, dated - 3));
+    const early: Times = .{ .requested = dated.saturatingSub(.fromRaw(5)), .received = dated.saturatingSub(.fromRaw(3)) };
+    try testing.expectEqual(@as(u32, 12), currentAge(&h, early, dated.saturatingSub(.fromRaw(3))));
 }
 
 test "a stored response's use: fresh, stale under max-stale, revalidated under no-cache, max-age, min-fresh and must-revalidate" {

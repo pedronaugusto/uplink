@@ -5,6 +5,7 @@ test {
     _ = @import("span.zig");
     _ = @import("tls.zig");
     _ = @import("net.zig");
+    _ = @import("net/dial_test.zig");
     _ = @import("transport.zig");
     _ = @import("coding.zig");
     _ = @import("pool.zig");

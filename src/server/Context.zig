@@ -251,17 +251,16 @@ pub fn ticketKeys(c: *Context, io: Io) error{ OutOfMemory, EntropyUnavailable, C
     }
     const keys = &c.tickets.?;
     const now = Io.Clock.real.now(io);
-    const seconds: i64 = @intCast(@divFloor(now.nanoseconds, std.time.ns_per_s)); // safe: the calendar clock's seconds fit an i64 for billions of years
     var snapshot = keys.acquire();
-    const issuing = if (snapshot) |*s| s.ring().issuing(seconds) != null else false;
+    const issuing = if (snapshot) |*s| s.ring().issuing(span.calendar(io).raw()) != null else false;
     if (snapshot) |*s| s.release();
     if (issuing) return keys;
     // Two handshakes that both find no key draw one each: the first is
     // replaced at once and opens the tickets it issued until they expire.
-    var material: [32]u8 = undefined;
-    defer std.crypto.secureZero(u8, &material);
-    try io.randomSecure(&material);
-    keys.rotate(&material, now) catch |err| return switch (err) {
+    var material: aegis.secret.Secret([32]u8) = .init(@splat(0));
+    defer material.deinit();
+    try io.randomSecure(material.exposeMut());
+    keys.rotate(material.expose(), now) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         // 32 fresh bytes are neither all zeros nor a key the ring holds.
         error.InvalidKey, error.DuplicateKey => error.EntropyUnavailable,

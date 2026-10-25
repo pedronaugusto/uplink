@@ -32,6 +32,7 @@ const socks = wire.socks;
 const dial = @import("../net/dial.zig");
 const Resolver = @import("../net/Resolver.zig");
 const sys = @import("../net/sys.zig");
+const stream_owner = @import("../net/stream.zig");
 const Context = @import("Context.zig");
 const span = @import("../span.zig");
 const Diagnostics = @import("Diagnostics.zig");
@@ -46,8 +47,8 @@ ctx: *Context,
 /// adapters, which cannot take one per call. A shared connection's stays
 /// the one it was made shared with.
 io: Io,
-/// Private: the socket.
-stream: Io.net.Stream,
+/// Private: the socket, and its one owner.
+stream: stream_owner.Owned,
 /// Where the connection goes.
 route: Context.Route,
 /// Private: the socket's reader and writer.
@@ -215,7 +216,7 @@ fn openOnce(ctx: *Context, io: Io, route: Context.Route, options: OpenOptions, a
     var binding: ?Resolver.Binding = null;
     defer if (binding) |*b| b.deinit(ctx.gpa);
     var record: ?*const Resolver.Binding.Record = null;
-    const dialed = (if (ctx.dial.unix_socket) |path|
+    var dialed = (if (ctx.dial.unix_socket) |path|
         dial.dialUnix(io, path, dial_options)
     else if (route.secure and proxy == null) found: {
         const d = try dial.dialHttps(io, ctx.gpa, first_host, first_port, .{ .protocols = protocols, .ech = ctx.tls.ech != .off and ech == .published }, dial_options);
@@ -241,8 +242,8 @@ fn openOnce(ctx: *Context, io: Io, route: Context.Route, options: OpenOptions, a
         .lookup = dialed.lookup,
         .took = span.of(started.durationTo(Io.Clock.awake.now(io))),
     } });
-    const conn = create(ctx, io, route, dialed.stream, diagnostics) catch |err| {
-        dialed.stream.close(io);
+    const conn = create(ctx, io, route, &dialed.stream, diagnostics) catch |err| {
+        dialed.stream.deinit(io);
         return err;
     };
     conn.deadline = options.deadline;
@@ -268,7 +269,8 @@ fn timedOutBeforeOpen(diagnostics: ?*Diagnostics) OpenError {
 }
 
 /// A connection over `stream`, with nothing on it yet.
-fn create(ctx: *Context, io: Io, route: Context.Route, stream: Io.net.Stream, diagnostics: ?*Diagnostics) Allocator.Error!*Connection {
+/// The stream moves into the connection only once nothing can fail.
+fn create(ctx: *Context, io: Io, route: Context.Route, stream: *stream_owner.Owned, diagnostics: ?*Diagnostics) Allocator.Error!*Connection {
     const conn = try ctx.gpa.create(Connection);
     errdefer ctx.gpa.destroy(conn);
     const read_buffer = try ctx.buffers.acquire(io, .record);
@@ -277,13 +279,15 @@ fn create(ctx: *Context, io: Io, route: Context.Route, stream: Io.net.Stream, di
     conn.* = .{
         .ctx = ctx,
         .io = io,
-        .stream = stream,
+        .stream = stream.move(),
         .route = route,
         .input = .init(read_buffer),
         .output = .init(write_buffer),
-        .timed = .init(stream.socket.handle),
+        .timed = undefined,
         .diagnostics = diagnostics,
     };
+    // The owner is used first where it stays.
+    conn.timed = .init(conn.stream.borrow().socket.handle);
     return conn;
 }
 
@@ -350,7 +354,7 @@ fn teardown(conn: *Connection, io: Io, polite: bool) void {
         conn.session_on[i] = false;
     }
     conn.timed.deinit(io, conn.ctx.keeper());
-    conn.stream.close(io);
+    conn.stream.deinit(io);
     conn.releaseSocketBuffers(io);
     conn.ctx.gpa.destroy(conn);
 }
@@ -403,7 +407,7 @@ pub fn alive(conn: *Connection, io: Io) Io.Cancelable!bool {
     const r = &conn.input.interface;
     const secure = conn.session_on[0] or conn.session_on[1];
     if (r.seek != r.end) return secure;
-    if (sys.peek(conn.stream.socket.handle)) |seen| return switch (seen) {
+    if (sys.peek(conn.stream.borrow().socket.handle)) |seen| return switch (seen) {
         .idle => true,
         .readable => secure,
         .closed => false,
@@ -411,7 +415,7 @@ pub fn alive(conn: *Connection, io: Io) Io.Cancelable!bool {
     r.seek = 0;
     r.end = 0;
     var data: [1][]u8 = .{r.buffer};
-    const result = io.operateTimeout(.{ .net_read = .{ .socket_handle = conn.stream.socket.handle, .data = &data } }, .{
+    const result = io.operateTimeout(.{ .net_read = .{ .socket_handle = conn.stream.borrow().socket.handle, .data = &data } }, .{
         .duration = .{ .raw = .fromNanoseconds(0), .clock = .awake },
     }) catch |err| return switch (err) {
         error.Timeout, error.ConcurrencyUnavailable => true,
@@ -436,7 +440,7 @@ pub fn readable(conn: *Connection, io: Io, timeout: Io.Duration) Io.Cancelable!b
 pub fn awaitReadable(conn: *Connection, io: Io, timeout: Io.Duration) Io.Cancelable!Timed.Readiness {
     if (!conn.shared) conn.io = io;
     if (conn.reader().bufferedLen() != 0) return .ready;
-    return Timed.awaitReadable(io, conn.stream.socket.handle, &conn.input.interface, timeout);
+    return Timed.awaitReadable(io, conn.stream.borrow().socket.handle, &conn.input.interface, timeout);
 }
 
 /// Bound no read or write by a timeout any more: what the connection
@@ -697,7 +701,7 @@ const SocketReader = struct {
         const conn = connection(r);
         var iovecs: [8][]u8 = undefined;
         const dest_n, const data_size = try r.writableVector(&iovecs, data);
-        const result = conn.perform(.{ .net_read = .{ .socket_handle = conn.stream.socket.handle, .data = iovecs[0..dest_n] } }) catch return error.ReadFailed;
+        const result = conn.perform(.{ .net_read = .{ .socket_handle = conn.stream.borrow().socket.handle, .data = iovecs[0..dest_n] } }) catch return error.ReadFailed;
         const n = (result.net_read catch {
             conn.note(.broken);
             return error.ReadFailed;
@@ -723,7 +727,7 @@ const SocketWriter = struct {
         const sw: *SocketWriter = @alignCast(@fieldParentPtr("interface", w)); // safe: this vtable is installed only on a SocketWriter's interface
         const conn: *Connection = @alignCast(@fieldParentPtr("output", sw)); // safe: a SocketWriter lives only in a Connection's `output`
         const result = conn.perform(.{ .net_write = .{
-            .socket_handle = conn.stream.socket.handle,
+            .socket_handle = conn.stream.borrow().socket.handle,
             .header = w.buffered(),
             .data = data,
             .splat = splat,

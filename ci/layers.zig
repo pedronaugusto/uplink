@@ -46,6 +46,7 @@ pub const layers: []const gantry.rules.Layer = &.{
     } },
     .{ .name = "net system", .patterns = &.{
         "src/net/sys.zig",
+        "src/net/stream.zig",
         "src/net/Timed.zig",
         "src/net/dns/windows.zig",
     } },

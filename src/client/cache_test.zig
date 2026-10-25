@@ -230,7 +230,7 @@ test "a store keeps no more than its bound, the least recently used evicted" {
     const store = memory.store();
     const body: [200]u8 = @splat('x');
     for ([_][]const u8{ "a", "b", "c" }) |key| {
-        const w = (try store.begin(io, key, .{ .requested = 0, .received = 0, .vary = "" }, "HTTP/1.1 200 OK\r\n")).?;
+        const w = (try store.begin(io, key, .{ .requested = .fromRaw(0), .received = .fromRaw(0), .vary = "" }, "HTTP/1.1 200 OK\r\n")).?;
         try testing.expect(try store.append(io, w, &body));
         try store.commit(io, w);
     }

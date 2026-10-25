@@ -5,14 +5,24 @@
 //! `.literal("90s")`.
 //!
 //! std's `Io.Duration` is what an `Io` call takes and what two timestamps
-//! subtract to; `toIo` and `of` are where the two meet.
+//! subtract to; `toIo` and `of` are where the two meet. The calendar clock
+//! is read in one place, `calendar`, as the instant HTTP dates name.
 
 const std = @import("std");
 const aegis = @import("aegis");
 const Io = std.Io;
+const date = @import("uplink.wire").date;
 
 /// A span of time, in nanoseconds: up to 584 years.
 pub const Duration = aegis.units.Duration(.nanosecond, u64);
+
+/// The calendar clock now, in the whole seconds an HTTP date names: what a
+/// cache stamps a response with and a cookie's expiry is measured against.
+pub fn calendar(io: Io) date.Second {
+    // Only a clock 292 billion years from the epoch holds more seconds than
+    // an i64: the end of the calendar.
+    return date.Second.fromTimestamp(Io.Clock.real.now(io), .down) catch .fromRaw(std.math.maxInt(i64));
+}
 
 /// `d` as std's duration, for an `Io` call. Every span fits.
 pub fn toIo(d: Duration) Io.Duration {
@@ -22,8 +32,13 @@ pub fn toIo(d: Duration) Io.Duration {
 /// A measured span as uplink's: one negative (a clock that stepped back)
 /// is zero, and one past 584 years the longest there is.
 pub fn of(d: Io.Duration) Duration {
-    return .fromRaw(@intCast(std.math.clamp(d.nanoseconds, 0, std.math.maxInt(u64)))); // safe: clamped into u64 above
+    const exact = IoSpan.fromIoDuration(d, .exact);
+    if (exact.compare(.fromRaw(0)) != .gt) return .fromRaw(0);
+    return exact.convert(.nanosecond, u64, .exact) catch .fromRaw(std.math.maxInt(u64));
 }
+
+/// std's span, as aegis holds it: the same nanoseconds, signed.
+const IoSpan = aegis.units.Duration(.nanosecond, i96);
 
 /// The shorter of two optional spans; null is no limit.
 pub fn shorter(a: ?Duration, b: ?Duration) ?Duration {

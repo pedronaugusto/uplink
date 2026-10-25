@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const Io = std.Io;
+const aegis = @import("aegis");
 const reactor = @import("reactor");
 const uplink = @import("uplink");
 const ws = uplink.ws;
@@ -125,7 +126,7 @@ fn caseCount(client: *uplink.Client, gpa: std.mem.Allocator, io: Io, url: []cons
 
 /// Sum the report's cases by behaviour and name the failures.
 fn summarize(gpa: std.mem.Allocator, io: Io, work: Io.Dir, index: []const u8) !void {
-    const text = try work.readFileAlloc(io, index, gpa, .limited(16 << 20));
+    const text = try aegis.own.readFile(io, work, index, gpa, .literal("16MiB"));
     defer gpa.free(text);
     const parsed = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
     defer parsed.deinit();

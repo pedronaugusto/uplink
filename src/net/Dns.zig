@@ -13,6 +13,7 @@ const std = @import("std");
 const reactor = @import("reactor");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const aegis = @import("aegis");
 const IpAddress = Io.net.IpAddress;
 const dns = @import("uplink.wire").dns;
 const span = @import("../span.zig");
@@ -572,9 +573,13 @@ test "the system's configuration is read: its servers, at most three" {
 /// AAAA record and an HTTPS record; `big.test` is a CNAME to `many.test`,
 /// whose three A records come truncated over UDP and whole over TCP; any
 /// other name does not exist.
+fn closeServer(server: *Io.net.Server, io: Io) void {
+    server.deinit(io);
+}
+
 const FakeServer = struct {
     udp: Io.net.Socket,
-    tcp: Io.net.Server,
+    tcp: aegis.own.OwnedIo(Io.net.Server, closeServer),
     address: IpAddress,
     udp_task: Io.Future(void),
     tcp_task: Io.Future(void),
@@ -591,7 +596,7 @@ const FakeServer = struct {
         while (true) : (tries += 1) {
             f.udp = try loopback.bind(io, .{ .mode = .dgram });
             f.address = f.udp.address;
-            f.tcp = f.address.listen(io, .{}) catch |err| switch (err) {
+            f.tcp = .init(f.address.listen(io, .{}) catch |err| switch (err) {
                 error.AddressInUse => {
                     f.udp.close(io);
                     if (tries == 16) return err;
@@ -601,7 +606,7 @@ const FakeServer = struct {
                     f.udp.close(io);
                     return e;
                 },
-            };
+            });
             break;
         }
         f.udp_task = io.concurrent(serveUdp, .{ f, io }) catch return error.SkipZigTest;
@@ -627,7 +632,7 @@ const FakeServer = struct {
 
     fn serveTcp(f: *FakeServer, io: Io) void {
         while (true) {
-            const stream = f.tcp.accept(io) catch return;
+            const stream = f.tcp.borrowMut().accept(io) catch return;
             defer stream.close(io);
             var rbuf: [1024]u8 = undefined;
             var r = stream.reader(io, &rbuf);

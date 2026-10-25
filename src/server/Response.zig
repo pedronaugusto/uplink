@@ -20,6 +20,7 @@
 
 const std = @import("std");
 const aegis = @import("aegis");
+const span = @import("../span.zig");
 const Io = std.Io;
 const Status = std.http.Status;
 const wire = @import("uplink.wire");
@@ -543,7 +544,7 @@ fn sendHead(r: *Response, want: Framing, coded: ?Encoder.Coding) Error!void {
     h1.writeStatusLine(w, r.status) catch return r.fail();
     if (!r.has_date) {
         var date_buf: [wire.date.formatted_len]u8 = undefined;
-        const now = Io.Clock.real.now(r.socket.io).toSeconds();
+        const now = span.calendar(r.socket.io);
         w.print("Date: {s}\r\n", .{wire.date.format(now, &date_buf)}) catch return r.fail();
     }
     switch (r.framing) {
@@ -584,7 +585,7 @@ fn sendHeadH2(r: *Response, st: *Session.Stream, want: Framing, coded: ?Encoder.
     n += 1;
     var date_buf: [wire.date.formatted_len]u8 = undefined;
     if (!r.has_date) {
-        list[n] = .{ .name = "date", .value = wire.date.format(Io.Clock.real.now(r.socket.io).toSeconds(), &date_buf) };
+        list[n] = .{ .name = "date", .value = wire.date.format(span.calendar(r.socket.io), &date_buf) };
         n += 1;
     }
     var length_buf: [20]u8 = undefined;
