@@ -39,6 +39,12 @@ host: []const u8,
 remote: ?Io.net.IpAddress,
 /// Whether the request came over TLS.
 secure: bool,
+/// The client's leaf certificate (DER), when the server asked for one
+/// (`tls.ServerOptions.client_certificate`) and the client proved it in the
+/// handshake or, later, answering a post-handshake request: what RFC 8705
+/// binds an access token to. Null otherwise, and on a resumed session, whose
+/// ticket carries no certificate.
+peer_certificate: ?[]const u8 = null,
 /// What a router captured from the path, by name.
 params: Params = .{},
 /// The protocol an extended `CONNECT` (RFC 8441) asks the stream to

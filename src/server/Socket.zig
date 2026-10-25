@@ -255,6 +255,13 @@ fn linger(c: *Socket) void {
     }
 }
 
+/// The client's leaf certificate, on a TLS connection that asked for and
+/// kept one; valid until the connection closes.
+pub fn peerCertificate(c: *const Socket) ?[]const u8 {
+    if (!c.secure) return null;
+    return c.session.peerLeaf();
+}
+
 pub fn handshake(c: *Socket, options: tls.ServerOptions) error{Failed}!void {
     const s = c.context;
     const io = c.io;
@@ -279,6 +286,8 @@ pub fn handshake(c: *Socket, options: tls.ServerOptions) error{Failed}!void {
         .credentials = options.credentials,
         .alpn = if (s.options.http2) tls.server_protocols else tls.server_protocols_h1,
         .client_auth = options.client_certificate,
+        // Kept only where a client is asked for one: `Request.peer_certificate`.
+        .keep_peer_leaf = options.client_certificate != .none,
         .client_trust = if (options.client_trust) |t| .{ .snapshot = t } else .none,
         .key_log = if (options.key_log) |w| tls.keyLog(w) else null,
         .tickets = tickets,

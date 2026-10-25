@@ -174,6 +174,7 @@ fn serveOne(c: *Connection) bool {
         .host = target.authority orelse host_field orelse "",
         .remote = if (c.socket.stream.socket.address == .ip4 or c.socket.stream.socket.address == .ip6) c.socket.stream.socket.address else null,
         .secure = c.socket.secure,
+        .peer_certificate = c.socket.peerCertificate(),
         .socket = &c.socket,
         .body = .initStrict(c.socket.reader(), framing, head.bodyBuffer()),
         .expects_continue = expects_continue,

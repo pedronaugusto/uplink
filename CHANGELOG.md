@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- Pins cloak 0.23 (was 0.19.0): a build with uplink moves to that line.
+
+### Added
+
+- `server.Request.peer_certificate`: the client's leaf certificate (DER) when `tls.ServerOptions.client_certificate` asked for one and the client proved it, in the handshake or answering a post-handshake request; null otherwise and on a resumed session. What a resource server checks an RFC 8705 certificate-bound token against (clearance's `bearer.Verifier`). The certificate is kept only on connections that ask for one.
+
 ## [0.9.3] - 2026-10-22
 
 ### Changed

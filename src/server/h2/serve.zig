@@ -301,6 +301,7 @@ fn answer(session: *Session, handler: Handler, st: *Stream) void {
         .host = head.authority orelse "",
         .remote = if (session.socket.stream.socket.address == .ip4 or session.socket.stream.socket.address == .ip6) session.socket.stream.socket.address else null,
         .secure = session.socket.secure,
+        .peer_certificate = session.socket.peerCertificate(),
         .socket = session.socket,
         .body = .init(Io.Reader.ending, .none, &.{}),
         .stream = st,

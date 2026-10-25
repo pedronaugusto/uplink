@@ -110,7 +110,7 @@ pub const ServerOptions = struct {
     /// alive for as long as the server uses them.
     credentials: []const cloak.tls.Credential,
     /// Whether a client is asked for a certificate, and whether it must
-    /// present one.
+    /// present one. The one it proves is each request's `peer_certificate`.
     client_certificate: cloak.tls.ClientCertificate = .none,
     /// The authorities a client's certificate is checked against; null
     /// takes any chain the client presents, unchecked.
