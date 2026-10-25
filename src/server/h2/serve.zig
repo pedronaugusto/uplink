@@ -129,10 +129,10 @@ fn grow(context: *Context, socket: *Socket) bool {
     const larger = context.buffers.acquire(socket.io, .record) catch return false;
     const buffered = r.buffered();
     @memcpy(larger[0..buffered.len], buffered);
-    context.buffers.release(socket.io, r.buffer);
-    r.buffer = larger;
-    r.seek = 0;
-    r.end = buffered.len;
+    const len = buffered.len;
+    context.buffers.release(socket.io, socket.input.reclaim());
+    socket.input.give(larger);
+    r.end = len;
     return true;
 }
 

@@ -65,9 +65,9 @@ continued: bool = false,
 trailer_fields: ?fields.Headers = null,
 /// Private: a buffer of the server's for what is made from the request
 /// (captures with their escapes undone), given back when it is done.
-scratch: []u8 = &.{},
+scratch: BufferPool.Buffer = &.{},
 /// Private: a scratch buffer replaced by a larger one.
-retired: []u8 = &.{},
+retired: BufferPool.Buffer = &.{},
 
 /// Captures by name, at most `max` of them; a value is the path's segment
 /// with its escapes undone, or for a `{name...}` capture the rest of the
@@ -131,7 +131,7 @@ pub fn scratchBuffer(r: *Request, io: Io, len: usize) error{OutOfMemory}![]u8 {
 /// Give back the request's buffers.
 pub fn release(r: *Request, io: Io) void {
     const pool = &r.socket.context.buffers;
-    for ([_][]u8{ r.scratch, r.retired }) |b| if (b.len != 0) pool.release(io, b);
+    for ([_]BufferPool.Buffer{ r.scratch, r.retired }) |b| if (b.len != 0) pool.release(io, b);
     r.scratch = &.{};
     r.retired = &.{};
 }
@@ -234,8 +234,7 @@ pub fn trailers(r: *Request) ?fields.Headers {
     }
     const bytes = r.body.trailerBytes() orelse return null;
     const end = std.mem.alignForward(usize, bytes.len, @alignOf(fields.Field));
-    const field_ptr = place.many(fields.Field, r.body.trailer.ptr, end); // pool buffers are 64-aligned and `end` is aligned for a Field, with room for `trailer_fields` of them
-    const parsed = h1.parseTrailer(bytes, field_ptr[0..Body.trailer_fields]) catch return null;
+    const parsed = h1.parseTrailer(bytes, place.many(fields.Field, r.body.trailer, end, Body.trailer_fields)) catch return null;
     r.trailer_fields = parsed;
     return parsed;
 }

@@ -17,11 +17,14 @@ const Allocator = std.mem.Allocator;
 const ZstdBuffer = @This();
 
 /// Private: the buffer kept for the next body.
-kept: aegis.Guarded(?[*]u8) = .init(null),
+kept: aegis.Guarded(?[*]align(64) u8) = .init(null),
 /// The largest frame window a body may ask for.
 max_window: aegis.units.Bytes(u32),
 /// Private: the length of every buffer, the decoder's state included.
 len: usize,
+
+/// A buffer, with the alignment it was allocated with.
+pub const Buffer = []align(64) u8;
 
 /// The decoder a buffer holds, after its reading room.
 pub const State = warp.zstd.Decompress.Reader;
@@ -56,16 +59,15 @@ fn readLen(max_window: aegis.units.Bytes(u32)) usize {
 }
 
 /// The reading part of `buffer`, and its state after it.
-pub fn split(z: *const ZstdBuffer, buffer: []u8) struct { []u8, *State } {
+pub fn split(z: *const ZstdBuffer, buffer: Buffer) struct { []u8, *State } {
     std.debug.assert(buffer.len == z.len);
     const read = readLen(z.max_window);
     const at = std.mem.alignForward(usize, read, @alignOf(State));
-    // Buffers are 64-aligned, `at` is aligned for State, and `len` holds a State past it.
-    return .{ buffer[0..read], place.one(State, buffer.ptr, at) };
+    return .{ buffer[0..read], place.one(State, buffer, at) };
 }
 
 /// A buffer: the one kept, or a new one.
-pub fn acquire(z: *ZstdBuffer, gpa: Allocator) Allocator.Error![]u8 {
+pub fn acquire(z: *ZstdBuffer, gpa: Allocator) Allocator.Error!Buffer {
     {
         var held = z.kept.acquire();
         defer held.deinit();
@@ -78,7 +80,7 @@ pub fn acquire(z: *ZstdBuffer, gpa: Allocator) Allocator.Error![]u8 {
 }
 
 /// Give a buffer back: kept when none is, freed otherwise.
-pub fn release(z: *ZstdBuffer, gpa: Allocator, buffer: []u8) void {
+pub fn release(z: *ZstdBuffer, gpa: Allocator, buffer: Buffer) void {
     std.debug.assert(buffer.len == z.len);
     {
         var held = z.kept.acquire();
@@ -88,17 +90,13 @@ pub fn release(z: *ZstdBuffer, gpa: Allocator, buffer: []u8) void {
             return;
         }
     }
-    gpa.free(aligned(buffer));
+    gpa.free(buffer);
 }
 
 /// Free the kept buffer.
 pub fn deinit(z: *ZstdBuffer, gpa: Allocator) void {
-    if (z.kept.teardown().*) |b| gpa.free(aligned(b[0..z.len]));
+    if (z.kept.teardown().*) |b| gpa.free(b[0..z.len]);
     z.* = undefined;
-}
-
-fn aligned(buffer: []u8) []align(64) u8 {
-    return place.aligned(.@"64", buffer);
 }
 
 test "a buffer given back is the next one taken, and a second given back is freed" {

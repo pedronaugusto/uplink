@@ -117,7 +117,8 @@ pub const Pool = struct {
         counts: [codings]u32 = @splat(0),
     };
     const codings = std.enums.values(Coding).len;
-    const Node = struct { next: ?*Node };
+    /// A free block's first bytes: the next free one, and the block itself.
+    const Node = struct { next: ?*Node, block: []align(64) u8 };
 
     pub fn init(gpa: Allocator, settings: Settings, max_free: u32) Pool {
         return .{ .gpa = gpa, .settings = settings, .lists = .init(.{}), .max_free = max_free };
@@ -131,7 +132,8 @@ pub const Pool = struct {
             const len = blockLen(p.settings, @fromBackingInt(@intCast(i)));
             while (head.*) |node| {
                 head.* = node.next;
-                p.gpa.free(blockOf(node, len));
+                std.debug.assert(node.block.len == len);
+                p.gpa.free(node.block);
             }
         }
         held.deinit(io);
@@ -150,12 +152,13 @@ pub const Pool = struct {
             if (lists.free[i]) |node| {
                 lists.free[i] = node.next;
                 lists.counts[i] -= 1;
-                break :taken blockOf(node, len);
+                std.debug.assert(node.block.len == len);
+                break :taken node.block;
             }
             break :taken null;
         } orelse try p.gpa.alignedAlloc(u8, .@"64", len);
         const codec = codecLen(p.settings, coding);
-        const e = place.one(Encoder, block.ptr, len - @sizeOf(Encoder)); // the block ends with room for an Encoder, aligned for it
+        const e = place.one(Encoder, block, len - @sizeOf(Encoder));
         const stage = block[codec..][0..stage_len];
         const memory: []align(64) u8 = block[0..codec];
         e.* = .{ .coding = coding, .block = block, .state = undefined, .writer_ = undefined };
@@ -181,18 +184,14 @@ pub const Pool = struct {
             defer held.deinit(io);
             const lists = held.value();
             if (lists.counts[i] < p.max_free) {
-                const node = place.one(Node, block.ptr, 0); // a block is 64-aligned and far longer than a Node
-                node.* = .{ .next = lists.free[i] };
+                const node = place.one(Node, block, 0);
+                node.* = .{ .next = lists.free[i], .block = block };
                 lists.free[i] = node;
                 lists.counts[i] += 1;
                 return;
             }
         }
         p.gpa.free(block);
-    }
-
-    fn blockOf(node: *Node, len: usize) []align(64) u8 {
-        return place.front(.@"64", node)[0..len];
     }
 };
 

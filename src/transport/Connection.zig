@@ -35,6 +35,7 @@ const Resolver = @import("../net/Resolver.zig");
 const sys = @import("../net/sys.zig");
 const stream_owner = @import("../net/stream.zig");
 const Context = @import("Context.zig");
+const BufferPool = @import("BufferPool.zig");
 const span = @import("../span.zig");
 const Diagnostics = @import("Diagnostics.zig");
 const Proxy = @import("Proxy.zig");
@@ -58,7 +59,7 @@ output: SocketWriter,
 /// Private: TLS to the proxy (0) and to the target (1), as there are.
 sessions: [2]cloak.tls.Session = undefined,
 session_on: [2]bool = .{ false, false },
-session_buffers: [2][2][]u8 = undefined,
+session_buffers: [2][2]BufferPool.Buffer = undefined,
 /// Each session's client credential, which it borrows.
 credentials: [2]cloak.tls.ClientCredential = undefined,
 /// Requests name the whole URL: through a proxy, to an `http` target.
@@ -361,10 +362,7 @@ fn teardown(conn: *Connection, io: Io, polite: bool) void {
 }
 
 fn releaseSocketBuffers(conn: *Connection, io: Io) void {
-    if (conn.input.interface.buffer.len != 0) conn.ctx.buffers.release(io, conn.input.interface.buffer);
-    if (conn.output.interface.buffer.len != 0) conn.ctx.buffers.release(io, conn.output.interface.buffer);
-    conn.input.interface.buffer = &.{};
-    conn.output.interface.buffer = &.{};
+    for ([_]BufferPool.Buffer{ conn.input.reclaim(), conn.output.reclaim() }) |b| if (b.len != 0) conn.ctx.buffers.release(io, b);
 }
 
 /// Put the connection away idle: the socket's buffers go back to the pool
@@ -373,15 +371,9 @@ pub fn park(conn: *Connection, io: Io) void {
     conn.diagnostics = null;
     conn.deadline = null;
     const r = &conn.input.interface;
-    if (r.buffer.len != 0 and r.seek == r.end) {
-        conn.ctx.buffers.release(io, r.buffer);
-        r.* = .{ .vtable = r.vtable, .buffer = &.{}, .seek = 0, .end = 0 };
-    }
+    if (r.buffer.len != 0 and r.seek == r.end) conn.ctx.buffers.release(io, conn.input.reclaim());
     const w = &conn.output.interface;
-    if (w.buffer.len != 0 and w.end == 0) {
-        conn.ctx.buffers.release(io, w.buffer);
-        w.buffer = &.{};
-    }
+    if (w.buffer.len != 0 and w.end == 0) conn.ctx.buffers.release(io, conn.output.reclaim());
 }
 
 /// Take a parked connection out for an exchange that must be done by
@@ -391,8 +383,8 @@ pub fn unpark(conn: *Connection, io: Io, diagnostics: ?*Diagnostics, deadline: ?
     conn.diagnostics = diagnostics;
     conn.deadline = deadline;
     conn.speed = .{};
-    if (conn.input.interface.buffer.len == 0) conn.input.interface.buffer = try conn.ctx.buffers.acquire(io, .record);
-    if (conn.output.interface.buffer.len == 0) conn.output.interface.buffer = try conn.ctx.buffers.acquire(io, .record);
+    if (conn.input.pooled.len == 0) conn.input.give(try conn.ctx.buffers.acquire(io, .record));
+    if (conn.output.pooled.len == 0) conn.output.give(try conn.ctx.buffers.acquire(io, .record));
 }
 
 /// Whether a kept connection still looks usable: one look at its socket
@@ -680,9 +672,29 @@ fn note(conn: *Connection, failure: Failure) void {
 
 const SocketReader = struct {
     interface: Io.Reader,
+    /// The pool buffer the interface reads into, as the pool gave it.
+    pooled: BufferPool.Buffer,
 
-    fn init(buffer: []u8) SocketReader {
-        return .{ .interface = .{ .vtable = &.{ .stream = streamImpl, .readVec = readVec }, .buffer = buffer, .seek = 0, .end = 0 } };
+    fn init(buffer: BufferPool.Buffer) SocketReader {
+        return .{ .interface = .{ .vtable = &.{ .stream = streamImpl, .readVec = readVec }, .buffer = buffer, .seek = 0, .end = 0 }, .pooled = buffer };
+    }
+
+    /// Read into `buffer` from now on, the reader having none.
+    fn give(sr: *SocketReader, buffer: BufferPool.Buffer) void {
+        std.debug.assert(sr.pooled.len == 0);
+        sr.pooled = buffer;
+        sr.interface.buffer = buffer;
+    }
+
+    /// The reader's buffer, for the pool: the reader is left with none,
+    /// and what it held unread is dropped.
+    fn reclaim(sr: *SocketReader) BufferPool.Buffer {
+        const buffer = sr.pooled;
+        sr.pooled = &.{};
+        sr.interface.buffer = &.{};
+        sr.interface.seek = 0;
+        sr.interface.end = 0;
+        return buffer;
     }
 
     fn connection(r: *Io.Reader) *Connection {
@@ -719,9 +731,28 @@ const SocketReader = struct {
 
 const SocketWriter = struct {
     interface: Io.Writer,
+    /// The pool buffer the interface writes through, as the pool gave it.
+    pooled: BufferPool.Buffer,
 
-    fn init(buffer: []u8) SocketWriter {
-        return .{ .interface = .{ .vtable = &.{ .drain = drain }, .buffer = buffer } };
+    fn init(buffer: BufferPool.Buffer) SocketWriter {
+        return .{ .interface = .{ .vtable = &.{ .drain = drain }, .buffer = buffer }, .pooled = buffer };
+    }
+
+    /// Write through `buffer` from now on, the writer having none.
+    fn give(sw: *SocketWriter, buffer: BufferPool.Buffer) void {
+        std.debug.assert(sw.pooled.len == 0);
+        sw.pooled = buffer;
+        sw.interface.buffer = buffer;
+    }
+
+    /// The writer's buffer, for the pool: the writer is left with none,
+    /// and what it held unsent is dropped.
+    fn reclaim(sw: *SocketWriter) BufferPool.Buffer {
+        const buffer = sw.pooled;
+        sw.pooled = &.{};
+        sw.interface.buffer = &.{};
+        sw.interface.end = 0;
+        return buffer;
     }
 
     fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {

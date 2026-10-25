@@ -17,6 +17,7 @@ const sys = @import("../net/sys.zig");
 const stream_owner = @import("../net/stream.zig");
 const reactor = @import("reactor");
 const Context = @import("Context.zig");
+const BufferPool = @import("../transport/BufferPool.zig");
 
 const Socket = @This();
 
@@ -36,7 +37,7 @@ output: SocketWriter,
 /// Private: TLS, when the server speaks it.
 session: cloak.tls.Session = undefined,
 secure: bool = false,
-session_buffers: [2][]u8 = .{ &.{}, &.{} },
+session_buffers: [2]BufferPool.Buffer = .{ &.{}, &.{} },
 /// Which wait the next operation is part of; on a multiplexed connection,
 /// the next read.
 phase: Phases.Runtime(void) = .init({}),
@@ -264,7 +265,7 @@ pub fn close(c: *Socket) void {
     c.timed.deinit(io, c.context.keeper());
     c.context.closing(io, &c.entry);
     c.stream.deinit(io);
-    for ([_][]u8{ c.input.interface.buffer, c.output.interface.buffer }) |b| if (b.len != 0) pool.release(io, b);
+    for ([_]BufferPool.Buffer{ c.input.reclaim(), c.output.reclaim() }) |b| if (b.len != 0) pool.release(io, b);
 }
 
 /// End the sending side, then read and drop what the client still sends
@@ -293,7 +294,7 @@ pub fn handshake(c: *Socket, options: tls.ServerOptions) error{Failed}!void {
     const s = c.context;
     const io = c.io;
     const pool = &s.buffers;
-    c.output.interface.buffer = pool.acquire(io, .record) catch return error.Failed;
+    c.output.give(pool.acquire(io, .record) catch return error.Failed);
     const read_buffer = pool.acquire(io, .record) catch return error.Failed;
     const write_buffer = pool.acquire(io, .record) catch {
         pool.release(io, read_buffer);
@@ -337,10 +338,7 @@ pub fn handshake(c: *Socket, options: tls.ServerOptions) error{Failed}!void {
 pub fn park(c: *Socket) void {
     if (c.secure) return;
     const w = &c.output.interface;
-    if (w.buffer.len != 0 and w.end == 0) {
-        c.context.buffers.release(c.io, w.buffer);
-        w.buffer = &.{};
-    }
+    if (w.buffer.len != 0 and w.end == 0) c.context.buffers.release(c.io, c.output.reclaim());
 }
 
 /// Send `100 Continue` to a client waiting for it before its body.
@@ -419,9 +417,29 @@ fn note(c: *Socket, failure: Failure) void {
 
 const SocketReader = struct {
     interface: Io.Reader,
+    /// The pool buffer the interface reads into, as the pool gave it.
+    pooled: BufferPool.Buffer,
 
-    fn init(buffer: []u8) SocketReader {
-        return .{ .interface = .{ .vtable = &.{ .stream = streamImpl, .readVec = readVec }, .buffer = buffer, .seek = 0, .end = 0 } };
+    fn init(buffer: BufferPool.Buffer) SocketReader {
+        return .{ .interface = .{ .vtable = &.{ .stream = streamImpl, .readVec = readVec }, .buffer = buffer, .seek = 0, .end = 0 }, .pooled = buffer };
+    }
+
+    /// Read into `buffer` from now on, the reader having none.
+    pub fn give(sr: *SocketReader, buffer: BufferPool.Buffer) void {
+        std.debug.assert(sr.pooled.len == 0);
+        sr.pooled = buffer;
+        sr.interface.buffer = buffer;
+    }
+
+    /// The reader's buffer, for the pool: the reader is left with none,
+    /// and what it held unread is dropped.
+    pub fn reclaim(sr: *SocketReader) BufferPool.Buffer {
+        const buffer = sr.pooled;
+        sr.pooled = &.{};
+        sr.interface.buffer = &.{};
+        sr.interface.seek = 0;
+        sr.interface.end = 0;
+        return buffer;
     }
 
     fn socket(r: *Io.Reader) *Socket {
@@ -457,9 +475,28 @@ const SocketReader = struct {
 
 const SocketWriter = struct {
     interface: Io.Writer,
+    /// The pool buffer the interface writes through, as the pool gave it.
+    pooled: BufferPool.Buffer,
 
-    fn init(buffer: []u8) SocketWriter {
-        return .{ .interface = .{ .vtable = &.{ .drain = drain }, .buffer = buffer } };
+    fn init(buffer: BufferPool.Buffer) SocketWriter {
+        return .{ .interface = .{ .vtable = &.{ .drain = drain }, .buffer = buffer }, .pooled = buffer };
+    }
+
+    /// Write through `buffer` from now on, the writer having none.
+    pub fn give(sw: *SocketWriter, buffer: BufferPool.Buffer) void {
+        std.debug.assert(sw.pooled.len == 0);
+        sw.pooled = buffer;
+        sw.interface.buffer = buffer;
+    }
+
+    /// The writer's buffer, for the pool: the writer is left with none,
+    /// and what it held unsent is dropped.
+    pub fn reclaim(sw: *SocketWriter) BufferPool.Buffer {
+        const buffer = sw.pooled;
+        sw.pooled = &.{};
+        sw.interface.buffer = &.{};
+        sw.interface.end = 0;
+        return buffer;
     }
 
     fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {

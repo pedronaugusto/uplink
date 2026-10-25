@@ -41,7 +41,7 @@ changed: aegis.Condition = .init(),
 /// The exchanges using the connection now.
 users: sync.Gauge = .init(.fromRaw(0)),
 /// Private: what `create` allocated besides this value.
-memory: []u8,
+memory: []align(64) u8,
 /// Private: the bytes the task holding the send role is writing, outside
 /// the lock.
 sending: std.ArrayList(u8) = .empty,
@@ -162,10 +162,10 @@ fn allocate(ctx: *Context, conn: *Connection) Allocator.Error!*H2 {
     errdefer ctx.gpa.free(memory);
     var at: usize = 0;
     const take = struct {
-        fn slice(comptime T: type, m: []u8, offset: *usize, size: usize, n: usize) []T {
-            const p = place.many(T, m.ptr, offset.*); // each part starts 64-aligned inside the block
+        fn slice(comptime T: type, m: []align(64) u8, offset: *usize, size: usize, n: usize) []T {
+            const p = place.many(T, m, offset.*, n);
             offset.* += size;
-            return p[0..n];
+            return p;
         }
     }.slice;
     const streams = take(h2.Connection.Stream, memory, &at, sizes[0], Layout.streams);
@@ -220,7 +220,7 @@ pub fn abandon(h: *H2) void {
     for (shared.streams.items) |st| h.ctx.gpa.destroy(st);
     shared.streams.deinit(h.ctx.gpa);
     shared.outbox.deinit();
-    h.ctx.gpa.free(place.aligned(.@"64", h.memory));
+    h.ctx.gpa.free(h.memory);
     h.ctx.gpa.destroy(h);
 }
 
@@ -238,7 +238,7 @@ pub fn close(h: *H2, io: Io) void {
     shared.outbox.deinit();
     h.sending.deinit(h.ctx.gpa);
     h.conn.close(io);
-    h.ctx.gpa.free(place.aligned(.@"64", h.memory));
+    h.ctx.gpa.free(h.memory);
     h.ctx.gpa.destroy(h);
 }
 
@@ -279,7 +279,7 @@ pub const Stream = struct {
     id: u31,
     /// The response's head, its fields in a pooled buffer, once it came.
     status: ?u10 = null,
-    head_buffer: []u8 = &.{},
+    head_buffer: BufferPool.Buffer = &.{},
     fields: []const Field = &.{},
     /// Interim heads seen and dropped.
     interim: u8 = 0,
@@ -290,7 +290,7 @@ pub const Stream = struct {
     recv_end: bool = false,
     reset_code: ?h2.ErrorCode = null,
     refused: bool = false,
-    trailer_buffer: []u8 = &.{},
+    trailer_buffer: BufferPool.Buffer = &.{},
     trailers: ?[]Field = null,
     /// The request's end went.
     sent_end: bool = false,

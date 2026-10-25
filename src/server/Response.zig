@@ -47,10 +47,10 @@ http1_0: bool,
 /// Private: the request's `Accept-Encoding`.
 accept_encoding: ?[]const u8,
 /// Private: the fields as they will be written, each line whole.
-fields_buffer: []u8 = &.{},
+fields_buffer: BufferPool.Buffer = &.{},
 fields_len: usize = 0,
 /// Private: the body's buffer, from the pool once `writer` is asked for.
-body_buffer: []u8 = &.{},
+body_buffer: BufferPool.Buffer = &.{},
 /// Private: where the response stands.
 state: Stages.Runtime(void) = .init({}),
 /// Private: the length the handler declared, of the body as written.
@@ -71,17 +71,17 @@ broken: bool = false,
 /// Private: a write failed for the writing task's cancelation.
 canceled: bool = false,
 /// Private: the trailer's fields, for a chunked body.
-trailer_buffer: []u8 = &.{},
+trailer_buffer: BufferPool.Buffer = &.{},
 trailer_len: usize = 0,
 /// Private: the encoder of a body sent under a coding, and the writer
 /// that frames what it writes.
 encoder: ?*Encoder = null,
 framed: Io.Writer = .{ .vtable = &.{ .drain = drainFramed }, .buffer = &.{} },
-framed_buffer: []u8 = &.{},
+framed_buffer: BufferPool.Buffer = &.{},
 /// Private: a taken-over HTTP/2 stream's writer: its bytes as DATA.
 tunnel: Io.Writer = .{ .vtable = &.{ .drain = drainTunnel }, .buffer = &.{} },
 /// Private: the buffer a taken-over HTTP/2 stream is read through.
-tunnel_in: []u8 = &.{},
+tunnel_in: BufferPool.Buffer = &.{},
 /// Private: the HTTP/2 stream the response goes on, if it does.
 stream: ?*Session.Stream = null,
 /// Private: the body writer.
@@ -179,7 +179,7 @@ pub fn header(r: *Response, name: []const u8, value: []const u8) Error!void {
     try r.appendField(&r.fields_buffer, &r.fields_len, name, value);
 }
 
-fn appendField(r: *Response, buffer: *[]u8, len: *usize, name: []const u8, value: []const u8) Error!void {
+fn appendField(r: *Response, buffer: *BufferPool.Buffer, len: *usize, name: []const u8, value: []const u8) Error!void {
     const need = name.len + 2 + value.len + 2;
     try r.reserve(buffer, len.*, need);
     var w: Io.Writer = .fixed(buffer.*[len.*..]);
@@ -189,7 +189,7 @@ fn appendField(r: *Response, buffer: *[]u8, len: *usize, name: []const u8, value
 
 /// Room for `need` more bytes after `len` in `buffer`, taken from the pool
 /// or moved to a larger buffer.
-fn reserve(r: *Response, buffer: *[]u8, len: usize, need: usize) Error!void {
+fn reserve(r: *Response, buffer: *BufferPool.Buffer, len: usize, need: usize) Error!void {
     const pool = &r.socket.context.buffers;
     const io = r.socket.io;
     if (buffer.len - len >= need) return;
@@ -464,7 +464,7 @@ pub fn keepsConnection(r: *const Response) bool {
 /// Give back the response's buffers and its encoder.
 pub fn release(r: *Response, io: Io) void {
     const pool = &r.socket.context.buffers;
-    for ([_][]u8{ r.fields_buffer, r.body_buffer, r.trailer_buffer, r.framed_buffer, r.tunnel_in }) |b| if (b.len != 0) pool.release(io, b);
+    for ([_]BufferPool.Buffer{ r.fields_buffer, r.body_buffer, r.trailer_buffer, r.framed_buffer, r.tunnel_in }) |b| if (b.len != 0) pool.release(io, b);
     r.tunnel_in = &.{};
     r.fields_buffer = &.{};
     r.body_buffer = &.{};

@@ -18,6 +18,7 @@
 
 const std = @import("std");
 const place = @import("../../place.zig");
+const BufferPool = @import("../../transport/BufferPool.zig");
 const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -39,7 +40,7 @@ shared: aegis.BlockingGuarded(Shared),
 /// Private: woken when anything a stream may wait for changes.
 changed: aegis.Condition = .init(),
 /// Private: what `init` allocated.
-memory: []u8,
+memory: []align(64) u8,
 /// Private: a task of its own writes the outbox (`startSending`); else
 /// whoever adds frames writes them at once.
 sender: bool = false,
@@ -93,10 +94,10 @@ pub fn init(context: *Context, socket: *Socket, max_concurrent: u32) Allocator.E
     const memory = try context.gpa.alignedAlloc(u8, .@"64", total);
     var at: usize = 0;
     const take = struct {
-        fn slice(comptime T: type, m: []u8, offset: *usize, size: usize, n: usize) []T {
-            const p = place.many(T, m.ptr, offset.*); // each part starts 64-aligned inside the block
+        fn slice(comptime T: type, m: []align(64) u8, offset: *usize, size: usize, n: usize) []T {
+            const p = place.many(T, m, offset.*, n);
             offset.* += size;
-            return p[0..n];
+            return p;
         }
     }.slice;
     const streams = take(h2.Connection.Stream, memory, &at, sizes[0], Layout.streams);
@@ -143,7 +144,7 @@ pub fn deinit(s: *Session) void {
     shared.streams.deinit(s.context.gpa);
     shared.outbox.deinit();
     s.sending.deinit(s.context.gpa);
-    s.context.gpa.free(place.aligned(.@"64", s.memory));
+    s.context.gpa.free(s.memory);
     s.* = undefined;
 }
 
@@ -236,7 +237,7 @@ pub const Stream = struct {
     session: *Session,
     id: u31,
     /// The request's fields, in a buffer of the server's pool.
-    head_buffer: []u8,
+    head_buffer: BufferPool.Buffer,
     fields: []Field,
     /// Received data, a ring; at most the stream's window.
     recv: []u8 = &.{},
@@ -246,7 +247,7 @@ pub const Stream = struct {
     /// The peer's reset, or the connection's end.
     reset_code: ?h2.ErrorCode = null,
     /// The request's trailer fields, in their own pooled buffer.
-    trailer_buffer: []u8 = &.{},
+    trailer_buffer: BufferPool.Buffer = &.{},
     trailers: ?[]Field = null,
     /// The response's headers have gone.
     responded: bool = false,

@@ -34,7 +34,7 @@ pub fn serve(context: *Context, handler: *const Handler, io: Io, stream: Io.net.
     defer context.leave(io, &c.socket.entry);
     defer c.socket.close();
     const in_class: BufferPool.Class = if (context.options.tls != null) .record else .small;
-    c.socket.input.interface.buffer = context.buffers.acquire(io, in_class) catch return;
+    c.socket.input.give(context.buffers.acquire(io, in_class) catch return);
     if (context.options.tls) |options| c.socket.handshake(options) catch return;
     if (std.mem.eql(u8, c.socket.alpn(), "h2")) return h2_serve.serve(context, handler, &c.socket);
     if (!c.socket.secure) switch (context.options.h2c) {
@@ -130,7 +130,7 @@ fn serveOne(c: *Connection) bool {
     defer head.release(io, &s.buffers);
     const arrived = Io.Clock.awake.now(io);
     c.socket.startAnswer();
-    if (c.socket.output.interface.buffer.len == 0) c.socket.output.interface.buffer = s.buffers.acquire(io, .record) catch return false;
+    if (c.socket.output.pooled.len == 0) c.socket.output.give(s.buffers.acquire(io, .record) catch return false);
 
     const maybe = h1.parseRequest(head.bytes(), head.fields(), options.limits) catch |err| return switch (err) {
         error.UnsupportedVersion => c.refuse(.http_version_not_supported, "version"),
@@ -363,7 +363,7 @@ fn validHost(value: []const u8) bool {
 fn refuse(c: *Connection, status: std.http.Status, reason: []const u8) bool {
     const s = c.socket.context;
     if (s.options.observer) |o| o.emit(.{ .refused = .{ .status = @backingInt(status), .reason = reason } });
-    if (c.socket.output.interface.buffer.len == 0) c.socket.output.interface.buffer = s.buffers.acquire(c.socket.io, .small) catch return false;
+    if (c.socket.output.pooled.len == 0) c.socket.output.give(s.buffers.acquire(c.socket.io, .small) catch return false);
     c.socket.startAnswer();
     const w = c.socket.writer();
     h1.writeStatusLine(w, status) catch return false;

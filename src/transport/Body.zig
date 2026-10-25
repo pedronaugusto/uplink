@@ -35,7 +35,7 @@ state: Reading.Runtime(void) = .init({}),
 trailer_pool: ?*BufferPool = null,
 trailer_io: Io = undefined,
 /// Private: the trailer section as read, its blank line included.
-trailer: []u8 = &.{},
+trailer: BufferPool.Buffer = &.{},
 trailer_len: usize = 0,
 
 pub const State = enum {

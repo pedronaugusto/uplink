@@ -20,6 +20,7 @@ const fields = wire.fields;
 const coding = wire.coding;
 const Method = wire.Method;
 const Version = wire.Version;
+const BufferPool = @import("../transport/BufferPool.zig");
 const Connection = @import("../transport/Connection.zig");
 const H2 = @import("../transport/H2.zig");
 const Context = @import("../transport/Context.zig");
@@ -51,10 +52,10 @@ conn: ?*Connection,
 h2: ?*H2 = null,
 stream: ?*H2.Stream = null,
 /// Private: the head, its fields and the body reader's buffer.
-head_buffer: []u8,
+head_buffer: BufferPool.Buffer,
 body_buffer: []u8,
 /// Private: the final URL's bytes, when a redirect was followed.
-url_buffer: []u8 = &.{},
+url_buffer: BufferPool.Buffer = &.{},
 /// Private: the trailer's fields, once parsed.
 trailer_fields: ?fields.Headers = null,
 keep_alive: bool,
@@ -240,8 +241,7 @@ pub fn trailers(r: *Response) ?fields.Headers {
     const bytes = r.body.trailerBytes() orelse return null;
     // `bytes` starts the pool buffer, which is aligned past a Field's need.
     const end = std.mem.alignForward(usize, bytes.len, @alignOf(fields.Field));
-    const field_ptr = place.many(fields.Field, r.body.trailer.ptr, end); // pool buffers are 64-aligned and `end` is aligned for a Field, with room for `trailer_fields` of them
-    const parsed = h1.parseTrailer(bytes, field_ptr[0..Body.trailer_fields]) catch return null;
+    const parsed = h1.parseTrailer(bytes, place.many(fields.Field, r.body.trailer, end, Body.trailer_fields)) catch return null;
     r.trailer_fields = parsed;
     return parsed;
 }
@@ -545,7 +545,7 @@ fn planDecoding(r: *Response, io: Io) Allocator.Error!void {
 
 /// A response head, parsed in its pooled buffer.
 const Received = struct {
-    buffer: []u8,
+    buffer: BufferPool.Buffer,
     head: h1.ResponseHead,
     body_buffer: []u8,
 };

@@ -52,10 +52,15 @@ pub const Class = enum(u2) {
 
 const classes = [_]usize{ 4 << 10, std.mem.alignForward(usize, tls.record_buffer_len, 64), 72 << 10 };
 
-/// Buffers are aligned so a free one can hold the list's link.
+/// Buffers are aligned so a free one can hold the list's link, and so
+/// what is placed past a head or a window is aligned.
 pub const alignment: std.mem.Alignment = .@"64";
 
-const Node = struct { next: ?*Node };
+/// A buffer the pool hands out, with the alignment it was allocated with.
+pub const Buffer = []align(alignment.toByteUnits()) u8;
+
+/// A free buffer's first bytes: the next free one, and the buffer itself.
+const Node = struct { next: ?*Node, bytes: Buffer };
 
 /// An empty pool keeping up to `max_free` free buffers of each size.
 pub fn init(gpa: Allocator, max_free: u32) BufferPool {
@@ -69,7 +74,8 @@ pub fn deinit(p: *BufferPool, io: Io) void {
     for (&lists.free, classes) |*head, len| {
         while (head.*) |node| {
             head.* = node.next;
-            p.gpa.free(bytesOf(node, len));
+            std.debug.assert(node.bytes.len == len);
+            p.gpa.free(node.bytes);
         }
     }
     held.deinit(io);
@@ -77,7 +83,7 @@ pub fn deinit(p: *BufferPool, io: Io) void {
 }
 
 /// A buffer of `class`, a kept one when there is one.
-pub fn acquire(p: *BufferPool, io: Io, class: Class) Allocator.Error![]u8 {
+pub fn acquire(p: *BufferPool, io: Io, class: Class) Allocator.Error!Buffer {
     const i = @backingInt(class);
     {
         var held = p.lists.acquireUncancelable(io);
@@ -86,31 +92,30 @@ pub fn acquire(p: *BufferPool, io: Io, class: Class) Allocator.Error![]u8 {
         if (lists.free[i]) |node| {
             lists.free[i] = node.next;
             lists.counts[i] -= 1;
-            return bytesOf(node, classes[i]);
+            return node.bytes;
         }
     }
-    const bytes = try p.gpa.alignedAlloc(u8, alignment, classes[i]);
-    return bytes;
+    return p.gpa.alignedAlloc(u8, alignment, classes[i]);
 }
 
 /// Give back a buffer `acquire` returned.
-pub fn release(p: *BufferPool, io: Io, buffer: []u8) void {
+pub fn release(p: *BufferPool, io: Io, buffer: Buffer) void {
     const class = Class.fitting(buffer.len).?;
     std.debug.assert(buffer.len == class.len());
     const i = @backingInt(class);
-    const node = place.one(Node, buffer.ptr, 0); // every buffer the pool hands out is aligned for a Node and longer than one
+    const node = place.one(Node, buffer, 0);
     {
         var held = p.lists.acquireUncancelable(io);
         defer held.deinit(io);
         const lists = held.value();
         if (lists.counts[i] < p.max_free) {
-            node.* = .{ .next = lists.free[i] };
+            node.* = .{ .next = lists.free[i], .bytes = buffer };
             lists.free[i] = node;
             lists.counts[i] += 1;
             return;
         }
     }
-    p.gpa.free(bytesOf(node, classes[i]));
+    p.gpa.free(buffer);
 }
 
 /// How many buffers of `class` are kept free.
@@ -118,10 +123,6 @@ pub fn kept(p: *BufferPool, io: Io, class: Class) u32 {
     var held = p.lists.acquireUncancelable(io);
     defer held.deinit(io);
     return held.value().counts[@backingInt(class)];
-}
-
-fn bytesOf(node: *Node, len: usize) []align(alignment.toByteUnits()) u8 {
-    return place.front(alignment, node)[0..len];
 }
 
 const testing = std.testing;

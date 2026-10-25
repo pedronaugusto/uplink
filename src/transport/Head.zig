@@ -19,7 +19,7 @@ const BufferPool = @import("BufferPool.zig");
 const Head = @This();
 
 /// The pooled buffer: the head's bytes first.
-buffer: []u8,
+buffer: BufferPool.Buffer,
 /// The head's length, its blank line included.
 len: usize,
 /// The most fields the buffer has room for.
@@ -123,8 +123,7 @@ pub fn bytes(h: *const Head) []u8 {
 /// Where the head's fields go.
 pub fn fields(h: *const Head) []Field {
     const at = std.mem.alignForward(usize, h.len, @alignOf(Field));
-    const ptr = layout.many(Field, h.buffer.ptr, at); // pool buffers are 64-aligned, `at` is aligned for a Field, and the buffer has room for `max_fields` of them
-    return ptr[0..h.max_fields];
+    return layout.many(Field, h.buffer, at, h.max_fields);
 }
 
 /// What the buffer leaves for the body reader.

@@ -34,7 +34,8 @@ len: u8 = 0,
 
 const Layer = struct {
     coding: ContentCoding,
-    buffer: []u8,
+    /// A pool buffer, or a zstd one: both 64-aligned.
+    buffer: []align(64) u8,
 };
 
 const Flate = warp.Inflate.Reader;
@@ -118,8 +119,7 @@ pub fn start(d: *Decoder, source: *Io.Reader, zstd: *const ZstdBuffer) *Io.Reade
 }
 
 fn flateOf(l: *const Layer) *Flate {
-    // Pool buffers are 64-aligned and the split aligns the state's place for it, inside the buffer.
-    return place.one(Flate, l.buffer.ptr, flateSplit(l.buffer.len).state_at);
+    return place.one(Flate, l.buffer, flateSplit(l.buffer.len).state_at);
 }
 
 /// What a flate layer for `coding` accepts: gzip's members, every one; for

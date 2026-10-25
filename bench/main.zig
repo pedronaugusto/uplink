@@ -455,11 +455,13 @@ const Context = struct {
 
 /// Answers every 401 with the same password.
 const Answer = struct {
-    fn credentials() uplink.Credentials {
-        return .{ .context = null, .fillFn = fill };
+    var answering: uplink.Credentials = .{ .fillFn = fill };
+
+    fn credentials() *uplink.Credentials {
+        return &answering;
     }
 
-    fn fill(_: Io, _: ?*anyopaque, _: uplink.Credentials.Query) uplink.Credentials.FillError!?uplink.Credentials.Secret {
+    fn fill(_: Io, _: *uplink.Credentials, _: uplink.Credentials.Query) uplink.Credentials.FillError!?uplink.Credentials.Secret {
         return .{ .password = .{ .user = "bench", .password = "secret" } };
     }
 };

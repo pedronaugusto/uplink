@@ -16,6 +16,7 @@ const std = @import("std");
 const Io = std.Io;
 const wire = @import("uplink.wire");
 const h1 = wire.h1;
+const BufferPool = @import("../transport/BufferPool.zig");
 const Connection = @import("../transport/Connection.zig");
 const H2 = @import("../transport/H2.zig");
 const Response = @import("Response.zig");
@@ -30,7 +31,7 @@ conn: ?*Connection,
 h2: ?*H2 = null,
 stream: ?*H2.Stream = null,
 /// Private: the body writer's buffer, from the pool.
-buffer: []u8,
+buffer: BufferPool.Buffer,
 body: Writer,
 /// Private: the server's answer before the body, which it refused.
 early: ?Response = null,
@@ -135,7 +136,7 @@ pub const FinishError = error{
 };
 
 /// Set up the body writer for a head already written on `conn`.
-pub fn init(run: Run, conn: *Connection, buffer: []u8, length: ?u64) Outgoing {
+pub fn init(run: Run, conn: *Connection, buffer: BufferPool.Buffer, length: ?u64) Outgoing {
     const out = conn.writer();
     return .{
         .run = run,
@@ -146,7 +147,7 @@ pub fn init(run: Run, conn: *Connection, buffer: []u8, length: ?u64) Outgoing {
 }
 
 /// Set up the body writer for a request whose head opened `st` on `h`.
-pub fn initStream(run: Run, io: Io, h: *H2, st: *H2.Stream, buffer: []u8, length: ?u64) Outgoing {
+pub fn initStream(run: Run, io: Io, h: *H2, st: *H2.Stream, buffer: BufferPool.Buffer, length: ?u64) Outgoing {
     const deadline = run.deadline;
     return .{
         .run = run,
@@ -167,7 +168,7 @@ pub fn initStream(run: Run, io: Io, h: *H2, st: *H2.Stream, buffer: []u8, length
 
 /// A request the server answered before its body: what is written is
 /// dropped, and `finish` returns `response`.
-pub fn refused(run: Run, response: Response, buffer: []u8) Outgoing {
+pub fn refused(run: Run, response: Response, buffer: BufferPool.Buffer) Outgoing {
     return .{ .run = run, .conn = null, .buffer = buffer, .body = .{ .dropped = .init(buffer) }, .early = response };
 }
 

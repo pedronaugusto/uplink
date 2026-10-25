@@ -52,7 +52,7 @@ body: Request.Body,
 url: url_mod.Url,
 url_text: []const u8,
 /// Private: where `url_text` lives once a redirect was followed.
-url_buffer: []u8 = &.{},
+url_buffer: BufferPool.Buffer = &.{},
 /// On the awake clock.
 deadline: ?Io.Timestamp,
 redirects: policy.Redirects,
@@ -942,13 +942,13 @@ fn followRedirect(run: *Run, io: Io, response: *Response) Error!bool {
     return true;
 }
 
-const Resolved = struct { buffer: []u8, text: []const u8 };
+const Resolved = struct { buffer: BufferPool.Buffer, text: []const u8 };
 
 /// `location` resolved against the current URL, in a buffer from the
 /// pool.
 /// A URL with its host as DNS has it, and the pooled buffer its text is in
 /// (empty when it is the text it came from).
-const AsciiUrl = struct { url: url_mod.Url, text: []const u8, buffer: []u8 };
+const AsciiUrl = struct { url: url_mod.Url, text: []const u8, buffer: BufferPool.Buffer };
 
 /// `text`, which parsed as `u`, with its host in IDNA's ASCII form (UTS #46
 /// ToASCII with the URL Standard's options, xenoglyph's `idna`): `text`
