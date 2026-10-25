@@ -28,6 +28,7 @@ const Body = @import("../transport/Body.zig");
 const Head = @import("../transport/Head.zig");
 const Decoder = @import("../coding/Decoder.zig");
 const Upgraded = @import("Upgraded.zig");
+const Cache = @import("Cache.zig");
 
 const Response = @This();
 
@@ -66,6 +67,67 @@ decoder: ?Decoder = null,
 /// Private: the decoded body's reader, once started.
 decoded: ?*Io.Reader = null,
 started: bool = false,
+/// Where the response came from, when the client has a cache: `none`
+/// when it has none.
+cache: CacheStatus = .none,
+/// Private: the stored variant a response from the cache reads, held
+/// until `deinit`.
+stored: ?Stored = null,
+/// Private: the store a response from the network is written to as it is
+/// read, kept only when its body ends whole.
+tee: ?Tee = null,
+
+/// Where a response came from (RFC 9211's `Cache-Status`, in short).
+pub const CacheStatus = enum {
+    /// The client has no cache, or the request was not one it keeps.
+    none,
+    /// The network's, the cache having nothing usable.
+    miss,
+    /// The cache's, fresh.
+    hit,
+    /// The cache's, stale, as the request's `max-stale` or the response's
+    /// `stale-if-error` allows.
+    stale,
+    /// The cache's, after the origin said it was still good (304).
+    revalidated,
+    /// Made by the cache: a 504 for `only-if-cached` with nothing stored
+    /// (RFC 9111 §5.2.1.7).
+    synthesized,
+};
+
+/// A stored variant being read.
+const Stored = struct {
+    cache: *Cache,
+    entry: Cache.Entry,
+    bytes: Io.Reader = undefined,
+    file: Io.File.Reader = undefined,
+};
+
+/// A response from the network on its way into the store: the body's
+/// bytes as they came (still content-coded), handed to the store as the
+/// reader passes them on.
+const Tee = struct {
+    cache: *Cache,
+    writing: Cache.Writing,
+    source: *Io.Reader = undefined,
+    io: Io = undefined,
+    /// The store took no more, or failed: aborted at `deinit`.
+    dropped: bool = false,
+    interface: Io.Reader = .{ .vtable = &.{ .stream = teeStream }, .buffer = &.{}, .seek = 0, .end = 0 },
+};
+
+fn teeStream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
+    const t: *Tee = @fieldParentPtr("interface", r);
+    const dest = limit.slice(try w.writableSliceGreedy(1));
+    const n = t.source.readSliceShort(dest) catch return error.ReadFailed;
+    if (n == 0) return error.EndOfStream;
+    if (!t.dropped) {
+        const kept = t.cache.store.append(t.io, t.writing, dest[0..n]) catch false;
+        if (!kept) t.dropped = true;
+    }
+    w.advance(n);
+    return n;
+}
 
 /// Errors from reading the body, by name.
 pub const ReadError = error{
@@ -122,17 +184,40 @@ fn open(r: *Response, io: Io, buffer: ?[]u8) *Io.Reader {
     if (r.conn) |c| c.io = io;
     if (r.stream) |st| st.read_io = io;
     r.body.trailer_io = io;
+    if (r.tee) |*t| t.io = io;
     if (!r.started) {
         r.started = true;
-        r.body.in = if (r.conn) |c| c.reader() else if (r.stream) |st| st.reader(io) else Io.Reader.ending;
+        r.body.in = if (r.conn) |c| c.reader() else if (r.stream) |st| st.reader(io) else if (r.stored) |*st| storedReader(st, io) else Io.Reader.ending;
         r.body.trailer_pool = &r.ctx.buffers;
+        // A body on its way into the store reads through the tee, which
+        // then holds the reader's buffer.
+        const source: *Io.Reader = if (r.tee) |*t| tee: {
+            t.source = &r.body.interface;
+            t.interface.buffer = r.body.interface.buffer;
+            r.body.interface.buffer = &.{};
+            break :tee &t.interface;
+        } else &r.body.interface;
         if (r.decoder) |*d| {
-            r.decoded = d.start(&r.body.interface, &r.ctx.zstd);
+            r.decoded = d.start(source, &r.ctx.zstd);
         } else if (buffer) |b| {
-            r.body.interface.buffer = b;
+            source.buffer = b;
         }
+        if (r.decoder == null) return source;
     }
-    return r.decoded orelse &r.body.interface;
+    return r.decoded orelse if (r.tee) |*t| &t.interface else &r.body.interface;
+}
+
+fn storedReader(st: *Stored, io: Io) *Io.Reader {
+    switch (st.entry.body) {
+        .bytes => |bytes| {
+            st.bytes = .fixed(bytes);
+            return &st.bytes;
+        },
+        .file => |f| {
+            st.file = f.file.readerStreaming(io, &.{});
+            return &st.file.interface;
+        },
+    }
 }
 
 /// Why a coded body did not decode, after a read failed with
@@ -219,6 +304,21 @@ fn streamError(st: *const H2.Stream) ReadError {
 /// the pool's `drain_limit` and came within the activity timeout, and
 /// nothing said to close it.
 pub fn deinit(r: *Response, io: Io) void {
+    if (r.tee) |*t| {
+        // Kept only when the body ended whole, every byte of it through the
+        // tee, and the store took all of it; before a drain reads the rest
+        // past it.
+        if (r.body.state == .done and !t.dropped) {
+            // glint-ignore: Z026 -- a store that fails costs the cache, never the response; the observer heard of a failed begin
+            t.cache.store.commit(io, t.writing) catch {};
+        } else t.cache.store.abort(io, t.writing);
+        // The body's buffer back from the tee, for the drain below.
+        if (r.started) {
+            r.body.interface.buffer = t.interface.buffer;
+            r.body.interface.seek = 0;
+            r.body.interface.end = 0;
+        }
+    }
     if (r.conn) |c| {
         c.io = io;
         if (r.keep_alive and !r.body.complete() and c.reusable()) r.drain(io);
@@ -231,10 +331,60 @@ pub fn deinit(r: *Response, io: Io) void {
         releaseShared(io, r.ctx, r.pool, h);
     }
     if (r.decoder) |*d| d.deinit(io, r.ctx.gpa, &r.ctx.buffers, &r.ctx.zstd);
+    if (r.stored) |*st| st.cache.store.release(io, &st.entry);
     if (r.body.trailer.len != 0) r.ctx.buffers.release(io, r.body.trailer);
     if (r.url_buffer.len != 0) r.ctx.buffers.release(io, r.url_buffer);
     r.ctx.buffers.release(io, r.head_buffer);
     r.* = undefined;
+}
+
+/// A response from a stored variant, its head `head` (the status line,
+/// the fields, `Age` and the body's length, as HTTP/1.1 writes them), its
+/// body the variant's, which it holds until `deinit`; with no variant, a
+/// response the cache made, with no body. A head that does not parse
+/// releases the variant and is `HttpProtocolError`.
+pub fn fromStored(io: Io, ctx: *Context, pool: *Pool, cache: *Cache, entry: ?Cache.Entry, head: []const u8, status: CacheStatus, options: StoredOptions) (Allocator.Error || error{HttpProtocolError})!Response {
+    errdefer if (entry) |e| cache.store.release(io, &e);
+    var text: Io.Reader = .fixed(head);
+    var progress = false;
+    var gathered = Head.gather(io, &ctx.buffers, &text, options.limits, &progress) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.HttpProtocolError,
+    };
+    errdefer gathered.release(io, &ctx.buffers);
+    const parsed = (h1.parseResponse(gathered.bytes(), gathered.fields(), options.limits) catch return error.HttpProtocolError) orelse
+        return error.HttpProtocolError;
+    const length = if (entry) |e| e.body.len() else 0;
+    var response: Response = .{
+        .status = parsed.head.status,
+        .version = parsed.head.version,
+        .reason = parsed.head.reason,
+        .headers = parsed.head.headers,
+        .ctx = ctx,
+        .pool = pool,
+        .conn = null,
+        .head_buffer = gathered.buffer,
+        .body_buffer = gathered.bodyBuffer(),
+        .keep_alive = false,
+        .body = .init(Io.Reader.ending, if (options.method.bodiless()) .none else .{ .length = length }, gathered.bodyBuffer()),
+        .cache = status,
+        .stored = if (entry) |e| .{ .cache = cache, .entry = e } else null,
+    };
+    if (options.decompress) try response.planDecoding(io);
+    return response;
+}
+
+pub const StoredOptions = struct {
+    method: Method,
+    limits: h1.Limits,
+    decompress: bool,
+};
+
+/// Write the body, as it is read, to `cache`'s store as `writing`: kept
+/// at `deinit` when it ended whole. Before the first `reader`.
+pub fn storeInto(r: *Response, cache: *Cache, writing: Cache.Writing) void {
+    std.debug.assert(!r.started and r.tee == null and r.stored == null);
+    r.tee = .{ .cache = cache, .writing = writing };
 }
 
 /// Release an interim response's head and nothing else: the connection

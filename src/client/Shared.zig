@@ -12,6 +12,7 @@ const Observer = @import("../transport/Observer.zig");
 const Proxy = @import("../transport/Proxy.zig");
 const Pool = @import("../pool/Pool.zig");
 const CookieJar = @import("CookieJar.zig");
+const Cache = @import("Cache.zig");
 const Credentials = @import("Credentials.zig");
 const OriginAuth = @import("OriginAuth.zig");
 const Prepare = @import("Prepare.zig");
@@ -50,6 +51,9 @@ pub const Options = struct {
     retries: policy.Retries = .{},
     /// Where cookies are kept and sent from; null keeps none.
     cookies: ?*CookieJar = null,
+    /// An HTTP cache (RFC 9111) consulted before the network, and filled
+    /// from it; the caller's, and may serve several clients.
+    cache: ?*Cache = null,
     /// Where an answer to a server's 401 comes from; null answers none.
     credentials: ?Credentials = null,
     /// Sent as `User-Agent` unless a request names its own.

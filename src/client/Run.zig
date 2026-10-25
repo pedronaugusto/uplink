@@ -35,7 +35,9 @@ const Request = @import("Request.zig");
 const Response = @import("Response.zig");
 const OriginAuth = @import("OriginAuth.zig");
 const Prepare = @import("Prepare.zig");
+const Cache = @import("Cache.zig");
 const policy = @import("policy.zig");
+const rules = wire.cache;
 const xenoglyph = @import("xenoglyph");
 
 const Run = @This();
@@ -84,6 +86,12 @@ sent_at: ?Io.Timestamp = null,
 /// written from here.
 prepared: Prepare.Attempt = undefined,
 has_prepared: bool = false,
+/// When the current attempt was asked for, by the real clock, in seconds:
+/// a stored response's age counts from it.
+requested_at: i64 = 0,
+/// A stale stored variant the current attempt asks the origin about (its
+/// validators sent), held until the answer.
+revalidating: ?Revalidating = null,
 
 /// Errors from a run.
 pub const Error = Shared.SendError;
@@ -144,10 +152,15 @@ fn releaseEntry(run: *Run, io: Io) void {
 /// new attempt, to its final response.
 pub fn complete(run: *Run, io: Io, first: ?Response) Error!Response {
     var pending = first;
+    defer run.endRevalidating(io);
     while (true) {
-        var response = pending orelse run.attempt(io) catch |err| {
-            if (try run.retryFailure(io, err)) continue;
-            return err;
+        var response = pending orelse try run.fromCache(io) orelse network: {
+            run.requested_at = Io.Clock.real.now(io).toSeconds();
+            const answered = run.attempt(io) catch |err| {
+                if (try run.retryFailure(io, err)) continue;
+                return err;
+            };
+            break :network try run.throughCache(io, answered);
         };
         pending = null;
         if (try run.decide(io, &response)) continue;
@@ -679,6 +692,10 @@ fn writeFields(run: *Run, io: Io, w: *Io.Writer, r: Context.Route, absolute_form
         try h1.writeField(w, h);
     }
     if (run.has_prepared) for (run.prepared.addedHeaders()) |h| try h1.writeField(w, h);
+    if (run.revalidating) |*v| {
+        if (v.etag) |etag| if (!named(run.request.headers, "if-none-match")) try h1.writeField(w, .{ .name = "If-None-Match", .value = etag });
+        if (v.modified) |modified| if (!named(run.request.headers, "if-modified-since")) try h1.writeField(w, .{ .name = "If-Modified-Since", .value = modified });
+    }
     if (expect) try w.writeAll("Expect: 100-continue\r\n");
     switch (framing) {
         .none, .until_close => {},
@@ -1023,4 +1040,304 @@ fn random(io: Io) u64 {
     var bytes: [8]u8 = undefined;
     io.random(&bytes);
     return std.mem.readInt(u64, &bytes, .little);
+}
+
+// The cache (RFC 9111): a stored response answers when it may, a stale
+// one is revalidated, a response from the network is stored as it is read,
+// and an unsafe method's success invalidates.
+
+/// A stored variant parsed for its rules: its head copied with its fields,
+/// held with the variant.
+const Revalidating = struct {
+    entry: Cache.Entry,
+    parsed: Parsed,
+    etag: ?[]const u8,
+    modified: ?[]const u8,
+};
+
+/// A stored head parsed into memory of the client's allocator.
+const Parsed = struct {
+    bytes: []u8,
+    fields: []fields.Field,
+    status: u16,
+    headers: fields.Headers,
+
+    fn deinit(p: *Parsed, gpa: std.mem.Allocator) void {
+        gpa.free(p.bytes);
+        gpa.free(p.fields);
+        p.* = undefined;
+    }
+};
+
+fn parseStored(run: *Run, head: []const u8) ?Parsed {
+    const gpa = run.shared.context.gpa;
+    const limits = run.shared.options.limits;
+    const bytes = gpa.alloc(u8, head.len + 2) catch return null;
+    @memcpy(bytes[0..head.len], head);
+    @memcpy(bytes[head.len..], "\r\n");
+    const storage = gpa.alloc(fields.Field, limits.max_fields) catch {
+        gpa.free(bytes);
+        return null;
+    };
+    const parsed = (h1.parseResponse(bytes, storage, limits) catch null) orelse {
+        gpa.free(bytes);
+        gpa.free(storage);
+        return null;
+    };
+    return .{ .bytes = bytes, .fields = storage, .status = @backingInt(parsed.head.status), .headers = parsed.head.headers };
+}
+
+fn endRevalidating(run: *Run, io: Io) void {
+    var v = run.revalidating orelse return;
+    run.revalidating = null;
+    v.parsed.deinit(run.shared.context.gpa);
+    run.shared.options.cache.?.store.release(io, &v.entry);
+}
+
+fn cacheFailed(run: *Run, err: anyerror) void {
+    if (run.shared.context.observer) |o| o.emit(.{ .cache_failed = .{ .error_name = @errorName(err) } });
+}
+
+fn cacheSaid(run: *Run, status: Response.CacheStatus) void {
+    if (run.shared.context.observer) |o| o.emit(.{ .cache = .{ .url = run.url_text, .status = @tagName(status) } });
+}
+
+/// The request's fields as the cache's rules read them.
+fn requestFields(run: *Run, out: []fields.Field) fields.Headers {
+    const n = @min(out.len, run.request.headers.len);
+    for (run.request.headers[0..n], out[0..n]) |h, *f| f.* = .{ .name = h.name, .value = h.value };
+    return .init(out[0..n]);
+}
+
+/// The value the request sends for a field `Vary` names: the caller's,
+/// else the client's own (`User-Agent`, `Accept-Encoding`).
+fn fieldValue(run: *Run, name: []const u8) ?[]const u8 {
+    for (run.request.headers) |h| if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
+    if (std.ascii.eqlIgnoreCase(name, "user-agent")) return run.shared.options.user_agent;
+    if (std.ascii.eqlIgnoreCase(name, "accept-encoding") and run.shared.options.decompress and run.offersCodings()) return "gzip, deflate, zstd";
+    return null;
+}
+
+/// A response the cache gives for the current URL without going to the
+/// network, or null to go: then, for a stale variant with validators,
+/// `revalidating` holds it and the attempt asks the origin about it.
+fn fromCache(run: *Run, io: Io) Error!?Response {
+    const c = run.shared;
+    const cache = c.options.cache orelse return null;
+    if (!run.method.eql(.GET)) return null;
+    run.endRevalidating(io);
+    var field_buf: [64]fields.Field = undefined;
+    const request_fields = run.requestFields(&field_buf);
+    const asked = rules.readRequest(&request_fields);
+    if (asked.no_store and !asked.only_if_cached) return null;
+    var found: [Cache.max_variants]Cache.Entry = undefined;
+    const n = cache.store.lookup(io, run.url_text, &found) catch |err| {
+        run.cacheFailed(err);
+        return null;
+    };
+    var chosen: ?Cache.Entry = null;
+    for (found[0..n]) |*e| {
+        if (chosen == null and Cache.varyMatches(e.meta.vary, run, fieldValue)) chosen = e.* else cache.store.release(io, e);
+    }
+    const entry = chosen orelse {
+        if (asked.only_if_cached) return try run.synthesized(io, cache);
+        run.cacheSaid(.miss);
+        return null;
+    };
+    var parsed = run.parseStored(entry.head) orelse {
+        cache.store.release(io, &entry);
+        run.cacheFailed(error.StoreFailed);
+        return null;
+    };
+    const now = Io.Clock.real.now(io).toSeconds();
+    const age = rules.currentAge(&parsed.headers, .{ .requested = entry.meta.requested, .received = entry.meta.received }, now);
+    const life = rules.lifetime(cache.options.kind, parsed.status, &parsed.headers, cache.options.heuristic_cap.raw()) orelse 0;
+    switch (rules.use(cache.options.kind, &parsed.headers, life, age, asked)) {
+        .fresh, .stale => |use| {
+            parsed.deinit(c.context.gpa);
+            return try run.serve(io, cache, entry, age, if (use == .fresh) .hit else .stale);
+        },
+        .revalidate => {
+            const etag = parsed.headers.get("etag");
+            const modified = parsed.headers.get("last-modified");
+            if (asked.only_if_cached or (etag == null and modified == null)) {
+                parsed.deinit(c.context.gpa);
+                cache.store.release(io, &entry);
+                if (asked.only_if_cached) return try run.synthesized(io, cache);
+                run.cacheSaid(.miss);
+                return null;
+            }
+            run.revalidating = .{ .entry = entry, .parsed = parsed, .etag = etag, .modified = modified };
+            return null;
+        },
+    }
+}
+
+/// A stored variant served, `age` seconds old (§4, §5.1): its head with
+/// `Age` and its body's length, its body from the store.
+fn serve(run: *Run, io: Io, cache: *Cache, entry: Cache.Entry, age: u32, status: Response.CacheStatus) Error!Response {
+    const c = run.shared;
+    const head = std.fmt.allocPrint(c.context.gpa, "{s}Age: {d}\r\nContent-Length: {d}\r\n\r\n", .{ entry.head, age, entry.body.len() }) catch {
+        cache.store.release(io, &entry);
+        return error.OutOfMemory;
+    };
+    defer c.context.gpa.free(head);
+    const response = Response.fromStored(io, &c.context, &c.pool, cache, entry, head, status, .{ .method = run.method, .limits = c.options.limits, .decompress = c.options.decompress }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.HttpProtocolError => {
+            run.cacheFailed(error.StoreFailed);
+            return error.HttpProtocolError;
+        },
+    };
+    run.cacheSaid(status);
+    return response;
+}
+
+/// The 504 `only-if-cached` gets when nothing stored may answer
+/// (§5.2.1.7).
+fn synthesized(run: *Run, io: Io, cache: *Cache) Error!Response {
+    const c = run.shared;
+    const response = Response.fromStored(io, &c.context, &c.pool, cache, null, "HTTP/1.1 504 Gateway Timeout\r\nContent-Length: 0\r\n\r\n", .synthesized, .{ .method = run.method, .limits = c.options.limits, .decompress = false }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.HttpProtocolError => unreachable, // unreachable: the head is this file's own, and parses
+    };
+    run.cacheSaid(.synthesized);
+    return response;
+}
+
+/// A response from the network, through the cache: a 304 answering a
+/// revalidation becomes the stored variant with its head brought up to
+/// date (§4.3.4); a 5xx answering one, the stale variant where
+/// `stale-if-error` allows (RFC 5861); an unsafe method's success removes
+/// what it changed (§4.4); and a response that may be stored goes into
+/// the store as it is read (§3).
+fn throughCache(run: *Run, io: Io, response: Response) Error!Response {
+    const c = run.shared;
+    const cache = c.options.cache orelse return response;
+    var r = response;
+    const status = @backingInt(r.status);
+    if (!run.method.safe()) {
+        if (status < 400) run.invalidate(io, cache, &r);
+        return r;
+    }
+    if (!run.method.eql(.GET)) return r;
+    r.cache = .miss;
+    if (run.revalidating) |*v| {
+        const now = Io.Clock.real.now(io).toSeconds();
+        if (status == 304) {
+            const merged = mergeHead(c.context.gpa, &v.parsed, &r.headers) catch {
+                run.cacheFailed(error.OutOfMemory);
+                return r;
+            };
+            defer c.context.gpa.free(merged);
+            const meta: Cache.Meta = .{ .requested = run.requested_at, .received = now, .vary = v.entry.meta.vary };
+            cache.store.update(io, &v.entry, meta, merged) catch |err| run.cacheFailed(err);
+            const entry = v.entry;
+            v.parsed.deinit(c.context.gpa);
+            run.revalidating = null;
+            r.deinit(io);
+            // `entry` still names the variant's old head; the merged one
+            // is the head served.
+            var served = entry;
+            served.head = merged;
+            return try run.serve(io, cache, served, 0, .revalidated);
+        }
+        if (status >= 500) {
+            const stored = rules.readResponse(&v.parsed.headers);
+            const age = rules.currentAge(&v.parsed.headers, .{ .requested = v.entry.meta.requested, .received = v.entry.meta.received }, now);
+            const life = rules.lifetime(cache.options.kind, v.parsed.status, &v.parsed.headers, cache.options.heuristic_cap.raw()) orelse 0;
+            if (stored.stale_if_error) |allowed| if (age -| life <= allowed and !stored.must_revalidate) {
+                const entry = v.entry;
+                v.parsed.deinit(c.context.gpa);
+                run.revalidating = null;
+                r.deinit(io);
+                return try run.serve(io, cache, entry, age, .stale);
+            };
+        }
+        run.endRevalidating(io);
+    }
+    var field_buf: [64]fields.Field = undefined;
+    const request_fields = run.requestFields(&field_buf);
+    if (!rules.storable(cache.options.kind, true, status, &request_fields, &r.headers)) {
+        run.cacheSaid(.miss);
+        return r;
+    }
+    const vary = (Cache.varyOf(c.context.gpa, r.headers.get("vary"), run, fieldValue) catch {
+        run.cacheFailed(error.OutOfMemory);
+        return r;
+    }) orelse {
+        run.cacheSaid(.miss);
+        return r;
+    };
+    defer c.context.gpa.free(vary);
+    const head = storedHead(c.context.gpa, &r) catch {
+        run.cacheFailed(error.OutOfMemory);
+        return r;
+    };
+    defer c.context.gpa.free(head);
+    const meta: Cache.Meta = .{ .requested = run.requested_at, .received = Io.Clock.real.now(io).toSeconds(), .vary = vary };
+    const writing = cache.store.begin(io, run.url_text, meta, head) catch |err| {
+        run.cacheFailed(err);
+        return r;
+    };
+    if (writing) |w| r.storeInto(cache, w);
+    run.cacheSaid(.miss);
+    return r;
+}
+
+/// Fields a cache neither stores nor takes from a 304: the connection's
+/// own (RFC 9110 §7.6.1), the framing, which a stored body has its own of,
+/// and `Age`, which the cache sets (§3.1, §3.2).
+fn notStored(name: []const u8) bool {
+    for ([_][]const u8{ "connection", "keep-alive", "proxy-connection", "te", "transfer-encoding", "upgrade", "trailer", "proxy-authenticate", "proxy-authorization", "content-length", "age" }) |n| if (std.ascii.eqlIgnoreCase(name, n)) return true;
+    return false;
+}
+
+/// A response's head as the store keeps it: its status line and the fields
+/// a cache keeps, each a line, with no blank line after.
+fn storedHead(gpa: std.mem.Allocator, r: *const Response) std.mem.Allocator.Error![]u8 {
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    errdefer out.deinit();
+    const w = &out.writer;
+    w.print("HTTP/1.1 {d} {s}\r\n", .{ @backingInt(r.status), if (r.reason.len != 0) r.reason else r.status.phrase() orelse "" }) catch return error.OutOfMemory;
+    var it = r.headers.iterator();
+    while (it.next()) |f| if (!notStored(f.name)) h1.writeField(w, .{ .name = f.name, .value = f.value }) catch return error.OutOfMemory;
+    return out.toOwnedSlice() catch return error.OutOfMemory;
+}
+
+/// The stored head brought up to date by a 304's fields (§3.2): each field
+/// the 304 sends replaces the stored ones of its name; the rest stay.
+fn mergeHead(gpa: std.mem.Allocator, stored: *const Parsed, answered: *const fields.Headers) std.mem.Allocator.Error![]u8 {
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    errdefer out.deinit();
+    const w = &out.writer;
+    const line_end = std.mem.findScalar(u8, stored.bytes, '\n').? + 1;
+    w.writeAll(stored.bytes[0..line_end]) catch return error.OutOfMemory;
+    var kept = stored.headers.iterator();
+    while (kept.next()) |f| {
+        if (notStored(f.name)) continue;
+        if (answered.get(f.name) != null and !notStored(f.name)) continue;
+        h1.writeField(w, .{ .name = f.name, .value = f.value }) catch return error.OutOfMemory;
+    }
+    var fresh = answered.iterator();
+    while (fresh.next()) |f| if (!notStored(f.name)) h1.writeField(w, .{ .name = f.name, .value = f.value }) catch return error.OutOfMemory;
+    return out.toOwnedSlice() catch return error.OutOfMemory;
+}
+
+/// An unsafe method's success removes the stored responses of its URL, and
+/// of `Location` and `Content-Location` on the same origin (§4.4).
+fn invalidate(run: *Run, io: Io, cache: *Cache, r: *const Response) void {
+    cache.store.remove(io, run.url_text) catch |err| run.cacheFailed(err);
+    for ([_][]const u8{ "location", "content-location" }) |name| {
+        const reference = r.headers.get(name) orelse continue;
+        var buffer: [2048]u8 = undefined;
+        const target = url_mod.resolve(run.url_text, reference, &buffer) catch continue;
+        const parsed = url_mod.parse(target) catch continue;
+        if (!sameOrigin(run.url, parsed)) continue;
+        cache.store.remove(io, target) catch |err| run.cacheFailed(err);
+    }
+}
+
+fn sameOrigin(a: url_mod.Url, b: url_mod.Url) bool {
+    return a.secure == b.secure and std.ascii.eqlIgnoreCase(a.host, b.host) and a.port == b.port;
 }
