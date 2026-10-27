@@ -225,12 +225,17 @@ test "a 5xx to a revalidation serves the stale response where stale-if-error all
 
 test "a store keeps no more than its bound, the least recently used evicted" {
     const io = test_io.io();
-    var memory: Cache.Memory = .init(testing.allocator, .fromRaw(@sizeOf(usize) * 64 + 600));
+    const head = "HTTP/1.1 200 OK\r\n";
+    const body: [200]u8 = @splat('x');
+    // Room for two variants and not three, whatever the build makes a
+    // variant's record: a bound guessed from a safe build's held three in
+    // ReleaseFast.
+    const variant = "a".len + head.len + body.len + Cache.Memory.overhead;
+    var memory: Cache.Memory = .init(testing.allocator, .fromRaw(2 * variant + variant / 2));
     defer memory.deinit(io);
     const store = memory.store();
-    const body: [200]u8 = @splat('x');
     for ([_][]const u8{ "a", "b", "c" }) |key| {
-        const w = (try store.begin(io, key, .{ .requested = .fromRaw(0), .received = .fromRaw(0), .vary = "" }, "HTTP/1.1 200 OK\r\n")).?;
+        const w = (try store.begin(io, key, .{ .requested = .fromRaw(0), .received = .fromRaw(0), .vary = "" }, head)).?;
         try testing.expect(try store.append(io, w, &body));
         try store.commit(io, w);
     }

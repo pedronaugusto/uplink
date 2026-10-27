@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `Cache.Memory.overhead`: what each variant costs against the store's bound beyond its key, `Vary` values, head and body, which the build decides (a safe build's record is larger). A store sized for a count of variants is sized with it; the suite's own LRU test guessed it, and held three variants in ReleaseFast where it meant to hold two.
+
 ### Breaking
 
 - A dial's stream has its one owner: `net.Dialed.stream` is an `aegis.own.OwnedIo` over the stream, closed by `stream.deinit(io)` and reached with `stream.borrow()`, which checks in Debug that it is closed once and not moved once in use. A client connection and a server's socket keep it the same way.
