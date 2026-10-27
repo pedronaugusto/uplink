@@ -20,7 +20,6 @@ const Url = wire.url.Url;
 const Client = @import("client/Client.zig");
 const ClientRequest = @import("client/Request.zig");
 const ClientResponse = @import("client/Response.zig");
-const Upgraded = @import("client/Upgraded.zig");
 const Handler = @import("server/Handler.zig");
 const Request = @import("server/Request.zig");
 const Response = @import("server/Response.zig");
@@ -179,13 +178,17 @@ fn switchWith(io: Io, request: *Request, response: *Response, upstream: *ClientR
     }
     response.header("Connection", "Upgrade") catch |err| return sendFailed(err);
     response.header("Upgrade", switched) catch |err| return sendFailed(err);
-    var pipe: Pipe = .{ .upgraded = upstream.upgrade(io) catch |err| switch (err) {
+    var upgraded = upstream.upgrade(io) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.NotUpgraded => return answerReset(io, response, .bad_gateway),
-    } };
-    defer pipe.upgraded.close(io);
+    };
+    defer upgraded.close(io);
     // The protocol keeps its own time now, as a WebSocket's keepalive does.
-    pipe.upgraded.unbind();
+    upgraded.unbind();
+    // Both ends are taken here, on the task that has the connection to
+    // itself: taking one sets the connection's `Io`, which the two tasks
+    // must not both do.
+    var pipe: Pipe = .{ .from_upstream = upgraded.reader(io), .to_upstream = upgraded.writer(io) };
     var ended: [2]Pipe.Ended = undefined;
     var select: Io.Select(Pipe.Ended) = .init(io, &ended);
     defer select.cancelDiscard();
@@ -200,7 +203,9 @@ fn switchWith(io: Io, request: *Request, response: *Response, upstream: *ClientR
 
 /// The two connections of a switched exchange, and a task each way.
 const Pipe = struct {
-    upgraded: Upgraded,
+    /// The upstream's two ends.
+    from_upstream: *Io.Reader,
+    to_upstream: *Io.Writer,
     /// The client's connection once it is taken over, and the two tasks'
     /// wait for it.
     hijacked: aegis.BlockingGuarded(?Response.Hijacked) = .init(null),
@@ -233,21 +238,19 @@ const Pipe = struct {
     /// The client's bytes to the upstream, until either end ends or fails.
     fn toUpstream(io: Io, pipe: *Pipe) void {
         const hijacked = pipe.awaitTaken(io) catch return;
-        const to = pipe.upgraded.writer(io);
         while (true) {
             io.checkCancel() catch return;
-            pump(hijacked.reader, to) catch return;
-            pipe.upgraded.flush(io) catch return;
+            pump(hijacked.reader, pipe.to_upstream) catch return;
+            pipe.to_upstream.flush() catch return;
         }
     }
 
     /// The upstream's bytes to the client, until either end ends or fails.
     fn toDownstream(io: Io, pipe: *Pipe) void {
         const hijacked = pipe.awaitTaken(io) catch return;
-        const from = pipe.upgraded.reader(io);
         while (true) {
             io.checkCancel() catch return;
-            pump(from, hijacked.writer) catch return;
+            pump(pipe.from_upstream, hijacked.writer) catch return;
             hijacked.flush() catch return;
         }
     }

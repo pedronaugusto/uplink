@@ -738,7 +738,7 @@ test "a proxy is chosen from the environment per request, and no_proxy goes arou
     try env.put("http_proxy", try std.mem.print(&proxy_url, "http://127.0.0.1:{d}", .{proxy.port}));
     try env.put("no_proxy", "bypass.test");
     const entries = [_]Resolver.Static.Entry{.{ .host = "bypass.test", .addresses = &.{.{ .ip4 = .loopback(0) }} }};
-    var static: Resolver.Static = .{ .entries = &entries };
+    var static: Resolver.Static = .init(&entries, .system);
     var client: Client = .init(gpa, .{ .proxy = .{ .environment = .{ .env = &env, .rules = .lowercase } }, .resolver = static.resolver() });
     defer client.deinit(io);
     var buf: [64]u8 = undefined;
@@ -848,7 +848,7 @@ test "a host in Unicode goes as IDNA's ASCII form, to the resolver and in Host; 
     const server = try Server.start(gpa, io, .{ .answer = hostOf });
     defer server.stop();
     const entries = [_]Resolver.Static.Entry{.{ .host = "xn--bcher-kva.test", .addresses = &.{.{ .ip4 = .loopback(0) }} }};
-    var static: Resolver.Static = .{ .entries = &entries };
+    var static: Resolver.Static = .init(&entries, .system);
     var client: Client = .init(gpa, .{ .resolver = static.resolver() });
     defer client.deinit(io);
     var url: [64]u8 = undefined;
