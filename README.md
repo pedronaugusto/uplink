@@ -153,7 +153,9 @@ forgotten. `Credentials.Netrc` is such a store over a `.netrc`'s text, which
 the caller reads: the host's machine, or the file's default. A
 `CookieJar` keeps cookies by RFC 6265bis and reads and writes the Netscape
 cookie file. A `Cache` (`Options.cache`) is an HTTP cache by RFC 9111, private
-or shared, in a `Store` (`Cache.Memory`, bounded by bytes, or the caller's):
+or shared, in a `Store` (`Cache.Memory`, bounded by bytes; `Cache.Disk`, the
+same in a directory, each variant written durably through airlock; or the
+caller's):
 a fresh stored response is served with its `Age`, a stale one revalidated with
 its validators, a 304 bringing its head up to date; `Vary` keeps a variant per
 value, an unsafe method's success invalidates, `only-if-cached` and

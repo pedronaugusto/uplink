@@ -10,21 +10,41 @@ const Cache = @import("Cache.zig");
 const Response = @import("Response.zig");
 const Server = @import("../testing/Server.zig");
 
-/// A cache in memory and a client over it.
+/// The stores every exchange below runs over.
+const Kind = enum { memory, disk };
+const kinds = [_]Kind{ .memory, .disk };
+
+/// A cache in memory or in a directory, and a client over it.
 const Fixture = struct {
-    memory: Cache.Memory,
+    store: union(Kind) { memory: Cache.Memory, disk: struct { tmp: testing.TmpDir, disk: Cache.Disk } },
     cache: Cache,
     client: Client,
 
-    fn init(f: *Fixture) void {
-        f.memory = .init(testing.allocator, .literal("1MiB"));
-        f.cache = .init(f.memory.store(), .{});
+    fn init(f: *Fixture, io: Io, kind: Kind) !void {
+        switch (kind) {
+            .memory => f.store = .{ .memory = .init(testing.allocator, .literal("1MiB")) },
+            .disk => {
+                var tmp = testing.tmpDir(.{ .iterate = true });
+                errdefer tmp.cleanup();
+                f.store = .{ .disk = .{ .tmp = tmp, .disk = try .open(testing.allocator, io, tmp.dir, .{ .max_bytes = .literal("1MiB") }) } };
+            },
+        }
+        f.cache = .init(switch (f.store) {
+            .memory => |*m| m.store(),
+            .disk => |*d| d.disk.store(),
+        }, .{});
         f.client = .init(testing.allocator, .{ .cache = &f.cache, .decompress = false });
     }
 
     fn deinit(f: *Fixture, io: Io) void {
         f.client.deinit(io);
-        f.memory.deinit(io);
+        switch (f.store) {
+            .memory => |*m| m.deinit(io),
+            .disk => |*d| {
+                d.disk.deinit(io);
+                d.tmp.cleanup();
+            },
+        }
     }
 };
 
@@ -51,11 +71,15 @@ fn expectGot(got: Got, status: u16, cache: Response.CacheStatus, body: []const u
 }
 
 test "a fresh response is served from the store, with its Age, and the server asked once" {
+    for (kinds) |kind| try freshServed(kind);
+}
+
+fn freshServed(kind: Kind) !void {
     const io = test_io.io();
     const server = try Server.start(testing.allocator, io, Server.fixed("HTTP/1.1 200 OK\r\nCache-Control: max-age=60\r\nContent-Length: 3\r\n\r\none"));
     defer server.stop();
     var f: Fixture = undefined;
-    f.init();
+    try f.init(io, kind);
     defer f.deinit(io);
     var buf: [64]u8 = undefined;
     const url = server.url(&buf, "/a");
@@ -76,11 +100,15 @@ test "a fresh response is served from the store, with its Age, and the server as
 const large: [64 << 10]u8 = @splat('x');
 
 test "a body read in part is never stored, and no-store is never stored" {
+    for (kinds) |kind| try partNeverStored(kind);
+}
+
+fn partNeverStored(kind: Kind) !void {
     const io = test_io.io();
     const server = try Server.start(testing.allocator, io, Server.fixed("HTTP/1.1 200 OK\r\nCache-Control: max-age=60\r\nContent-Length: 65536\r\n\r\n" ++ large));
     defer server.stop();
     var f: Fixture = undefined;
-    f.init();
+    try f.init(io, kind);
     defer f.deinit(io);
     var buf: [64]u8 = undefined;
     const url = server.url(&buf, "/partial");
@@ -115,11 +143,15 @@ const Validating = struct {
 };
 
 test "a stale response with a validator is revalidated: a 304 serves the stored body with the 304's fields, then fresh" {
+    for (kinds) |kind| try revalidated(kind);
+}
+
+fn revalidated(kind: Kind) !void {
     const io = test_io.io();
     const server = try Server.start(testing.allocator, io, .{ .answer = Validating.answer });
     defer server.stop();
     var f: Fixture = undefined;
-    f.init();
+    try f.init(io, kind);
     defer f.deinit(io);
     var buf: [64]u8 = undefined;
     const url = server.url(&buf, "/v");
@@ -152,11 +184,15 @@ const Varying = struct {
 };
 
 test "Vary keeps a variant per value of the fields it names" {
+    for (kinds) |kind| try varyVariants(kind);
+}
+
+fn varyVariants(kind: Kind) !void {
     const io = test_io.io();
     const server = try Server.start(testing.allocator, io, .{ .answer = Varying.answer });
     defer server.stop();
     var f: Fixture = undefined;
-    f.init();
+    try f.init(io, kind);
     defer f.deinit(io);
     var buf: [64]u8 = undefined;
     const url = server.url(&buf, "/lang");
@@ -171,11 +207,15 @@ test "Vary keeps a variant per value of the fields it names" {
 }
 
 test "an unsafe method's success removes what is stored for its URL" {
+    for (kinds) |kind| try unsafeRemoves(kind);
+}
+
+fn unsafeRemoves(kind: Kind) !void {
     const io = test_io.io();
     const server = try Server.start(testing.allocator, io, Server.fixed("HTTP/1.1 200 OK\r\nCache-Control: max-age=60\r\nContent-Length: 2\r\n\r\nok"));
     defer server.stop();
     var f: Fixture = undefined;
-    f.init();
+    try f.init(io, kind);
     defer f.deinit(io);
     var buf: [64]u8 = undefined;
     const url = server.url(&buf, "/item");
@@ -190,11 +230,15 @@ test "an unsafe method's success removes what is stored for its URL" {
 }
 
 test "only-if-cached with nothing stored is a 504 the cache makes, and the server is never asked" {
+    for (kinds) |kind| try onlyIfCached(kind);
+}
+
+fn onlyIfCached(kind: Kind) !void {
     const io = test_io.io();
     const server = try Server.start(testing.allocator, io, Server.fixed("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"));
     defer server.stop();
     var f: Fixture = undefined;
-    f.init();
+    try f.init(io, kind);
     defer f.deinit(io);
     var buf: [64]u8 = undefined;
     try expectGot(try get(&f, io, server.url(&buf, "/none"), &.{.{ .name = "Cache-Control", .value = "only-if-cached" }}), 504, .synthesized, "");
@@ -210,11 +254,15 @@ const Failing = struct {
 };
 
 test "a 5xx to a revalidation serves the stale response where stale-if-error allows" {
+    for (kinds) |kind| try staleIfError(kind);
+}
+
+fn staleIfError(kind: Kind) !void {
     const io = test_io.io();
     const server = try Server.start(testing.allocator, io, .{ .answer = Failing.answer });
     defer server.stop();
     var f: Fixture = undefined;
-    f.init();
+    try f.init(io, kind);
     defer f.deinit(io);
     f.client.shared.options.retries.max_attempts = 1;
     var buf: [64]u8 = undefined;

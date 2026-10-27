@@ -614,6 +614,18 @@ point. The shape is in the README; what the design depends on is:
   decoder for the network and the store), and is kept only when its body ended
   whole. A store that fails costs the cache, never the request
   (`cache_failed`). No ranges: a 206 is not stored.
+- **A store on disk is one file per variant** (`client/CacheDisk.zig`): named by
+  the key's hash and the `Vary` values' hash, a header with the times and
+  lengths, the key, the values, the head, the body as it came and a trailer
+  with the body's length. airlock writes it under a temp name and renames it
+  over the variant it replaces, the directory synced after (`Options.level`),
+  so a crash leaves the old variant or the whole new one. The index (sizes,
+  least recently used order) is held in memory and rebuilt from the
+  directory's names at `open`, newest first by write time; a crash's temps go
+  then. What a file says is read once, at one boundary (`Framing.parse`), and
+  a file that is not a variant of the key asked for is never served: the
+  lookup fails by name and the file goes. A holder reads its body from the
+  file it opened, so an eviction or a replacement leaves it readable.
 - **No `.netrc`**, no bandwidth limit (the caller throttles its reader or
   writer), no IDNA (callers pass punycode).
 - **No event loop of its own.** uplink makes only `Io` calls on sockets, apart
