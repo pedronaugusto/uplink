@@ -105,6 +105,8 @@ pub const OpenError = error{
     AccessDenied,
     /// The name has no address of `Dial.local_address`'s family.
     AddressFamilyMismatch,
+    /// `Dial.named_pipe` on a system with no named pipes: Windows' alone.
+    NamedPipeUnsupported,
     TimedOut,
     TlsFailed,
     ClientCertificateRejected,
@@ -218,7 +220,9 @@ fn openOnce(ctx: *Context, io: Io, route: Context.Route, options: OpenOptions, a
     var binding: ?Resolver.Binding = null;
     defer if (binding) |*b| b.deinit(ctx.gpa);
     var record: ?*const Resolver.Binding.Record = null;
-    var dialed = (if (ctx.dial.unix_socket) |path|
+    var dialed = (if (ctx.dial.named_pipe) |path|
+        dial.dialPipe(io, path, dial_options)
+    else if (ctx.dial.unix_socket) |path|
         dial.dialUnix(io, path, dial_options)
     else if (route.secure and proxy == null) found: {
         const d = try dial.dialHttps(io, ctx.gpa, first_host, first_port, .{ .protocols = protocols, .ech = ctx.tls.ech != .off and ech == .published }, dial_options);
@@ -289,7 +293,7 @@ fn create(ctx: *Context, io: Io, route: Context.Route, stream: *stream_owner.Own
         .diagnostics = diagnostics,
     };
     // The owner is used first where it stays.
-    conn.timed = .init(conn.stream.borrow().socket.handle);
+    conn.timed = .init(conn.stream.borrow().*);
     return conn;
 }
 
@@ -400,24 +404,16 @@ pub fn alive(conn: *Connection, io: Io) Io.Cancelable!bool {
     const r = &conn.input.interface;
     const secure = conn.session_on[0] or conn.session_on[1];
     if (r.seek != r.end) return secure;
-    if (sys.peek(conn.stream.borrow().socket.handle)) |seen| return switch (seen) {
+    if (conn.stream.borrow().socketStream()) |stream| if (sys.peek(stream.socket.handle)) |seen| return switch (seen) {
         .idle => true,
         .readable => secure,
         .closed => false,
     };
-    r.seek = 0;
-    r.end = 0;
-    var data: [1][]u8 = .{r.buffer};
-    const result = io.operateTimeout(.{ .net_read = .{ .socket_handle = conn.stream.borrow().socket.handle, .data = &data } }, .{
-        .duration = .{ .raw = .fromNanoseconds(0), .clock = .awake },
-    }) catch |err| return switch (err) {
-        error.Timeout, error.ConcurrencyUnavailable => true,
-        error.Canceled => error.Canceled,
+    return switch (try Timed.awaitReadable(io, conn.stream.borrow().*, r, .fromNanoseconds(0))) {
+        .timed_out, .unbounded => true,
+        // Nothing read is the stream's end, or its failure.
+        .ready => r.end != 0 and secure,
     };
-    const n = (result.net_read catch return false).data_len;
-    if (n == 0) return false;
-    r.end = n;
-    return secure;
 }
 
 /// Wait up to `timeout` for the server to send something, keeping what it
@@ -433,7 +429,7 @@ pub fn readable(conn: *Connection, io: Io, timeout: Io.Duration) Io.Cancelable!b
 pub fn awaitReadable(conn: *Connection, io: Io, timeout: Io.Duration) Io.Cancelable!Timed.Readiness {
     if (!conn.shared) conn.io = io;
     if (conn.reader().bufferedLen() != 0) return .ready;
-    return Timed.awaitReadable(io, conn.stream.borrow().socket.handle, &conn.input.interface, timeout);
+    return Timed.awaitReadable(io, conn.stream.borrow().*, &conn.input.interface, timeout);
 }
 
 /// The exchange is over, and what is left of its body must end by `until`
@@ -723,11 +719,11 @@ const SocketReader = struct {
         const conn = connection(r);
         var iovecs: [8][]u8 = undefined;
         const dest_n, const data_size = try r.writableVector(&iovecs, data);
-        const result = conn.perform(.{ .net_read = .{ .socket_handle = conn.stream.borrow().socket.handle, .data = iovecs[0..dest_n] } }) catch return error.ReadFailed;
-        const n = (result.net_read catch {
+        const result = conn.perform(conn.stream.borrow().readOp(iovecs[0..dest_n])) catch return error.ReadFailed;
+        const n = stream_owner.Endpoint.readCount(result) catch {
             conn.note(.broken);
             return error.ReadFailed;
-        }).data_len;
+        };
         if (n == 0) return error.EndOfStream;
         conn.moved(n, true);
         if (n > data_size) {
@@ -767,13 +763,8 @@ const SocketWriter = struct {
     fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
         const sw: *SocketWriter = @alignCast(@fieldParentPtr("interface", w)); // safe: this vtable is installed only on a SocketWriter's interface
         const conn: *Connection = @alignCast(@fieldParentPtr("output", sw)); // safe: a SocketWriter lives only in a Connection's `output`
-        const result = conn.perform(.{ .net_write = .{
-            .socket_handle = conn.stream.borrow().socket.handle,
-            .header = w.buffered(),
-            .data = data,
-            .splat = splat,
-        } }) catch return error.WriteFailed;
-        const n = result.net_write catch {
+        const result = conn.perform(conn.stream.borrow().writeOp(w.buffered(), data, splat)) catch return error.WriteFailed;
+        const n = stream_owner.Endpoint.writeCount(result) catch {
             conn.note(.broken);
             return error.WriteFailed;
         };

@@ -113,14 +113,14 @@ pub const ReadError = error{
     Canceled,
 };
 
-/// A socket over `stream`, with nothing on it yet.
-pub fn init(context: *Context, io: Io, stream: Io.net.Stream) Socket {
+/// A socket over `endpoint`, with nothing on it yet.
+pub fn init(context: *Context, io: Io, endpoint: stream_owner.Endpoint) Socket {
     return .{
         .context = context,
         .io = io,
-        .stream = .init(stream),
-        .entry = .{ .socket = stream.socket.handle },
-        .timed = .init(stream.socket.handle),
+        .stream = .init(endpoint),
+        .entry = .{ .endpoint = endpoint },
+        .timed = .init(endpoint),
         .input = .init(&.{}),
         .output = .init(&.{}),
     };
@@ -175,12 +175,20 @@ pub fn startAnswer(c: *Socket) void {
     c.until = null;
 }
 
+/// The peer's address, when the connection is over IP: none for a Unix
+/// socket or a named pipe.
+pub fn remote(c: *Socket) ?Io.net.IpAddress {
+    const stream = c.stream.borrow().socketStream() orelse return null;
+    const address = stream.socket.address;
+    return if (address == .ip4 or address == .ip6) address else null;
+}
+
 /// Wait up to `timeout` for the peer to send something; the wait ends
 /// nothing when nothing comes.
 pub fn awaitReadable(c: *Socket, io: Io, timeout: Io.Duration) Io.Cancelable!Timed.Readiness {
     c.adopt(io);
     if (c.reader().bufferedLen() != 0) return .ready;
-    return Timed.awaitReadable(io, c.stream.borrow().socket.handle, &c.input.interface, timeout);
+    return Timed.awaitReadable(io, c.stream.borrow().*, &c.input.interface, timeout);
 }
 
 /// Wait up to `timeout` for the client to end the connection while a
@@ -194,6 +202,7 @@ pub fn awaitEnd(c: *Socket, io: Io, timeout: Io.Timeout) Io.Cancelable!bool {
     if (c.failed() != .none) return true;
     const until = timeout.toDeadline(io);
     const r = &c.input.interface;
+    const stream = c.stream.borrow().socketStream() orelse return c.awaitPipeEnd(io, until);
     while (true) {
         if (r.seek == r.end) {
             r.seek = 0;
@@ -202,13 +211,13 @@ pub fn awaitEnd(c: *Socket, io: Io, timeout: Io.Timeout) Io.Cancelable!bool {
         if (r.end == r.buffer.len) return waitOut(io, until);
         // A look that neither waits nor takes answers at once where the
         // system has one: what a query with no time to wait needs.
-        if (sys.peek(c.stream.borrow().socket.handle)) |seen| switch (seen) {
+        if (sys.peek(stream.socket.handle)) |seen| switch (seen) {
             .closed => return true,
             .readable => {},
             .idle => if (expired(io, until)) return false,
         };
         var data: [1][]u8 = .{r.buffer[r.end..]};
-        const read: Io.Operation = .{ .net_read = .{ .socket_handle = c.stream.borrow().socket.handle, .data = &data } };
+        const read: Io.Operation = .{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } };
         const result = io.operateTimeout(read, until) catch |err| switch (err) {
             error.Timeout => return false,
             error.Canceled => return error.Canceled,
@@ -217,7 +226,7 @@ pub fn awaitEnd(c: *Socket, io: Io, timeout: Io.Timeout) Io.Cancelable!bool {
             // have something to read (its end or a reset among them), and the
             // read then finds it.
             error.ConcurrencyUnavailable => blk: {
-                reactor.wait(io, .{ .readable = c.stream.borrow().socket.handle }, until) catch |waited| switch (waited) {
+                reactor.wait(io, .{ .readable = stream.socket.handle }, until) catch |waited| switch (waited) {
                     error.Timeout => return false,
                     error.Canceled => return error.Canceled,
                     // A socket the system cannot watch has failed.
@@ -229,6 +238,32 @@ pub fn awaitEnd(c: *Socket, io: Io, timeout: Io.Timeout) Io.Cancelable!bool {
         const n = (result.net_read catch return true).data_len;
         if (n == 0) return true;
         r.end += n;
+    }
+}
+
+/// `awaitEnd` on a named pipe: reads within the time where the `Io` can
+/// bound them (a runtime's), and false where it cannot.
+fn awaitPipeEnd(c: *Socket, io: Io, until: Io.Timeout) Io.Cancelable!bool {
+    const r = &c.input.interface;
+    while (true) {
+        if (r.seek == r.end) {
+            r.seek = 0;
+            r.end = 0;
+        }
+        if (r.end == r.buffer.len) return waitOut(io, until);
+        const left = until.toDurationFromNow(io) orelse Io.Clock.Duration{ .raw = .fromSeconds(std.math.maxInt(u32)), .clock = .awake };
+        if (left.raw.nanoseconds <= 0) return false;
+        const found = reactor.net.pipe.readPipeWithin(io, c.stream.borrow().pipe, r.buffer[r.end..], left.raw) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return true,
+        };
+        switch (found) {
+            .ready => |n| {
+                if (n == 0) return true;
+                r.end += n;
+            },
+            .timed_out, .unbounded => return false,
+        }
     }
 }
 
@@ -285,14 +320,17 @@ fn linger(c: *Socket) void {
     const io = c.io;
     const time = c.context.options.timeouts.linger orelse return;
     if (c.failed() != .none or c.timed.fired()) return;
-    c.stream.borrow().shutdown(io, .send) catch return;
+    // A pipe has no half close; what was written stays for the client to
+    // read after the close.
+    const stream = c.stream.borrow().socketStream() orelse return;
+    stream.shutdown(io, .send) catch return;
     const until = Io.Clock.awake.now(io).addDuration(span.toIo(time));
     var buf: [4096]u8 = undefined;
     var data: [1][]u8 = .{&buf};
     while (true) {
         // A deadline that ends the wait aborts the socket, which is
         // closing anyway.
-        const result = c.timed.perform(io, c.context.keeper(), .{ .net_read = .{ .socket_handle = c.stream.borrow().socket.handle, .data = &data } }, until) catch return;
+        const result = c.timed.perform(io, c.context.keeper(), .{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } }, until) catch return;
         const n = (result.net_read catch return).data_len;
         if (n == 0) return;
     }
@@ -476,11 +514,11 @@ const SocketReader = struct {
         const c = socket(r);
         var iovecs: [8][]u8 = undefined;
         const dest_n, const data_size = try r.writableVector(&iovecs, data);
-        const result = c.perform(.{ .net_read = .{ .socket_handle = c.stream.borrow().socket.handle, .data = iovecs[0..dest_n] } }) catch return error.ReadFailed;
-        const n = (result.net_read catch {
+        const result = c.perform(c.stream.borrow().readOp(iovecs[0..dest_n])) catch return error.ReadFailed;
+        const n = stream_owner.Endpoint.readCount(result) catch {
             c.note(.broken);
             return error.ReadFailed;
-        }).data_len;
+        };
         if (n == 0) return error.EndOfStream;
         if (n > data_size) {
             r.end += n - data_size;
@@ -519,13 +557,8 @@ const SocketWriter = struct {
     fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
         const sw: *SocketWriter = @alignCast(@fieldParentPtr("interface", w)); // safe: this vtable is installed only on a SocketWriter's interface
         const c: *Socket = @alignCast(@fieldParentPtr("output", sw)); // safe: a SocketWriter lives only in a Socket's `output`
-        const result = c.perform(.{ .net_write = .{
-            .socket_handle = c.stream.borrow().socket.handle,
-            .header = w.buffered(),
-            .data = data,
-            .splat = splat,
-        } }) catch return error.WriteFailed;
-        const n = result.net_write catch {
+        const result = c.perform(c.stream.borrow().writeOp(w.buffered(), data, splat)) catch return error.WriteFailed;
+        const n = stream_owner.Endpoint.writeCount(result) catch {
             c.note(.broken);
             return error.WriteFailed;
         };

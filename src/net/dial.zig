@@ -87,6 +87,8 @@ pub const DialError = error{
     AddressFamilyMismatch,
     /// `Options.timeout` ran out.
     TimedOut,
+    /// A named pipe asked for on a system that has none: Windows' alone.
+    NamedPipeUnsupported,
     /// A name was to be looked up with no task to spare, on a target with
     /// no lookup of its own.
     ConcurrencyUnavailable,
@@ -303,6 +305,24 @@ pub fn dialUnix(io: Io, path: []const u8, options: Options) DialError!Dialed {
     };
 }
 
+/// Connect to the Windows named pipe at `path` (`\\.\pipe\<name>`),
+/// waiting for a free instance of a busy one within `options.timeout`;
+/// the socket options do not apply. Elsewhere `NamedPipeUnsupported`.
+pub fn dialPipe(io: Io, path: []const u8, options: Options) DialError!Dialed {
+    const timeout: Io.Timeout = if (options.timeout) |t| .{ .duration = .{ .raw = span.toIo(t), .clock = .awake } } else .none;
+    const file = reactor.net.connectPipe(io, path, .{ .timeout = timeout }) catch |err| return switch (err) {
+        error.Canceled => error.Canceled,
+        error.NamedPipeUnsupported => error.NamedPipeUnsupported,
+        error.InvalidPipeName => error.InvalidHostName,
+        // No server has made it, as a Unix socket's missing path is.
+        error.FileNotFound => error.NameNotResolved,
+        error.AccessDenied => error.AccessDenied,
+        error.Timeout => error.TimedOut,
+        error.Unexpected => error.ConnectionFailed,
+    };
+    return .{ .stream = .init(.{ .pipe = file }) };
+}
+
 fn unixNow(io: Io, path: []const u8) DialError!Dialed {
     const address = Io.net.UnixAddress.init(path) catch return error.InvalidHostName;
     const stream = address.connect(io) catch |err| return switch (err) {
@@ -310,7 +330,7 @@ fn unixNow(io: Io, path: []const u8) DialError!Dialed {
         error.FileNotFound, error.NotDir => error.NameNotResolved,
         else => error.ConnectionFailed,
     };
-    return .{ .stream = .init(stream) };
+    return .{ .stream = .init(.{ .socket = stream }) };
 }
 
 /// The addresses of `local`'s family, in their order.
@@ -472,7 +492,7 @@ fn waitFor(io: Io, delay: Io.Duration, armed_at: usize) Io.Cancelable!usize {
 
 fn connectOne(io: Io, address: IpAddress, deadline: Io.Timeout, local: Local) reactor.net.ConnectError!Won {
     const c = try reactor.net.connect(io, &address, .{ .timeout = deadline, .socket = local.socket, .local_address = local.address, .interface = local.interface });
-    return .{ .stream = .init(c.stream), .address = address, .timeout_enforced = c.timeout_enforced };
+    return .{ .stream = .init(.{ .socket = c.stream }), .address = address, .timeout_enforced = c.timeout_enforced };
 }
 
 const testing = std.testing;

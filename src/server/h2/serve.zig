@@ -300,7 +300,7 @@ fn answer(session: *Session, handler: *const Handler, st: *Stream) void {
         .protocol = head.protocol,
         .headers = .init(head.fields),
         .host = head.authority orelse "",
-        .remote = if (session.socket.stream.borrow().socket.address == .ip4 or session.socket.stream.borrow().socket.address == .ip6) session.socket.stream.borrow().socket.address else null,
+        .remote = session.socket.remote(),
         .secure = session.socket.secure,
         .peer_certificate = session.socket.peerCertificate(),
         .socket = session.socket,

@@ -110,6 +110,8 @@ pub const SendError = error{
     AccessDenied,
     /// The name has no address of `Dial.local_address`'s family.
     AddressFamilyMismatch,
+    /// `Dial.named_pipe` on a system with no named pipes: Windows' alone.
+    NamedPipeUnsupported,
     /// A timeout ran out: `Diagnostics.timeout` says which.
     TimedOut,
     /// The TLS handshake failed: `Diagnostics.tls_error` says why.

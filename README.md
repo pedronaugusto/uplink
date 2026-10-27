@@ -225,7 +225,9 @@ addresses are raced by Happy Eyeballs (RFC 8305): one at a time, the families
 alternating, each a quarter second after the last or at once when it failed,
 and each attempt is reactor's connect, which its runtime ends at the deadline
 in the kernel.
-`Dial.unix_socket` sends every request to a Unix socket instead. No uplink
+`Dial.unix_socket` sends every request to a Unix socket instead, and on
+Windows `Dial.named_pipe` to a named pipe (Docker's
+`\\.\pipe\docker_engine`), which `Server.servePipe` serves on. No uplink
 task waits on work started with `io.async`, which Zig 0.17 no longer promises
 runs beside it; a source rule refuses the spelling.
 

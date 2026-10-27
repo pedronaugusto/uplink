@@ -278,6 +278,15 @@ the lock, and say so where they are declared.
   Everything else uplink does to a socket goes through the caller's `Io`, or
   through reactor's networking over it.
 
+- **A connection's stream is a socket or a named pipe.** `net/stream.zig`'s
+  `Endpoint` makes each read and write for its kind (`net_read` or a
+  streaming file read), its deadline watch and its wait for something to
+  read, so the client's connection and the server's socket never ask which
+  it is. What only a socket has (options, a peek, a half close, a peer's
+  address) is asked of `socketStream()`, and a pipe goes without. reactor
+  opens the pipe overlapped and keeps its deadlines on its runtime; on any
+  other `Io` they are counted unenforced, as a socket's are where nothing
+  can keep them.
 ### Policy
 
 - **Redirects are followed, up to ten, and the default is the safe one.**

@@ -20,4 +20,5 @@ test {
     _ = @import("transport/verify_test.zig");
     _ = @import("ws_test.zig");
     _ = @import("reverse_proxy_test.zig");
+    _ = @import("pipe_test.zig");
 }
