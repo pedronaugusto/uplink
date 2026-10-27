@@ -181,6 +181,9 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "ws", .patterns = &.{
         "src/ws.zig",
     } },
+    .{ .name = "reverse proxy", .patterns = &.{
+        "src/ReverseProxy.zig",
+    } },
     .{ .name = "public", .patterns = &.{
         "src/uplink.zig",
     } },

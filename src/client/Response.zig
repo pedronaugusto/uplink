@@ -164,8 +164,9 @@ pub const CollectError = error{
 };
 
 /// The body, decoded per `Content-Encoding` and any coding before
-/// `chunked` when the client decompresses and every one is gzip, deflate
-/// or zstd, their checksums verified; a body under any other coding is
+/// `chunked` when the client offered its codings (`Options.decompress`, and
+/// the request named no `Accept-Encoding` of its own) and every one is
+/// gzip, deflate or zstd, their checksums verified; a body under any other coding is
 /// handed over as it came, for the caller to decode. Reads keep the client's timeouts. `io`
 /// is the one the reads run on until the response is released.
 pub fn reader(r: *Response, io: Io) *Io.Reader {

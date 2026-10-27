@@ -8,10 +8,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `ReverseProxy`: a server handler that sends each request on to an upstream through a `Client` and answers with what came back, as Go's `httputil.ReverseProxy` does. The fields of a connection (`Connection` and those it names, `Keep-Alive`, `Proxy-Connection`, `TE` but `trailers`, `Trailer`, `Transfer-Encoding`, `Upgrade`, `Proxy-Authenticate`, `Proxy-Authorization`) stay behind both ways; `Forwarded` (RFC 7239) gains the proxy's element; bodies stream through as they came, coded or not, with their length when declared and their trailer; a body of no declared length is flushed as it comes. No redirect is followed and no status tried again. An upstream that cannot be reached is a 502, one out of time a 504, a request whose own body was at fault its 400 or 413, a cancel the handler's `Canceled`. One upstream URL is the common case; a `Rewrite` embedded in the caller's type changes the outbound URL and fields. `init` refuses a client with a cookie jar, credentials or a `User-Agent` of its own, which would add to what is forwarded. Design: docs/design.md, "Reverse proxy".
+- `server.Request.rawReader`: the body as it came, its codings left on whatever the server's `decompress`, for a handler that forwards it.
 - `Cache.Memory.overhead`: what each variant costs against the store's bound beyond its key, `Vary` values, head and body, which the build decides (a safe build's record is larger). A store sized for a count of variants is sized with it; the suite's own LRU test guessed it, and held three variants in ReleaseFast where it meant to hold two.
 
 ### Breaking
 
+- The client decodes only the codings it offered: a request that names its own `Accept-Encoding` reads its body as it came, `Content-Encoding` and all, as Go's transport does, where a client with `decompress` decoded every body under gzip, deflate or zstd whoever asked for them.
 - A dial's stream has its one owner: `net.Dialed.stream` is an `aegis.own.OwnedIo` over the stream, closed by `stream.deinit(io)` and reached with `stream.borrow()`, which checks in Debug that it is closed once and not moved once in use. A client connection and a server's socket keep it the same way.
 - Time is aegis's where it comes in: `wire.date` reads and writes `wire.date.Second`, an instant on the calendar clock, where it took and gave seconds as an `i64`; `wire.cookie.SetCookie.expires`, `wire.cache.Times`, `currentAge` and `Cache.Meta` are in it too. `policy.retryAfter` takes one.
 - `Server.stats` takes the `Io`: the connections open are counted under the lock the accept loop's wait for room and `shutdown`'s wait for the last connection share, where a futex waited on a bare counter.
@@ -21,6 +24,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - On preflight 0.18.1, under the aegis pack: the counters, gauges and flags are aegis's atomic cells over domains of their own; an exchange waiting for its route, the accept loop's end and `shutdown`'s drain wait on an aegis `Condition` under the lock of the state they wait for, where each had an `Io.Event`; the ticket key a server draws is an aegis `Secret`; the zstd buffer kept for the next body is guarded. A socket's deadline mode, a response's life, a server socket's phase and a multipart body's parts are aegis state machines, and the response's framing is chosen in one place for HTTP/1 and HTTP/2. Pool buffers carry their alignment in their type (`BufferPool.Buffer`), so what is placed in one, a head's fields, a trailer's, a decoder's state, an encoder, a free list's link, is checked at compile time to be aligned and in every safe build to fit; the conformance and CI programs read their files through `aegis.own.readFile`.
+
+### Fixed
+
+- A server's answer to a `HEAD`, or a 304, with a declared length and no body written says that length and keeps its connection, where `end` took it for a short body and closed the connection.
 
 ## [0.10.1] - 2026-10-25
 

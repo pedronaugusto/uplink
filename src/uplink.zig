@@ -3,7 +3,7 @@
 //! certificates, timeouts and deadlines that need no task per connection,
 //! redirects, retries, cookies, authentication, decompression and its own
 //! DNS when asked; a server with routing, files and compression; WebSocket
-//! on both; and the codecs they are built from.
+//! on both; a reverse proxy; and the codecs they are built from.
 
 const std = @import("std");
 const client = @import("client.zig");
@@ -21,6 +21,9 @@ pub const server = @import("server.zig");
 pub const Server = server.Server;
 /// WebSocket on the client and the server.
 pub const ws = @import("ws.zig");
+/// A server handler that sends each request on to an upstream through a
+/// client, and answers with what came back.
+pub const ReverseProxy = @import("ReverseProxy.zig");
 /// A request whose body the caller writes.
 pub const Outgoing = client.Outgoing;
 /// A connection a response handed over: after a 101, or a `CONNECT`.
@@ -78,6 +81,7 @@ test {
     _ = transport;
     _ = server;
     _ = ws;
+    _ = ReverseProxy;
     _ = tls;
     _ = net;
     _ = @import("coding.zig");

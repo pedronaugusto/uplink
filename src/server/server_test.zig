@@ -251,6 +251,26 @@ test "a HEAD is answered with the head a GET would have, and no body" {
     try testing.expect(std.mem.endsWith(u8, got, "hello"));
 }
 
+/// Declare a length and write nothing: the head alone, as a `HEAD`'s or
+/// a 304's answer is.
+fn lengthAlone(io: Io, request: *Request, response: *Response) anyerror!void {
+    if (std.mem.eql(u8, request.path, "/unchanged")) response.status = .not_modified;
+    try response.setLength(5);
+    try response.end(io);
+}
+
+test "a head with no body after it says its declared length, and keeps its connection" {
+    const gpa = testing.allocator;
+    const running = try Running.start(gpa, .{}, .of(lengthAlone));
+    defer running.stop();
+    const got = try running.raw(gpa, "HEAD / HTTP/1.1\r\nHost: x\r\n\r\nGET /unchanged HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    defer gpa.free(got);
+    try testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 200 OK\r\n"));
+    try testing.expect(std.mem.find(u8, got, "HTTP/1.1 304 Not Modified\r\n") != null);
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, got, "Content-Length: 5\r\n"));
+    try testing.expect(std.mem.endsWith(u8, got, "\r\n\r\n"));
+}
+
 fn failing(io: Io, request: *Request, response: *Response) anyerror!void {
     if (std.mem.eql(u8, request.path, "/late")) {
         const w = try response.writer(io);

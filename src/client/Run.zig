@@ -554,7 +554,7 @@ pub fn receiveH2(run: *Run, io: Io, h: *H2, st: *H2.Stream) H2Error!Response {
     run.progress = true;
     const response = try Response.fromStream(io, &c.context, &c.pool, h, st, .{
         .method = run.method,
-        .decompress = c.options.decompress,
+        .decompress = run.decodes(),
         .deadline = run.deadline,
     });
     if (run.diagnostics()) |d| d.stage = .body;
@@ -589,7 +589,7 @@ pub fn receive(run: *Run, io: Io, conn: *Connection, want_continue: bool) Error!
     const response = try Response.receive(io, &c.context, &c.pool, conn, .{
         .method = run.method,
         .limits = c.options.limits,
-        .decompress = c.options.decompress,
+        .decompress = run.decodes(),
         .diagnostics = run.diagnostics(),
         .progress = &run.progress,
         .want_continue = want_continue,
@@ -681,7 +681,7 @@ fn writeFields(run: *Run, io: Io, w: *Io.Writer, r: Context.Route, absolute_form
         _ = try slot.auth.writeField(io, w, slot.proxy.credential, run.method.name, path);
     }
     if (c.options.user_agent) |ua| if (!named(run.request.headers, "user-agent")) try h1.writeField(w, .{ .name = "User-Agent", .value = ua });
-    if (c.options.decompress and run.offersCodings()) try w.writeAll("Accept-Encoding: gzip, deflate, zstd\r\n");
+    if (run.decodes()) try w.writeAll("Accept-Encoding: gzip, deflate, zstd\r\n");
     try run.writeAuthorization(io, w);
     // The jar's cookies, unless the caller's own `Cookie` is still sent.
     if (c.options.cookies) |jar| if (run.left_origin or !named(run.request.headers, "cookie")) {
@@ -736,6 +736,14 @@ fn named(headers: []const std.http.Header, name: []const u8) bool {
 /// Whether the client offers its codings: not when the request names its
 /// own, asks for a range, whose bytes would be the coded ones, or is a
 /// `HEAD`, whose length would be the coded one.
+/// Whether the client offers its codings and decodes what comes back
+/// under them. A request that names its own `Accept-Encoding` reads the
+/// body as it came: the codings are the caller's to undo, as a proxy
+/// forwards them.
+fn decodes(run: *const Run) bool {
+    return run.shared.options.decompress and run.offersCodings();
+}
+
 fn offersCodings(run: *const Run) bool {
     const headers = run.request.headers;
     return !run.method.eql(.HEAD) and !named(headers, "accept-encoding") and !named(headers, "range");
@@ -1115,7 +1123,7 @@ fn requestFields(run: *Run, out: []fields.Field) fields.Headers {
 fn fieldValue(run: *Run, name: []const u8) ?[]const u8 {
     for (run.request.headers) |h| if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
     if (std.ascii.eqlIgnoreCase(name, "user-agent")) return run.shared.options.user_agent;
-    if (std.ascii.eqlIgnoreCase(name, "accept-encoding") and run.shared.options.decompress and run.offersCodings()) return "gzip, deflate, zstd";
+    if (std.ascii.eqlIgnoreCase(name, "accept-encoding") and run.decodes()) return "gzip, deflate, zstd";
     return null;
 }
 
@@ -1183,7 +1191,7 @@ fn serve(run: *Run, io: Io, cache: *Cache, entry: Cache.Entry, age: u32, status:
         return error.OutOfMemory;
     };
     defer c.context.gpa.free(head);
-    const response = Response.fromStored(io, &c.context, &c.pool, cache, entry, head, status, .{ .method = run.method, .limits = c.options.limits, .decompress = c.options.decompress }) catch |err| switch (err) {
+    const response = Response.fromStored(io, &c.context, &c.pool, cache, entry, head, status, .{ .method = run.method, .limits = c.options.limits, .decompress = run.decodes() }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.HttpProtocolError => {
             run.cacheFailed(error.StoreFailed);

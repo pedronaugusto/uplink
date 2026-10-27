@@ -12,7 +12,7 @@ Eyeballs, sends a host in Unicode as IDNA's ASCII form, and decodes gzip, deflat
 server reads requests strictly, pipelined ones in order, keeps every wait to a
 timeout, terminates TLS, compresses responses, serves files with their
 validators and ranges, and routes by Go 1.22's patterns at run time or at
-compile time. Both speak WebSocket and HTTP/2. Both run on any `std.Io` and evented on
+compile time, and proxies to an upstream. Both speak WebSocket and HTTP/2. Both run on any `std.Io` and evented on
 [reactor](https://github.com/pedronaugusto/reactor)'s runtime, and allocate
 nothing per request once warm. The codecs it is built from, HTTP/1.1 heads and
 chunked bodies, header fields, dates, cookies, authentication challenges,
@@ -323,6 +323,22 @@ messages by default. Over HTTP/2 the server accepts a WebSocket as an
 extended `CONNECT` (RFC 8441), the stream carrying its frames; the client
 opens its WebSocket over HTTP/1.1, which every WebSocket server speaks.
 
+**Reverse proxy.** `ReverseProxy` is a server handler that sends each
+request on to an upstream through a `Client` and answers with what came
+back, as Go's `httputil.ReverseProxy` does. A connection's own fields stay
+behind both ways, `Forwarded` gains the proxy's element, and bodies stream
+through as they came, coded or not, with their length and trailer. No
+redirect is followed and no status tried again. An upstream that cannot be
+reached is a 502, one out of time a 504, and a cancel ends the request with
+no answer. One upstream URL is the common case; a `Rewrite` changes where
+each request goes and what it carries.
+
+```zig
+var through: uplink.Client = .init(gpa, .{});
+var proxy: uplink.ReverseProxy = try .init(gpa, &through, .{ .upstream = "http://127.0.0.1:9000/api" });
+var server: uplink.Server = .init(gpa, .{}, &proxy.handler);
+```
+
 **HTTP/2.** The server speaks HTTP/2 by ALPN over TLS, and over plain TCP by
 prior knowledge when `Options.h2c` says so. Its frames, HPACK and the
 protocol state are sans-I/O in `wire.h2` and `wire.hpack`; the connection's
@@ -368,8 +384,9 @@ environment itself.
   HTTP/2 alone, with no HTTP/1.1 beside it, takes no WebSocket from uplink's
   client. There is no TLS engine of uplink's own (TLS is
   cloak's), and HTTP/3 belongs to a QUIC package of its own.
-- No middleware framework, sessions, templating, JSON binding or reverse
-  proxy: a handler is a function, and the rest is a program's own.
+- No middleware framework, sessions, templating or JSON binding: a handler
+  is a function, and the rest is a program's own. The reverse proxy passes
+  no upgrade through yet, and sends no request trailer.
 - A file is sent through the response's writer, read and written with the
   activity timeout kept: no `sendfile`, which no `Io` bounds by a deadline yet.
 - No Brotli decoding: such a body is handed over as it came, with its

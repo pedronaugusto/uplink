@@ -202,7 +202,8 @@ fn reserve(r: *Response, buffer: *BufferPool.Buffer, len: usize, need: usize) Er
 
 /// Declare the body's length, sent as `Content-Length`: the body written
 /// must be exactly this long. A body sent compressed is chunked instead,
-/// and still held to the length declared.
+/// and still held to the length declared. The head of a `HEAD`'s answer or
+/// a 304 says it with no body written, ended by `end`.
 pub fn setLength(r: *Response, length: u64) Error!void {
     if (r.state.current() != .open) return error.HeadSent;
     r.declared = length;
@@ -279,7 +280,11 @@ pub fn end(r: *Response, io: Io) Error!void {
         .open => {
             const buffered = r.interface.buffered();
             r.interface.end = 0;
-            if (r.declared) |n| if (n != buffered.len) {
+            // A head with no body after it (a `HEAD`'s, a 304's) says the
+            // length declared without a body written: the one a `GET`
+            // would have.
+            const head_alone = buffered.len == 0 and (r.head_only or bodiless(r.status));
+            if (r.declared) |n| if (n != buffered.len and !head_alone) {
                 // Declared and short: the head promised more than came.
                 try r.sendHead(.length, null);
                 try r.bodyBytes(&.{buffered}, 1);
@@ -368,7 +373,7 @@ fn sendWhole(r: *Response, body: []const u8) Error!void {
     }
     if (bodiless(r.status)) {
         if (body.len != 0) return error.BodyNotAllowed;
-    } else r.declared = body.len;
+    } else if (!(r.head_only and body.len == 0 and r.declared != null)) r.declared = body.len;
     try r.sendHead(.length, null);
     if (r.stream) |st| {
         if (!st.ended and !r.head_only and body.len != 0) {

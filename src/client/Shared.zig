@@ -39,9 +39,11 @@ pub const Options = struct {
     /// Keep the resolver's answers for a while; null keeps none.
     dns_cache: ?Resolver.Cache.Options = .{},
     /// Send `Accept-Encoding: gzip, deflate, zstd` unless a request names
-    /// its own, and decode such bodies. A request with a `Range`, or a
-    /// `HEAD`, is sent without it: a range of coded bytes cannot be decoded
-    /// from its middle, and a `HEAD` would report the coded length.
+    /// its own, and decode the bodies that come back under them. A request
+    /// that names its own gets its body as it came: the codings it asked
+    /// for are its to undo. A request with a `Range`, or a `HEAD`, is sent
+    /// without it: a range of coded bytes cannot be decoded from its
+    /// middle, and a `HEAD` would report the coded length.
     decompress: bool = true,
     /// The largest zstd window decoded: a body asking for more is refused
     /// as it is read. A client keeps one window of this size, plus a

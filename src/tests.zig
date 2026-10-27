@@ -18,4 +18,5 @@ test {
     _ = @import("client/tls_test.zig");
     _ = @import("transport/verify_test.zig");
     _ = @import("ws_test.zig");
+    _ = @import("reverse_proxy_test.zig");
 }

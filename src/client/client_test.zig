@@ -144,6 +144,12 @@ test "gzip and deflate bodies are decoded, and other codings handed over as they
         const undecoded = try get(&raw, io, server.url(&buf, "/"));
         defer gpa.free(undecoded);
         try testing.expectEqualSlices(u8, coded, undecoded);
+        // A request that names its own codings reads them as they came.
+        var asked = try client.send(io, .{ .url = server.url(&buf, "/"), .headers = &.{.{ .name = "Accept-Encoding", .value = case[1] }} });
+        defer asked.deinit(io);
+        const kept = try asked.collect(gpa, io, .limited(1 << 20));
+        defer gpa.free(kept);
+        try testing.expectEqualSlices(u8, coded, kept);
     }
     const br = try bodyOf("HTTP/1.1 200 OK\r\nContent-Encoding: br\r\nContent-Length: 4\r\n\r\n\x0b\x01\x80\x03", .{});
     defer gpa.free(br);

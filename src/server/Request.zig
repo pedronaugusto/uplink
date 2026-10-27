@@ -55,8 +55,9 @@ stream: ?*Session.Stream = null,
 /// Private: the body's codings undone, when the server decodes them.
 decoder: ?Decoder = null,
 decoded: ?*Io.Reader = null,
-/// Private: whether the body reader was asked for.
+/// Private: whether the body reader was asked for, and which.
 started: bool = false,
+raw: bool = false,
 /// Private: the client waits for `100 Continue` before it sends the body.
 expects_continue: bool,
 /// Private: `100 Continue` was sent, or a final head that makes it moot.
@@ -146,10 +147,22 @@ pub fn param(r: *const Request, name: []const u8) ?[]const u8 {
 /// over as it came. The first call sends `100 Continue` to a client
 /// waiting for it.
 pub fn reader(r: *Request, io: Io) *Io.Reader {
+    return r.open(io, true);
+}
+
+/// The body as it came, its codings left on whatever the server's
+/// `decompress`: what a proxy forwards under its `Content-Encoding`. Asked
+/// for in place of `reader`, never beside it.
+pub fn rawReader(r: *Request, io: Io) *Io.Reader {
+    return r.open(io, false);
+}
+
+fn open(r: *Request, io: Io, decode: bool) *Io.Reader {
     r.socket.adopt(io);
     const raw = if (r.stream) |st| st.reader(io) else &r.body.interface;
     if (!r.started) {
         r.started = true;
+        r.raw = !decode;
         if (r.expects_continue and !r.continued) {
             r.continued = true;
             if (r.stream) |st| {
@@ -162,8 +175,11 @@ pub fn reader(r: *Request, io: Io) *Io.Reader {
                 };
             } else r.socket.sendContinue();
         }
-        if (r.decoder) |*d| r.decoded = d.start(raw, &r.socket.context.zstd);
+        if (decode) if (r.decoder) |*d| {
+            r.decoded = d.start(raw, &r.socket.context.zstd);
+        };
     }
+    std.debug.assert(r.raw == !decode);
     return r.decoded orelse raw;
 }
 

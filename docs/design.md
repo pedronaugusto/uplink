@@ -403,6 +403,51 @@ the lock, and say so where they are declared.
   (`no_context_takeover`): a kept DEFLATE state costs its memory per
   connection.
 
+### Reverse proxy
+
+- **A handler above both, as `ws` is.** `proxy.Proxy` is a server
+  `Handler` that sends each request on through a `Client` and writes back
+  what came; neither knows it. Go's `httputil.ReverseProxy` is the model,
+  without what Go keeps for compatibility (`Director`, `X-Forwarded-*`).
+- **One hop, said once.** The fields that belong to a connection are not
+  forwarded either way: `Connection` and the fields it names, `Keep-Alive`,
+  `Proxy-Connection`, `TE` (except `trailers`), `Trailer`,
+  `Transfer-Encoding`, `Upgrade`, `Proxy-Authenticate` and
+  `Proxy-Authorization` (RFC 9110 §7.6.1). `Host` and `Content-Length` are
+  each side's to write. The proxy appends itself to `Forwarded` (RFC 7239:
+  `for`, `host`, `proto`), after any element the request carried.
+- **Bytes pass as they came.** The request's body is read with its codings
+  on (`Request.rawReader`) and sent with the length it declared, or in
+  chunks; the response's is written back the same way, its length
+  declared when the upstream gave one and announced no trailer. Neither
+  side decodes: a request names its own `Accept-Encoding`, so the client
+  undoes no coding it did not offer (Go's rule), and a request that came
+  without one is sent with `identity`, which is what it can read. A body
+  streams; nothing is gathered whole.
+- **The upstream's answer, unchanged.** No redirect is followed and no
+  status tried again (`redirects = .none`, `retries = .none`): the client
+  behind the proxy decides. A kept connection found stale is still sent
+  once more, as the client always does, for a request that can be. The
+  response's trailer goes back as its trailer.
+- **A failure has its status.** An upstream that cannot be reached or
+  breaks before its head is a 502, one that runs out of time a 504, a
+  request whose own body was at fault its 400 or 413. A cancel is the
+  handler's `Canceled`, never a status. After the head went out, a failure
+  ends the connection, as any handler's does, so the client sees a cut
+  body, never a short success.
+- **Where to is the caller's, by an embedded hook.** The common case is
+  one upstream: its scheme, authority and path prefix, the request's path
+  and query joined after it. A `Rewrite`, embedded in the caller's type and
+  found by `@fieldParentPtr`, sees the request and changes the outbound
+  URL and fields instead.
+- **The client is the caller's, and keeps nothing of its own.** A cookie
+  jar would add cookies to requests that came without, and credentials
+  would answer the upstream's 401s for someone else: `Proxy.init` refuses
+  a client with either. A cache is the caller's choice.
+- **Not yet:** an upgrade passed through (`Response.upgrade` and `hijack`,
+  a copy each way), a request's trailer (the client sends none), and
+  `CONNECT`, which is a forward proxy's.
+
 ### HTTP/2
 
 - **The protocol is sans-I/O.** `wire.h2.Connection` holds the settings,
