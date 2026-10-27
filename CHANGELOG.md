@@ -8,8 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- `ReverseProxy`: a server handler that sends each request on to an upstream through a `Client` and answers with what came back, as Go's `httputil.ReverseProxy` does. The fields of a connection (`Connection` and those it names, `Keep-Alive`, `Proxy-Connection`, `TE` but `trailers`, `Trailer`, `Transfer-Encoding`, `Upgrade`, `Proxy-Authenticate`, `Proxy-Authorization`) stay behind both ways; `Forwarded` (RFC 7239) gains the proxy's element; bodies stream through as they came, coded or not, with their length when declared and their trailer; a body of no declared length is flushed as it comes. No redirect is followed and no status tried again. An upstream that cannot be reached is a 502, one out of time a 504, a request whose own body was at fault its 400 or 413, a cancel the handler's `Canceled`. One upstream URL is the common case; a `Rewrite` embedded in the caller's type changes the outbound URL and fields. `init` refuses a client with a cookie jar, credentials or a `User-Agent` of its own, which would add to what is forwarded. Design: docs/design.md, "Reverse proxy".
+- `ReverseProxy`: a server handler that sends each request on to an upstream through a `Client` and answers with what came back, as Go's `httputil.ReverseProxy` does. The fields of a connection (`Connection` and those it names, `Keep-Alive`, `Proxy-Connection`, `TE` but `trailers`, `Trailer`, `Transfer-Encoding`, `Upgrade`, `Proxy-Authenticate`, `Proxy-Authorization`) stay behind both ways; `Forwarded` (RFC 7239) gains the proxy's element; bodies stream through as they came, coded or not, with their length when declared and their trailer; a body of no declared length is flushed as it comes. No redirect is followed and no status tried again. An upgrade passes through: the upstream's 101 to the protocol asked for is the client's, and each connection's bytes go to the other on a task each way, until either end ends. An upstream that cannot be reached is a 502, one out of time a 504, a request whose own body was at fault its 400 or 413, a cancel the handler's `Canceled`. One upstream URL is the common case; a `Rewrite` embedded in the caller's type changes the outbound URL and fields. `init` refuses a client with a cookie jar, credentials or a `User-Agent` of its own, which would add to what is forwarded. Design: docs/design.md, "Reverse proxy".
 - `server.Request.rawReader`: the body as it came, its codings left on whatever the server's `decompress`, for a handler that forwards it.
+- `server.Request.length`: the body's declared length, which the server holds the body to: `Content-Length` over HTTP/1.1, `content-length` over HTTP/2, 0 for none, null for a chunked body.
 - `Cache.Memory.overhead`: what each variant costs against the store's bound beyond its key, `Vary` values, head and body, which the build decides (a safe build's record is larger). A store sized for a count of variants is sized with it; the suite's own LRU test guessed it, and held three variants in ReleaseFast where it meant to hold two.
 
 ### Breaking
@@ -27,6 +28,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A 101 the caller does not take over (`Response.upgrade`) gives its connection back to no later request: the connection speaks another protocol after it, and was kept as an HTTP/1.1 one.
 - A server's answer to a `HEAD`, or a 304, with a declared length and no body written says that length and keeps its connection, where `end` took it for a short body and closed the connection.
 
 ## [0.10.1] - 2026-10-25

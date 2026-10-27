@@ -275,6 +275,19 @@ pub fn gone(r: *Request, io: Io, timeout: Io.Timeout) GoneError!bool {
     return r.socket.awaitEnd(io, timeout);
 }
 
+/// The body's length as the head declared it, which the server holds the
+/// body to (and to `Options.max_body`, before it is read): 0 for a request
+/// with no body, null for a chunked one or HTTP/2's without a
+/// `content-length`.
+pub fn length(r: *const Request) ?u64 {
+    if (r.stream) |st| return st.content_length;
+    return switch (r.body.framing) {
+        .none => 0,
+        .length => |n| n,
+        .chunked, .until_close => null,
+    };
+}
+
 /// Whether the body was read to its end.
 pub fn bodyComplete(r: *const Request) bool {
     if (r.stream) |st| return st.drained();

@@ -330,8 +330,9 @@ behind both ways, `Forwarded` gains the proxy's element, and bodies stream
 through as they came, coded or not, with their length and trailer. No
 redirect is followed and no status tried again. An upstream that cannot be
 reached is a 502, one out of time a 504, and a cancel ends the request with
-no answer. One upstream URL is the common case; a `Rewrite` changes where
-each request goes and what it carries.
+no answer. An upgrade passes through: the upstream's 101, then each side's
+bytes to the other. One upstream URL is the common case; a `Rewrite`
+changes where each request goes and what it carries.
 
 ```zig
 var through: uplink.Client = .init(gpa, .{});
@@ -385,8 +386,8 @@ environment itself.
   client. There is no TLS engine of uplink's own (TLS is
   cloak's), and HTTP/3 belongs to a QUIC package of its own.
 - No middleware framework, sessions, templating or JSON binding: a handler
-  is a function, and the rest is a program's own. The reverse proxy passes
-  no upgrade through yet, and sends no request trailer.
+  is a function, and the rest is a program's own. The reverse proxy sends
+  no request trailer, and takes no WebSocket over HTTP/2 or `CONNECT`.
 - A file is sent through the response's writer, read and written with the
   activity timeout kept: no `sendfile`, which no `Io` bounds by a deadline yet.
 - No Brotli decoding: such a body is handed over as it came, with its

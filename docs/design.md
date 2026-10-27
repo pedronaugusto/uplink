@@ -417,8 +417,8 @@ the lock, and say so where they are declared.
   each side's to write. The proxy appends itself to `Forwarded` (RFC 7239:
   `for`, `host`, `proto`), after any element the request carried.
 - **Bytes pass as they came.** The request's body is read with its codings
-  on (`Request.rawReader`) and sent with the length it declared, or in
-  chunks; the response's is written back the same way, its length
+  on (`Request.rawReader`) and sent with the length the server holds it to
+  (`Request.length`), or in chunks; the response's is written back the same way, its length
   declared when the upstream gave one and announced no trailer. Neither
   side decodes: a request names its own `Accept-Encoding`, so the client
   undoes no coding it did not offer (Go's rule), and a request that came
@@ -444,9 +444,15 @@ the lock, and say so where they are declared.
   jar would add cookies to requests that came without, and credentials
   would answer the upstream's 401s for someone else: `Proxy.init` refuses
   a client with either. A cache is the caller's choice.
-- **Not yet:** an upgrade passed through (`Response.upgrade` and `hijack`,
-  a copy each way), a request's trailer (the client sends none), and
-  `CONNECT`, which is a forward proxy's.
+- **An upgrade passes through.** A request asking an HTTP/1.1 connection
+  to switch is sent with its `Upgrade` (never `h2c`, the hop's own); the
+  upstream's 101 to the same protocol is the client's 101, and each
+  connection's bytes go to the other (`Response.upgrade`, `hijack`) on a
+  task each way, both had before the 101 goes, until either end ends. A
+  101 to another protocol is a 502.
+- **Not yet:** a request's trailer (the client sends none), a WebSocket
+  over HTTP/2's extended `CONNECT`, and `CONNECT` itself, which is a
+  forward proxy's (a 501).
 
 ### HTTP/2
 

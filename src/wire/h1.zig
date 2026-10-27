@@ -292,9 +292,10 @@ pub const FramingError = error{
 pub fn responseFraming(method: Method, head: *const ResponseHead) FramingError!ResponseFraming {
     var keep_alive = keepAlive(head.version, &head.headers);
     const code = @backingInt(head.status);
+    // A switch or a tunnel: what follows is no longer HTTP, so the
+    // connection carries no other exchange, taken over or not.
+    if (code == 101 or (method.eql(.CONNECT) and code / 100 == 2)) return .{ .framing = .none, .keep_alive = false };
     if (method.bodiless() or code / 100 == 1 or code == 204 or code == 304) return .{ .framing = .none, .keep_alive = keep_alive };
-    // A tunnel: what follows is no longer HTTP.
-    if (method.eql(.CONNECT) and code / 100 == 2) return .{ .framing = .none, .keep_alive = false };
     if (head.headers.getKnown(.@"transfer-encoding") != null) {
         const chunked_last = try chunkedLast(&head.headers);
         // Both: Transfer-Encoding wins, and the connection is not trusted
@@ -863,7 +864,7 @@ test "framing follows RFC 9112 §6.3 in its order" {
     const cases = [_]Case{
         .{ "HTTP/1.1 204 No Content\r\nContent-Length: 5\r\n\r\n", .GET, .none, true },
         .{ "HTTP/1.1 304 Not Modified\r\n\r\n", .GET, .none, true },
-        .{ "HTTP/1.1 101 Switching\r\n\r\n", .GET, .none, true },
+        .{ "HTTP/1.1 101 Switching\r\n\r\n", .GET, .none, false },
         .{ "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\nContent-Length: 5\r\n\r\n", .GET, .chunked, false },
         .{ "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked, gzip\r\n\r\n", .GET, .until_close, false },
         .{ "HTTP/1.0 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n", .GET, .chunked, false },

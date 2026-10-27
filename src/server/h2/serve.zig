@@ -273,7 +273,7 @@ fn startStream(session: *Session, shared: *Session.Shared, id: u31, fields: []co
     if (shared.conn.stream(id)) |s| s.content_length = head.content_length;
     const st = try gpa.create(Stream);
     errdefer gpa.destroy(st);
-    st.* = .{ .session = session, .id = id, .head_buffer = buffer, .fields = kept, .recv_end = end_stream, .interface = undefined };
+    st.* = .{ .session = session, .id = id, .head_buffer = buffer, .fields = kept, .recv_end = end_stream, .content_length = head.content_length, .interface = undefined };
     st.initReader();
     try shared.streams.append(gpa, st);
     return st;

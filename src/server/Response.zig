@@ -607,8 +607,8 @@ fn sendHeadH2(r: *Response, st: *Session.Stream, streamed: ?Encoder.Coding, code
     if (streamed) |c| try r.startEncoder(c);
     var list: [max_h2_fields]hpack.Field = undefined;
     var n: usize = 0;
-    var status_buf: [3]u8 = undefined;
-    list[n] = .{ .name = ":status", .value = std.mem.print(&status_buf, "{d}", .{code}) catch unreachable }; // unreachable: a status is three digits
+    var status_buf: [4]u8 = undefined;
+    list[n] = .{ .name = ":status", .value = status_buf[0..std.fmt.printInt(&status_buf, code, 10, .lower, .{})] };
     n += 1;
     var date_buf: [wire.date.formatted_len]u8 = undefined;
     if (!r.has_date) {
@@ -618,7 +618,7 @@ fn sendHeadH2(r: *Response, st: *Session.Stream, streamed: ?Encoder.Coding, code
     var length_buf: [20]u8 = undefined;
     const say_length = r.framing == .length or (code == 304 and r.declared != null);
     if (say_length) {
-        list[n] = .{ .name = "content-length", .value = std.mem.print(&length_buf, "{d}", .{r.declared.?}) catch unreachable }; // unreachable: a u64 is at most 20 digits
+        list[n] = .{ .name = "content-length", .value = length_buf[0..std.fmt.printInt(&length_buf, r.declared.?, 10, .lower, .{})] };
         n += 1;
     }
     if (r.declared) |d| r.remaining = d;

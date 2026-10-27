@@ -244,6 +244,9 @@ pub const Stream = struct {
     recv_start: usize = 0,
     recv_len: usize = 0,
     recv_end: bool = false,
+    /// The length the request's head declared, which the connection holds
+    /// its data to.
+    content_length: ?u64 = null,
     /// The peer's reset, or the connection's end.
     reset_code: ?h2.ErrorCode = null,
     /// The request's trailer fields, in their own pooled buffer.

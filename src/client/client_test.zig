@@ -69,6 +69,22 @@ test "a request's head is written exactly, with nothing unchecked" {
     try testing.expectEqual(@as(u32, 1), server.requests.load(.monotonic));
 }
 
+test "a 101 not taken over gives its connection to no later request" {
+    const io = test_io.io();
+    const server = try Server.start(testing.allocator, io, Server.fixed("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: other\r\n\r\n"));
+    defer server.stop();
+    var client: Client = .init(testing.allocator, .{});
+    defer client.deinit(io);
+    var buf: [64]u8 = undefined;
+    for (0..2) |_| {
+        var response = try client.send(io, .{ .url = server.url(&buf, "/"), .headers = &.{ .{ .name = "Connection", .value = "Upgrade" }, .{ .name = "Upgrade", .value = "other" } } });
+        try testing.expectEqual(std.http.Status.switching_protocols, response.status);
+        response.deinit(io);
+    }
+    try testing.expectEqual(@as(u64, 2), client.stats().connections_opened);
+    try testing.expectEqual(@as(u32, 0), client.stats().idle);
+}
+
 /// The body of a response to `GET /` with `answer`, read whole.
 fn bodyOf(comptime answer: []const u8, options: Client.Options) ![]u8 {
     const io = test_io.io();

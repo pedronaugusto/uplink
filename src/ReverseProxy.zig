@@ -11,6 +11,7 @@
 //! A proxy must not move once a server holds its `handler`.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const wire = @import("uplink.wire");
@@ -19,6 +20,7 @@ const Url = wire.url.Url;
 const Client = @import("client/Client.zig");
 const ClientRequest = @import("client/Request.zig");
 const ClientResponse = @import("client/Response.zig");
+const Upgraded = @import("client/Upgraded.zig");
 const Handler = @import("server/Handler.zig");
 const Request = @import("server/Request.zig");
 const Response = @import("server/Response.zig");
@@ -116,6 +118,9 @@ pub const Error = error{
     BodyFailed,
     /// The rewrite hook failed: answered with a 500.
     RewriteFailed,
+    /// No task could be had beside this one to carry a switched
+    /// exchange's two directions: answered with a 500.
+    ConcurrencyUnavailable,
     OutOfMemory,
 };
 
@@ -136,7 +141,7 @@ pub fn forward(p: *const ReverseProxy, io: Io, request: *Request, response: *Res
         error.Canceled => return error.Canceled,
         else => return error.RewriteFailed,
     };
-    const length = declaredLength(&request.headers) catch return answer(io, response, .bad_request);
+    const length = request.length();
     const body: ClientRequest.Body = if (length == 0 or (length == null and request.bodyComplete()))
         .none
     else
@@ -152,8 +157,104 @@ pub fn forward(p: *const ReverseProxy, io: Io, request: *Request, response: *Res
         .expect_continue = request.headers.hasToken("expect", "100-continue") and body != .none,
     }) catch |err| return failedUpstream(io, request, response, err);
     defer upstream.deinit(io);
+    if (upstream.status == .switching_protocols) return switchWith(io, request, response, &upstream);
     return answerWith(io, response, &upstream);
 }
+
+/// After the upstream's 101: the same 101 to the client, then each
+/// connection's bytes to the other until either ends.
+fn switchWith(io: Io, request: *Request, response: *Response, upstream: *ClientResponse) Error!void {
+    const asked = upgradeAsked(request) orelse return answer(io, response, .bad_gateway);
+    const switched = std.mem.trim(u8, upstream.headers.get("upgrade") orelse "", " \t");
+    // Switched to a protocol nobody asked for.
+    if (!std.ascii.eqlIgnoreCase(switched, asked)) return answer(io, response, .bad_gateway);
+    response.status = .switching_protocols;
+    const h = &upstream.headers;
+    for (h.fields) |f| {
+        if (hopByHop(h, f.name) or std.ascii.eqlIgnoreCase(f.name, "content-length")) continue;
+        response.header(f.name, f.value) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return answerReset(io, response, .bad_gateway),
+        };
+    }
+    response.header("Connection", "Upgrade") catch |err| return sendFailed(err);
+    response.header("Upgrade", switched) catch |err| return sendFailed(err);
+    var pipe: Pipe = .{ .upgraded = upstream.upgrade(io) catch return answerReset(io, response, .bad_gateway) };
+    defer pipe.upgraded.close(io);
+    // The protocol keeps its own time now, as a WebSocket's keepalive does.
+    pipe.upgraded.unbind();
+    var ended: [2]Pipe.Ended = undefined;
+    var select: Io.Select(Pipe.Ended) = .init(io, &ended);
+    defer select.cancelDiscard();
+    // Both directions have their tasks before the 101 goes: past it there
+    // is no status left to say that one could not be had.
+    select.concurrent(.up, Pipe.toUpstream, .{ io, &pipe }) catch return error.ConcurrencyUnavailable;
+    select.concurrent(.down, Pipe.toDownstream, .{ io, &pipe }) catch return error.ConcurrencyUnavailable;
+    pipe.take(io, response.hijack(io) catch |err| return sendFailed(err));
+    // Either end ending ends both.
+    _ = select.await() catch return error.Canceled;
+}
+
+/// The two connections of a switched exchange, and a task each way.
+const Pipe = struct {
+    upgraded: Upgraded,
+    /// The client's connection once it is taken over, and the two tasks'
+    /// wait for it.
+    hijacked: aegis.BlockingGuarded(?Response.Hijacked) = .init(null),
+    taken: aegis.Condition = .initLimit(2),
+
+    const Ended = union(enum) { up: void, down: void };
+
+    /// Hand the tasks the client's connection.
+    fn take(pipe: *Pipe, io: Io, hijacked: Response.Hijacked) void {
+        {
+            var held = pipe.hijacked.acquireUncancelable(io);
+            defer held.deinit(io);
+            held.value().* = hijacked;
+        }
+        pipe.taken.broadcast(io);
+    }
+
+    /// The client's connection, once it is taken over.
+    fn awaitTaken(pipe: *Pipe, io: Io) Io.Cancelable!Response.Hijacked {
+        var held = try pipe.hijacked.acquire(io);
+        defer held.deinit(io);
+        while (held.value().* == null) pipe.taken.wait(io, &held, .none) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            // No deadline, and two waiters at most.
+            error.Timeout, error.WaiterLimit => unreachable,
+        };
+        return held.value().*.?;
+    }
+
+    /// The client's bytes to the upstream, until either end ends or fails.
+    fn toUpstream(io: Io, pipe: *Pipe) void {
+        const hijacked = pipe.awaitTaken(io) catch return;
+        const to = pipe.upgraded.writer(io);
+        while (true) {
+            io.checkCancel() catch return;
+            pump(hijacked.reader, to) catch return;
+            pipe.upgraded.flush(io) catch return;
+        }
+    }
+
+    /// The upstream's bytes to the client, until either end ends or fails.
+    fn toDownstream(io: Io, pipe: *Pipe) void {
+        const hijacked = pipe.awaitTaken(io) catch return;
+        const from = pipe.upgraded.reader(io);
+        while (true) {
+            io.checkCancel() catch return;
+            pump(from, hijacked.writer) catch return;
+            hijacked.flush() catch return;
+        }
+    }
+
+    /// One read's worth from `from` into `to`; the end of either is a
+    /// failure here, as it ends the pipe.
+    fn pump(from: *Io.Reader, to: *Io.Writer) error{Ended}!void {
+        _ = from.stream(to, .limited(to.buffer.len)) catch return error.Ended;
+    }
+};
 
 /// Answer with the upstream's response: its status, its fields but those
 /// of its connection, its body as it came, and its trailer.
@@ -170,11 +271,12 @@ fn answerWith(io: Io, response: *Response, upstream: *ClientResponse) Error!void
     }
     const announced = h.get("trailer") != null;
     const length = declaredLength(h) catch return answerReset(io, response, .bad_gateway);
-    if (length) |n| if (!announced) response.setLength(n) catch unreachable; // unreachable: the head has not gone out
+    if (length) |n| if (!announced) response.setLength(n) catch |err| return sendFailed(err);
     const from = upstream.reader(io);
     const to = response.writer(io) catch |err| return sendFailed(err);
     while (true) {
-        const n = from.stream(to, .unlimited) catch |err| switch (err) {
+        // A step moves at most what the response's buffer holds.
+        const n = from.stream(to, .limited(to.buffer.len)) catch |err| switch (err) {
             error.EndOfStream => break,
             error.WriteFailed => return response.failure(),
             error.ReadFailed => {
@@ -280,6 +382,22 @@ fn outboundFields(arena: Allocator, request: *const Request, out: *std.ArrayList
     // asked for none: it is sent what it can read.
     if (!offers_codings) out.appendAssumeCapacity(.{ .name = "Accept-Encoding", .value = "identity" });
     out.appendAssumeCapacity(.{ .name = "Forwarded", .value = try forwardedElement(arena, request) });
+    if (upgradeAsked(request)) |protocol| {
+        try out.append(arena, .{ .name = "Connection", .value = "Upgrade" });
+        try out.append(arena, .{ .name = "Upgrade", .value = protocol });
+    }
+}
+
+/// The protocol an HTTP/1.1 request asks its connection to switch to,
+/// carried past the hop; null when it asks none, or asks `h2c`, which is
+/// the hop's own.
+fn upgradeAsked(request: *const Request) ?[]const u8 {
+    if (request.version != .http1_1) return null;
+    const h = &request.headers;
+    if (!h.hasToken("connection", "upgrade")) return null;
+    const protocol = std.mem.trim(u8, h.get("upgrade") orelse return null, " \t");
+    if (protocol.len == 0 or std.ascii.eqlIgnoreCase(protocol, "h2c")) return null;
+    return protocol;
 }
 
 /// `for`, `host` and `proto` of RFC 7239 for this hop.

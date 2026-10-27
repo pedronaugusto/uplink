@@ -312,7 +312,7 @@ const Versioned = struct {
 
     fn rewriteFn(r: *const ReverseProxy.Rewrite, _: Io, request: *const Request, out: *ReverseProxy.Outbound) anyerror!void {
         const v: *const Versioned = @alignCast(@fieldParentPtr("rewrite", r));
-        out.url = try std.fmt.allocPrint(out.arena, "http://127.0.0.1:{d}/v2{s}", .{ v.upstream_port, request.path });
+        out.url = try out.arena.print("http://127.0.0.1:{d}/v2{s}", .{ v.upstream_port, request.path });
         try out.headers.append(out.arena, .{ .name = "X-Via", .value = "versioned" });
     }
 };
@@ -371,4 +371,47 @@ test "a proxy whose task is canceled while it reaches the upstream ends with no 
     const again = try r.raw(gpa, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
     defer gpa.free(again);
     try testing.expect(std.mem.endsWith(u8, again, "\r\n\r\nhello"));
+}
+
+/// Switch to `echo` when asked, and echo lines until the client leaves;
+/// switch to `other` when asked for `wrong`.
+fn upgrading(io: Io, request: *Request, response: *Response) anyerror!void {
+    const asked = request.headers.get("upgrade") orelse return response.send(io, "not asked");
+    response.status = .switching_protocols;
+    try response.header("Connection", "Upgrade");
+    try response.header("Upgrade", if (std.mem.eql(u8, asked, "wrong")) "other" else asked);
+    const taken = try response.hijack(io);
+    while (true) {
+        const line = taken.reader.takeDelimiterInclusive('\n') catch return;
+        try taken.writer.writeAll(line);
+        try taken.flush();
+    }
+}
+
+test "an upgrade passes through: the upstream's 101, then each side's bytes to the other" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    var f: Fixture = undefined;
+    try f.start(.of(upgrading), "", .{ .upstream = undefined });
+    defer f.stop();
+    var client: Client = .init(gpa, .{});
+    defer client.deinit(io);
+    var buf: [64]u8 = undefined;
+    var response = try client.send(io, .{ .url = f.front.url(&buf, "/"), .headers = &.{ .{ .name = "Connection", .value = "Upgrade" }, .{ .name = "Upgrade", .value = "echo" } } });
+    defer response.deinit(io);
+    try testing.expectEqual(std.http.Status.switching_protocols, response.status);
+    try testing.expectEqualStrings("echo", response.headers.get("upgrade").?);
+    var upgraded = try response.upgrade(io);
+    defer upgraded.close(io);
+    for ([_][]const u8{ "ping\n", "and again\n" }) |line| {
+        try upgraded.writer(io).writeAll(line);
+        try upgraded.flush(io);
+        const echoed = try upgraded.reader(io).takeDelimiterInclusive('\n');
+        try testing.expectEqualStrings(line, echoed);
+    }
+
+    // An upstream that switches to a protocol not asked for is a 502.
+    var wrong = try client.send(io, .{ .url = f.front.url(&buf, "/"), .headers = &.{ .{ .name = "Connection", .value = "Upgrade" }, .{ .name = "Upgrade", .value = "wrong" } } });
+    defer wrong.deinit(io);
+    try testing.expectEqual(std.http.Status.bad_gateway, wrong.status);
 }
