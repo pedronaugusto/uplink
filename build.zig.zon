@@ -16,8 +16,8 @@
     },
     .dependencies = .{
         .aegis = .{
-            .url = "git+https://github.com/pedronaugusto/aegis?ref=v0.1.17#58751d5713c134b890d0fe0e65be95c289b84983",
-            .hash = "aegis-0.1.17-rsxouvg5CABaJmNEkRXQIkVJ6JqVOG7NN60ctSBvSzO_",
+            .url = "git+https://github.com/pedronaugusto/aegis?ref=secretbytes-unmanaged#3dd390afd0ea71d63b26662d9d993b60200acd3b",
+            .hash = "aegis-0.1.18-rsxouv22CAB8z3YZeX530Qh9OaiKeE_4m3jgrWTgFa6p",
         },
 
         .reactor = .{
@@ -27,8 +27,8 @@
         },
 
         .cloak = .{
-            .url = "git+https://github.com/pedronaugusto/cloak#0f0f02e38fcadc83d1ce31f55164628ac4b80890",
-            .hash = "cloak-0.22.2-9onwcQ9wCwT13Y6BjhjE5hfe5ObdFd6AoNeatSorc91z",
+            .url = "git+https://github.com/pedronaugusto/cloak#f08a6474c9a8bbf27451423c21eacd321d029a4e",
+            .hash = "cloak-0.22.2-9onwcaPgMgQgK0jKcjVsvSeT_LvK2etC9t-FyYs5m8kN",
             .lazy = true,
         },
 

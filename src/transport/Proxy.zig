@@ -134,14 +134,14 @@ pub fn parseKept(gpa: Allocator, arena: Allocator, credential: *?aegis.SecretByt
     // more than four times `text`, and a prefix of `http://`.
     const room = text.len * 4 + 64;
     var scratch: aegis.SecretBytes = try .init(gpa, room);
-    defer scratch.deinit();
+    defer scratch.deinit(gpa);
     scratch.resizeWithinCapacity(room) catch unreachable; // unreachable: `room` is the capacity just made
     var fixed: std.heap.FixedBufferAllocator = .init(scratch.exposeMut());
     var proxy = try parse(fixed.allocator(), text, rules);
     proxy.host = try arena.dupe(u8, proxy.host);
     if (proxy.credential) |c| {
         var kept: aegis.SecretBytes = try .init(gpa, c.user.len + c.password.len);
-        errdefer kept.deinit();
+        errdefer kept.deinit(gpa);
         kept.resizeWithinCapacity(c.user.len + c.password.len) catch unreachable; // unreachable: the capacity just made
         const bytes = kept.exposeMut();
         @memcpy(bytes[0..c.user.len], c.user);
@@ -412,7 +412,7 @@ test "a kept parse leaves the password in its secret and in no freed memory unwi
     try testing.expectEqualStrings("user", p.credential.?.user);
     try testing.expectEqualStrings("pwtoken!", p.credential.?.password);
     try testing.expectEqualStrings("userpwtoken!", credential.?.expose());
-    credential.?.deinit();
+    credential.?.deinit(unwiped.allocator());
     arena.deinit();
     try testing.expect(!unwiped.found);
     var none: ?aegis.SecretBytes = null;
