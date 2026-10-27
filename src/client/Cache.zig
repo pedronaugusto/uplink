@@ -212,9 +212,14 @@ pub const Memory = struct {
         writing: bool = true,
 
         fn size(i: *const Item) u64 {
-            return i.key.len + i.vary.len + i.head.len + i.body.items.len + @sizeOf(Item);
+            return i.key.len + i.vary.len + i.head.len + i.body.items.len + overhead;
         }
     };
+
+    /// What each variant costs against `max_bytes` beyond its key, its
+    /// `Vary` values, its head and its body: the store's record of it,
+    /// whose size the build decides, a safe build's being larger.
+    pub const overhead: u64 = @sizeOf(Item);
 
     pub fn init(gpa: Allocator, max_bytes: aegis.units.Bytes(u64)) Memory {
         return .{ .gpa = gpa, .max_bytes = max_bytes.raw(), .state = .init(.{}) };
