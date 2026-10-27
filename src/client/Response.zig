@@ -27,6 +27,7 @@ const Context = @import("../transport/Context.zig");
 const Diagnostics = @import("../transport/Diagnostics.zig");
 const Pool = @import("../pool/Pool.zig");
 const Body = @import("../transport/Body.zig");
+const span = @import("../span.zig");
 const Head = @import("../transport/Head.zig");
 const Decoder = @import("../coding/Decoder.zig");
 const Upgraded = @import("Upgraded.zig");
@@ -320,9 +321,8 @@ fn streamError(st: *const H2.Stream) ReadError {
 }
 
 /// Release the response. Its connection is kept for the next exchange when
-/// the body was read to its end, or what was left of it was no more than
-/// the pool's `drain_limit` and came within the activity timeout, and
-/// nothing said to close it.
+/// the body was read to its end, or what was left of it ended within the
+/// pool's `drain` (its bytes, by its time), and nothing said to close it.
 pub fn deinit(r: *Response, io: Io) void {
     if (r.tee) |*t| {
         // Kept only when the body ended whole, every byte of it through the
@@ -417,27 +417,18 @@ pub fn releaseHead(r: *Response, io: Io) void {
     r.* = undefined;
 }
 
-/// Read what is left of the body, as it came, when it is no more than the
-/// pool's `drain_limit`, so the connection can be kept.
+/// Read what is left of the body, as it came, within the pool's `drain`,
+/// so the connection can be kept; one that does not end within it is left,
+/// and the connection with it.
 fn drain(r: *Response, io: Io) void {
-    var left: usize = r.pool.options.drain_limit.raw();
-    if (left == 0) return;
+    const budget = r.pool.options.drain;
     if (!r.started) {
         r.started = true;
         r.body.in = r.conn.?.reader();
     }
     r.body.trailer_io = io;
-    switch (r.body.framing) {
-        // A known length past the limit is not worth reading.
-        .length => if (r.body.remaining > left) return,
-        .chunked => {},
-        .none, .until_close => return,
-    }
-    while (left > 0) {
-        const n = r.body.interface.discard(.limited(left)) catch return;
-        if (n == 0) return;
-        left -= n;
-    }
+    r.conn.?.drainBy(Io.Clock.awake.now(io).addDuration(span.toIo(budget.time)));
+    _ = r.body.drain(budget.bytes);
 }
 
 /// Give a connection back after its exchange: kept when `reusable`, closed

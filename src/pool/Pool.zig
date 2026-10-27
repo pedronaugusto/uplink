@@ -23,6 +23,7 @@ const Io = std.Io;
 const awake = @import("../transport/awake.zig");
 const Duration = @import("../span.zig").Duration;
 const Connection = @import("../transport/Connection.zig");
+const Body = @import("../transport/Body.zig");
 const H2 = @import("../transport/H2.zig");
 const Route = @import("../transport/Context.zig").Route;
 
@@ -63,10 +64,10 @@ pub const Options = struct {
     /// A connection idle longer is closed instead of used; null keeps it
     /// until the server closes it.
     idle_timeout: ?Duration = .literal("90s"),
-    /// The most of an unread body a finished response reads to keep its
-    /// connection, within the activity timeout; past it, the connection is
-    /// closed.
-    drain_limit: aegis.units.Bytes(u32) = .literal("64KiB"),
+    /// What a finished response reads of a body left unread to keep its
+    /// connection: a body that does not end within it closes the connection
+    /// instead.
+    drain: Body.Drain = .{},
 };
 
 /// A connection of whichever protocol it speaks: HTTP/1.1, held by one

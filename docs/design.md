@@ -172,9 +172,12 @@ the lock, and say so where they are declared.
   first served, until a connection comes back or closes, its deadline passes or
   its task is canceled. A connection given back goes straight to the first
   waiter.
-- **A response released with a little of its body unread reads it**, up to
-  `drain_limit` (64 KiB), within the activity timeout, so the connection can be
-  kept instead of closed.
+- **A response released with a little of its body unread reads it**, within
+  one budget, `drain` (64 KiB, all of it by 100 ms from the drain's start), so
+  the connection can be kept instead of closed. A body that does not end within
+  it, whatever kept it (more left, a trickling peer, an event stream), closes
+  the connection instead, as Go's client does; the server drains a request's
+  unread body by the same rule.
 - **An idle connection holds no I/O buffer of its own.** Buffers come from the
   client's `BufferPool` in three sizes (4 KiB, one TLS record, 72 KiB) and go
   back when the connection is put away; a response's head, its fields and its
@@ -221,7 +224,7 @@ the lock, and say so where they are declared.
   observer is told a step took. It reads and writes the same text a command
   line or a configuration file would (`30s`, `250ms`), a default is written
   so (`.literal("90s")`), and it logs with `{f}`. Sizes are aegis's `Bytes`
-  the same way (`max_head`, `drain_limit`, the zstd window). std's
+  the same way (`max_head`, `drain.bytes`, the zstd window). std's
   `Io.Duration` is met only where an `Io` call takes one.
 - **Instants on the awake clock are a type of their own** (`transport.awake`),
   stored as `i64` nanoseconds in the pool's idle list. A time

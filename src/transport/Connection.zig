@@ -436,6 +436,15 @@ pub fn awaitReadable(conn: *Connection, io: Io, timeout: Io.Duration) Io.Cancela
     return Timed.awaitReadable(io, conn.stream.borrow().socket.handle, &conn.input.interface, timeout);
 }
 
+/// The exchange is over, and what is left of its body must end by `until`
+/// for the connection to be kept, as a drain's must: every operation from
+/// here ends at the nearer of `until` and the exchange's own deadline. What
+/// the drain meets is no longer the exchange's to hear of.
+pub fn drainBy(conn: *Connection, until: Io.Timestamp) void {
+    conn.diagnostics = null;
+    if (conn.deadline == null or until.nanoseconds < conn.deadline.?.nanoseconds) conn.deadline = until;
+}
+
 /// Bound no read or write by a timeout any more: what the connection
 /// carries now, after an upgrade, keeps its own.
 pub fn unbind(conn: *Connection) void {

@@ -13,6 +13,7 @@ const wire = @import("uplink.wire");
 const h1 = wire.h1;
 const tls = @import("../tls.zig");
 const span = @import("../span.zig");
+const Body = @import("../transport/Body.zig");
 const Duration = span.Duration;
 const BufferPool = @import("../transport/BufferPool.zig");
 const Timed = @import("../net/Timed.zig");
@@ -87,9 +88,10 @@ pub const Options = struct {
     /// should fix the window scale are set on the listener, before it
     /// listens (`reactor.net.listen`).
     socket: reactor.net.SocketOptions = .{ .nodelay = true },
-    /// The most of a request body left unread that the server reads, after
-    /// the handler, to keep the connection; past it, the connection closes.
-    drain_limit: aegis.units.Bytes(u32) = .literal("64KiB"),
+    /// What the server reads of a request body left unread, after the
+    /// handler, to keep the connection: a body that does not end within it
+    /// closes the connection instead.
+    drain: Body.Drain = .{},
     /// Compress responses the client accepts a coding for; null sends every
     /// body as the handler wrote it.
     compression: ?Compression = null,

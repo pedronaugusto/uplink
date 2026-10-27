@@ -569,6 +569,37 @@ test "a head sent a byte at a time is cut off at the head timeout, whatever its 
     try testing.expect(took.nanoseconds < 3 * std.time.ns_per_s);
 }
 
+test "a request body left unread that does not end within the drain closes the connection, whatever its pace" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const running = try Running.start(gpa, .{}, .of(hello));
+    defer running.stop();
+    const stream = try dialRaw(running);
+    defer stream.close(io);
+    const Trickle = struct {
+        fn run(s: Io.net.Stream) Io.Cancelable!void {
+            const tio = test_io.io();
+            var wbuf: [128]u8 = undefined;
+            var w = s.writer(tio, &wbuf);
+            w.interface.writeAll("POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n") catch return;
+            while (true) {
+                w.interface.writeAll("1\r\na\r\n") catch return;
+                w.interface.flush() catch return;
+                try tio.sleep(.fromMilliseconds(20), .awake);
+            }
+        }
+    };
+    var trickle = io.concurrent(Trickle.run, .{stream}) catch return error.SkipZigTest;
+    // glint-ignore: Z026 -- the trickle ends canceled; its result is not what the test checks
+    defer trickle.cancel(io) catch {};
+    // The answer, then the connection's end at the drain's time (100 ms),
+    // where the body would never end.
+    const got, const took = try readToEnd(stream, gpa);
+    defer gpa.free(got);
+    try testing.expect(std.mem.endsWith(u8, got, "hello"));
+    try testing.expect(took.nanoseconds < 3 * std.time.ns_per_s);
+}
+
 test "a kept connection idle past the idle timeout is closed" {
     const gpa = testing.allocator;
     const io = test_io.io();

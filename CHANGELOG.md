@@ -16,6 +16,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- The unread body a finished exchange drains has one budget, `transport.Body.Drain` (`bytes`, 64 KiB, and `time`, 100 ms, from the drain's start), on both ends: `Pool.Options.drain` and `server.Options.drain` replace `drain_limit`. A body that does not end within it closes its connection instead of keeping it.
 - `Upgraded` carries a connection or an HTTP/2 stream: `Upgraded.carrier` replaces its `conn` field. `Response.UpgradeError` gains `OutOfMemory` (a stream's buffers), and the client's errors (`Client.SendError`, `Outgoing.FinishError`, `ws.ConnectError`) gain `ExtendedConnectUnsupported`.
 - The client decodes only the codings it offered: a request that names its own `Accept-Encoding` reads its body as it came, `Content-Encoding` and all, as Go's transport does, where a client with `decompress` decoded every body under gzip, deflate or zstd whoever asked for them.
 - A dial's stream has its one owner: `net.Dialed.stream` is an `aegis.own.OwnedIo` over the stream, closed by `stream.deinit(io)` and reached with `stream.borrow()`, which checks in Debug that it is closed once and not moved once in use. A client connection and a server's socket keep it the same way.
@@ -30,6 +31,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A response released with its body unread no longer waits on a body that trickles: the drain was bounded in bytes, and in time only per read, so an event stream's keep-alives or any slow peer held `Response.deinit` for as long as `drain_limit` took to arrive at their pace (minutes) before pooling the connection. The drain now ends at its time, and the connection is closed. A server draining a request's unread body had the same flaw and the same fix.
 - A 101 the caller does not take over (`Response.upgrade`) gives its connection back to no later request: the connection speaks another protocol after it, and was kept as an HTTP/1.1 one.
 - A server's answer to a `HEAD`, or a 304, with a declared length and no body written says that length and keeps its connection, where `end` took it for a short body and closed the connection.
 

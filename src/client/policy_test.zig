@@ -470,7 +470,7 @@ test "a body left unread is drained when it is small, so the connection is kept"
     defer server.stop();
     var buf: [64]u8 = undefined;
     for ([_]struct { u32, u64 }{ .{ 64 << 10, 1 }, .{ 10, 3 } }) |case| {
-        var client: Client = .init(gpa, .{ .pool = .{ .drain_limit = .fromRaw(case[0]) } });
+        var client: Client = .init(gpa, .{ .pool = .{ .drain = .{ .bytes = .fromRaw(case[0]) } } });
         defer client.deinit(io);
         for (0..3) |_| {
             var response = try client.send(io, .{ .url = server.url(&buf, "/") });
@@ -478,6 +478,35 @@ test "a body left unread is drained when it is small, so the connection is kept"
         }
         try testing.expectEqual(case[1], client.stats().connections_opened);
     }
+}
+
+/// A chunked body that trickles, a one-byte chunk every 20 ms for 10 s, as
+/// an event stream's keep-alives do.
+const trickling = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" ++ chunks: {
+    const chunk = "1\r\n:\r\n";
+    var all: [chunk.len * 500]u8 = undefined;
+    for (0..500) |i| @memcpy(all[i * chunk.len ..][0..chunk.len], chunk);
+    const done = all;
+    break :chunks &done;
+} ++ "0\r\n\r\n";
+
+test "a body that does not end within the drain's time closes its connection, and deinit returns by it" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const server = try Server.start(gpa, io, Server.fixedAnswer(.{ .bytes = trickling, .piece = 6, .pause = .fromMilliseconds(20) }));
+    defer server.stop();
+    var buf: [64]u8 = undefined;
+    var client: Client = .init(gpa, .{});
+    defer client.deinit(io);
+    var response = try client.send(io, .{ .url = server.url(&buf, "/") });
+    const start = Io.Clock.awake.now(io);
+    response.deinit(io);
+    // The default drain's 100 ms, and room for a loaded machine; the body
+    // itself would take 10 s.
+    try testing.expect(start.durationTo(Io.Clock.awake.now(io)).toMilliseconds() < 2000);
+    var again = try client.send(io, .{ .url = server.url(&buf, "/") });
+    again.deinit(io);
+    try testing.expectEqual(@as(u64, 2), client.stats().connections_opened);
 }
 
 test "a request's deadline bounds its head and its body's reads" {

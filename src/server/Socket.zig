@@ -57,6 +57,8 @@ pub const Phase = enum {
     idle,
     head,
     answer,
+    /// Reading what a request left of its body, by the drain's time.
+    drain,
     /// The handler took the connection over: it keeps its own time.
     hijacked,
     /// HTTP/2 with streams open: a read waits as long as they take.
@@ -65,7 +67,7 @@ pub const Phase = enum {
 
 /// What starts a phase: the next wait the connection does, or the handler
 /// taking it over.
-pub const Start = enum { handshake, idle, head, answer, h2, hijack };
+pub const Start = enum { handshake, idle, head, answer, drain, h2, hijack };
 
 /// Which wait an operation belongs to. TLS's handshake comes first and only
 /// first; a handler that takes the connection over ends it; any other wait
@@ -73,7 +75,7 @@ pub const Start = enum { handshake, idle, head, answer, h2, hijack };
 const Phases = aegis.state.Machine(Phase, Start, .{ .initial = .head, .terminal = &.{.hijacked}, .edges = &phase_edges });
 const phase_edges = edges: {
     const Edge = aegis.state.Edge(Phase, Start);
-    const waits = [_]Phase{ .idle, .head, .answer, .h2 };
+    const waits = [_]Phase{ .idle, .head, .answer, .drain, .h2 };
     var list: [4 + waits.len * (waits.len + 1)]Edge = undefined;
     var n: usize = 0;
     list[n] = .{ .from = .head, .on = .handshake, .to = .handshake };
@@ -159,6 +161,12 @@ pub fn alpn(c: *const Socket) []const u8 {
     if (!c.secure) return "";
     const info = c.session.info() orelse return "";
     return info.alpn;
+}
+
+/// Read what a request left of its body: until `time` from now.
+pub fn startDrain(c: *Socket, io: Io, time: span.Duration) void {
+    c.enter(.drain);
+    c.until = Io.Clock.awake.now(io).addDuration(span.toIo(time));
 }
 
 /// Answer a request: each operation ends at the activity timeout.
@@ -386,7 +394,7 @@ pub fn failed(c: *const Socket) Failure {
 fn deadline(c: *Socket, op: Io.Operation) ?Io.Timestamp {
     if (c.multiplexed and op != .net_read) return c.activityDeadline();
     return switch (c.phase.current()) {
-        .handshake, .idle, .head => c.until,
+        .handshake, .idle, .head, .drain => c.until,
         .hijacked, .h2 => null,
         .answer => c.activityDeadline(),
     };

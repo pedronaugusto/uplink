@@ -13,6 +13,7 @@ const wire = @import("uplink.wire");
 const h1 = wire.h1;
 const Field = wire.fields.Field;
 const BufferPool = @import("BufferPool.zig");
+const Duration = @import("../span.zig").Duration;
 
 const Body = @This();
 
@@ -200,6 +201,37 @@ pub fn trailerBytes(b: *Body) ?[]u8 {
 /// compares the length itself, before reading.
 pub fn cap(b: *Body, max: u64) void {
     b.allowed = max;
+}
+
+/// What one end reads of a body left unread, after its exchange, so the
+/// connection can carry the next: at most `bytes`, all of it by `time` from
+/// the drain's start. A body that does not end within both is not read on:
+/// its connection is closed instead, whatever kept it from ending (more
+/// than `bytes` left, a peer that trickles, an event stream that never
+/// ends).
+pub const Drain = struct {
+    bytes: aegis.units.Bytes(u32) = .literal("64KiB"),
+    time: Duration = .literal("100ms"),
+};
+
+/// Reads the rest of the body for a drain of `bytes`, and says whether the
+/// body ended within it. The caller bounds the reads by the drain's time;
+/// one that ran past it fails, and the body has not ended.
+pub fn drain(b: *Body, bytes: aegis.units.Bytes(u32)) bool {
+    if (b.complete()) return true;
+    var left: usize = bytes.raw();
+    switch (b.framing) {
+        // A known length past the budget is not worth reading.
+        .length => if (b.remaining > left) return false,
+        .chunked => {},
+        .none, .until_close => return false,
+    }
+    while (left > 0) {
+        const n = b.interface.discard(.limited(left)) catch return b.complete();
+        if (n == 0) break;
+        left -= n;
+    }
+    return b.complete();
 }
 
 /// `limit`, no more than `available` and no more than the cap leaves; a

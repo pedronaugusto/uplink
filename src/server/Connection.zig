@@ -228,24 +228,15 @@ fn serveOne(c: *Connection) bool {
 }
 
 /// The request's body, read to its end so the connection can carry the
-/// next: what is left of it, when that is within `drain_limit`. A client
-/// still waiting for `100 Continue` will not send it at all, so its
+/// next: what is left of it, when it ends within the server's `drain`. A
+/// client still waiting for `100 Continue` will not send it at all, so its
 /// connection is closed instead.
 fn finishBody(c: *Connection, request: *Request) bool {
     if (request.body.complete()) return true;
     if (request.expects_continue and !request.continued) return false;
-    var left: usize = c.socket.context.options.drain_limit.raw();
-    switch (request.body.framing) {
-        .length => if (request.body.remaining > left) return false,
-        .chunked => {},
-        .none, .until_close => return false,
-    }
-    while (left > 0) {
-        const n = request.body.interface.discard(.limited(left)) catch |err| return err == error.EndOfStream and request.body.complete();
-        if (n == 0) break;
-        left -= n;
-    }
-    return request.body.complete();
+    const budget = c.socket.context.options.drain;
+    c.socket.startDrain(c.socket.io, budget.time);
+    return request.body.drain(budget.bytes);
 }
 
 /// The most bytes of settings an upgrade's `HTTP2-Settings` may carry:
