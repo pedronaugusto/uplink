@@ -251,22 +251,40 @@ pub fn trailers(r: *Response) ?fields.Headers {
 pub const UpgradeError = error{
     /// Not a 101, nor a 2xx to `CONNECT`, or the body was read.
     NotUpgraded,
+    /// No buffer for a stream's writes.
+    OutOfMemory,
 };
 
 /// After a `101 Switching Protocols`, or a 2xx to a `CONNECT` the caller
-/// sent: the connection, for the caller to speak its new protocol on. The
+/// sent: the connection, or after an extended `CONNECT` over HTTP/2 its
+/// stream, for the caller to speak its new protocol on. The
 /// response is spent: only `deinit` is owed, which then releases its
 /// buffers alone.
 pub fn upgrade(r: *Response, io: Io) UpgradeError!Upgraded {
-    const conn = r.conn orelse return error.NotUpgraded;
     const code = @backingInt(r.status);
-    if (code != 101 and !(r.tunnel and code / 100 == 2)) return error.NotUpgraded;
     if (r.started) return error.NotUpgraded;
+    if (r.stream) |st| {
+        // An extended `CONNECT`'s stream: its data both ways from here.
+        if (!(r.tunnel and code / 100 == 2)) return error.NotUpgraded;
+        const out = try r.ctx.buffers.acquire(io, .small);
+        errdefer r.ctx.buffers.release(io, out);
+        // What the stream carries is read as a connection would be,
+        // through a buffer of its own.
+        const in = try r.ctx.buffers.acquire(io, .record);
+        st.read_deadline = null;
+        st.interface.buffer = in;
+        r.stream = null;
+        var u: Upgraded = .{ .ctx = r.ctx, .pool = r.pool, .carrier = .{ .stream = .{ .h2 = r.h2.?, .stream = st } }, .tunnel_buffer = out, .tunnel_in = in };
+        u.tunnel.buffer = out;
+        return u;
+    }
+    const conn = r.conn orelse return error.NotUpgraded;
+    if (code != 101 and !(r.tunnel and code / 100 == 2)) return error.NotUpgraded;
     conn.io = io;
     conn.deadline = null;
     conn.diagnostics = null;
     r.conn = null;
-    return .{ .ctx = r.ctx, .pool = r.pool, .conn = conn };
+    return .{ .ctx = r.ctx, .pool = r.pool, .carrier = .{ .conn = conn } };
 }
 
 /// The whole body, at most `limit` bytes, in `gpa`.
@@ -455,7 +473,10 @@ pub fn fromStream(io: Io, ctx: *Context, pool: *Pool, h: *H2, st: *H2.Stream, op
     errdefer ctx.buffers.release(io, buffer);
     const status: std.http.Status = @fromBackingInt(st.status.?);
     const code = st.status.?;
-    const bodiless = options.method.bodiless() or code == 204 or code == 304;
+    // A 2xx to an extended `CONNECT`: the stream's data is the tunnel's,
+    // no body, and never decoded.
+    const tunnel = options.method.eql(.CONNECT) and code / 100 == 2;
+    const bodiless = tunnel or options.method.bodiless() or code == 204 or code == 304;
     st.read_deadline = options.deadline;
     var response: Response = .{
         .status = status,
@@ -472,8 +493,9 @@ pub fn fromStream(io: Io, ctx: *Context, pool: *Pool, h: *H2, st: *H2.Stream, op
         // The stream ends the exchange; the connection goes on regardless.
         .keep_alive = true,
         .body = .init(Io.Reader.ending, if (bodiless) .none else .until_close, buffer),
+        .tunnel = tunnel,
     };
-    if (options.decompress) try response.planDecoding(io);
+    if (options.decompress and !tunnel) try response.planDecoding(io);
     return response;
 }
 

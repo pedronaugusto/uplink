@@ -179,7 +179,10 @@ fn switchWith(io: Io, request: *Request, response: *Response, upstream: *ClientR
     }
     response.header("Connection", "Upgrade") catch |err| return sendFailed(err);
     response.header("Upgrade", switched) catch |err| return sendFailed(err);
-    var pipe: Pipe = .{ .upgraded = upstream.upgrade(io) catch return answerReset(io, response, .bad_gateway) };
+    var pipe: Pipe = .{ .upgraded = upstream.upgrade(io) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.NotUpgraded => return answerReset(io, response, .bad_gateway),
+    } };
     defer pipe.upgraded.close(io);
     // The protocol keeps its own time now, as a WebSocket's keepalive does.
     pipe.upgraded.unbind();

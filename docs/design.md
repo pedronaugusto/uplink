@@ -391,7 +391,19 @@ the lock, and say so where they are declared.
   and know nothing of WebSocket. The codec (`wire.ws`) is sans-I/O. On
   HTTP/2, `hijack` after a 2xx to an extended `CONNECT` hands over the
   stream instead of the connection, and a WebSocket over it is the same
-  `Conn`.
+  `Conn`. The client's side is the same: a request with `protocol` is an
+  extended `CONNECT`, and `upgrade` after its 2xx hands over the stream
+  (`Upgraded.carrier`), its writes DATA through a buffer of the pool and
+  its reads through one, as a connection's are.
+- **The client asks HTTP/2 first, as it negotiates anything.** `connect`
+  sends an extended `CONNECT` when the client speaks HTTP/2; the client
+  waits for the server's first SETTINGS before it does (RFC 8441 §3), and
+  a connection in HTTP/1.1 or a server without
+  `SETTINGS_ENABLE_CONNECT_PROTOCOL` refuses it with nothing sent
+  (`ExtendedConnectUnsupported`), so `connect` asks by `Upgrade` next, on
+  the HTTP/1.1 connection kept for it. Not a fallback that hides a
+  failure: the two forms are one handshake in two versions, as ALPN picks
+  a version.
 - **A message is a stream.** The reader yields a message's payload as it
   arrives across its frames, answering control frames between them, so a
   message of any size costs its reader's buffer, and the limits are checked

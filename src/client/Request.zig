@@ -38,6 +38,13 @@ expect_continue: bool = false,
 auth: ?Auth = null,
 /// Where a failure's details go.
 diagnostics: ?*Diagnostics = null,
+/// An extended `CONNECT` (RFC 8441): with method `CONNECT`, the protocol
+/// the request's stream is to carry, `websocket` for one, over HTTP/2 to
+/// a server whose settings allow it. After a 2xx, `Response.upgrade`
+/// hands the stream over. A connection that speaks HTTP/1.1, or a server
+/// that does not allow it, is `ExtendedConnectUnsupported`, with nothing
+/// sent.
+protocol: ?[]const u8 = null,
 
 /// What follows the head.
 pub const Body = union(enum) {

@@ -212,7 +212,8 @@ pub const Opened = struct {
 pub const ConnectError = Client.SendError || error{
     /// A URL whose scheme is not `ws` or `wss`.
     InvalidWebSocketUrl,
-    /// The server answered with something other than 101.
+    /// The server answered with something other than 101, or over
+    /// HTTP/2 a 2xx.
     HandshakeRefused,
     /// A 101 that is not a WebSocket's: a wrong `Sec-WebSocket-Accept`,
     /// an `Upgrade` or `Connection` missing, a subprotocol or extension
@@ -222,21 +223,40 @@ pub const ConnectError = Client.SendError || error{
 
 /// Open a WebSocket to `url` (`ws://` or `wss://`) through `client`,
 /// into `out`, which must stay where it is while the connection is used.
+/// When the client speaks HTTP/2 the WebSocket is asked for as an extended
+/// `CONNECT` (RFC 8441), a stream of a shared connection; a connection in
+/// HTTP/1.1, or a server whose settings do not take one, is asked by
+/// `Upgrade` instead, as RFC 6455 has it, nothing having been sent.
 pub fn connect(out: *Opened, client: *Client, gpa: Allocator, io: Io, url: []const u8, options: ConnectOptions) ConnectError!void {
     var url_buffer: [8192]u8 = undefined;
     const http_url = httpUrl(url, &url_buffer) orelse return error.InvalidWebSocketUrl;
+    if (client.shared.options.http2 != .off) {
+        if (open(out, client, gpa, io, http_url, options, .h2)) return else |err| switch (err) {
+            error.ExtendedConnectUnsupported => {},
+            else => |e| return e,
+        }
+    }
+    return open(out, client, gpa, io, http_url, options, .http1_1);
+}
+
+/// The handshake in one version's form: HTTP/1.1's `Upgrade`, or HTTP/2's
+/// extended `CONNECT`.
+fn open(out: *Opened, client: *Client, gpa: Allocator, io: Io, http_url: []const u8, options: ConnectOptions, version: wire.Version) ConnectError!void {
+    const over_h2 = version == .h2;
     var random: [16]u8 = undefined;
     io.random(&random);
     const key = ws.keyOf(random);
     var headers: [12]std.http.Header = undefined;
     var n: usize = 0;
-    headers[n] = .{ .name = "Connection", .value = "Upgrade" };
-    n += 1;
-    headers[n] = .{ .name = "Upgrade", .value = "websocket" };
-    n += 1;
+    if (!over_h2) {
+        headers[n] = .{ .name = "Connection", .value = "Upgrade" };
+        n += 1;
+        headers[n] = .{ .name = "Upgrade", .value = "websocket" };
+        n += 1;
+        headers[n] = .{ .name = "Sec-WebSocket-Key", .value = &key };
+        n += 1;
+    }
     headers[n] = .{ .name = "Sec-WebSocket-Version", .value = "13" };
-    n += 1;
-    headers[n] = .{ .name = "Sec-WebSocket-Key", .value = &key };
     n += 1;
     var protocols_buffer: [512]u8 = undefined;
     if (options.protocols.len != 0) {
@@ -264,13 +284,22 @@ pub fn connect(out: *Opened, client: *Client, gpa: Allocator, io: Io, url: []con
     @memcpy(all[0..n], headers[0..n]);
     const extra = @min(options.headers.len, all.len - n);
     @memcpy(all[n..][0..extra], options.headers[0..extra]);
-    var response = try client.send(io, .{ .url = http_url, .headers = all[0 .. n + extra] });
+    var response = try client.send(io, .{
+        .method = if (over_h2) .CONNECT else .GET,
+        .url = http_url,
+        .headers = all[0 .. n + extra],
+        .protocol = if (over_h2) "websocket" else null,
+    });
     defer response.deinit(io);
-    if (response.status != .switching_protocols) return error.HandshakeRefused;
     const rh = &response.headers;
-    if (!rh.hasToken("upgrade", "websocket") or !rh.hasToken("connection", "upgrade")) return error.InvalidHandshake;
-    const expected = ws.acceptKey(&key);
-    if (!std.mem.eql(u8, std.mem.trim(u8, rh.get("sec-websocket-accept") orelse "", " \t"), &expected)) return error.InvalidHandshake;
+    if (over_h2) {
+        if (@backingInt(response.status) / 100 != 2) return error.HandshakeRefused;
+    } else {
+        if (response.status != .switching_protocols) return error.HandshakeRefused;
+        if (!rh.hasToken("upgrade", "websocket") or !rh.hasToken("connection", "upgrade")) return error.InvalidHandshake;
+        const expected = ws.acceptKey(&key);
+        if (!std.mem.eql(u8, std.mem.trim(u8, rh.get("sec-websocket-accept") orelse "", " \t"), &expected)) return error.InvalidHandshake;
+    }
     out.protocol = null;
     if (rh.get("sec-websocket-protocol")) |chosen| {
         const p = std.mem.trim(u8, chosen, " \t");
@@ -298,7 +327,10 @@ pub fn connect(out: *Opened, client: *Client, gpa: Allocator, io: Io, url: []con
         if (d.client_max_window_bits == null and c.window_bits < 15) d.client_max_window_bits = c.window_bits;
         agreed = d;
     }
-    out.stream = response.upgrade(io) catch return error.InvalidHandshake;
+    out.stream = response.upgrade(io) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.NotUpgraded => error.InvalidHandshake,
+    };
     out.stream.unbind();
     out.conn = .init(gpa, .client, .{
         .reader = out.stream.reader(io),

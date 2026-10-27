@@ -29,6 +29,7 @@ const Context = @import("Context.zig");
 const BufferPool = @import("BufferPool.zig");
 const span = @import("../span.zig");
 const Outbox = @import("Outbox.zig");
+const Timed = @import("../net/Timed.zig");
 
 const H2 = @This();
 
@@ -301,6 +302,9 @@ pub const Stream = struct {
     read_io: Io = undefined,
     read_deadline: ?Io.Timestamp = null,
     read_failure: ?Error = null,
+    /// No activity timeout bounds the reads: a tunnel's protocol keeps
+    /// its own time.
+    unbound: bool = false,
 
     /// The response's data, as it comes.
     pub fn reader(st: *Stream, io: Io) *Io.Reader {
@@ -325,7 +329,7 @@ pub const Stream = struct {
         const io = st.read_io;
         var held = h.shared.acquire(io) catch return error.Canceled;
         defer held.deinit(io);
-        const until = h.waitUntil(io, st.read_deadline);
+        const until = if (st.unbound) st.read_deadline else h.waitUntil(io, st.read_deadline);
         while (st.recv_len == 0) {
             if (st.recv_end) return error.EndOfStream;
             try h.failed(st, held.value());
@@ -342,6 +346,25 @@ pub const Stream = struct {
         };
         h.post(io, &held);
         return n;
+    }
+
+    /// Wait up to `timeout` for data, the stream's end or its failure,
+    /// which the next read finds; a wait that times out leaves the stream
+    /// and the connection as they were.
+    pub fn awaitReadable(st: *Stream, io: Io, timeout: Io.Duration) Io.Cancelable!Timed.Readiness {
+        const h = st.h2;
+        var held = h.shared.acquire(io) catch return error.Canceled;
+        defer held.deinit(io);
+        const until = Io.Clock.awake.now(io).addDuration(timeout);
+        while (st.recv_len == 0 and !st.recv_end) {
+            h.failed(st, held.value()) catch return .ready;
+            h.pump(io, &held, until) catch |err| switch (err) {
+                error.TimedOut => return .timed_out,
+                error.Canceled => return error.Canceled,
+                else => return .ready,
+            };
+        }
+        return .ready;
     }
 };
 
@@ -380,6 +403,25 @@ fn failed(h: *H2, st: *const Stream, shared: *const Shared) Error!void {
         .protocol => error.ConnectionFailed,
         .io => |err| err,
     };
+}
+
+/// The server's settings, once its first SETTINGS frame came, reading
+/// frames for every stream meanwhile, no longer than `deadline` or the
+/// activity timeout.
+pub fn awaitSettings(h: *H2, io: Io, deadline: ?Io.Timestamp) Error!h2.Settings {
+    var held = h.shared.acquire(io) catch return error.Canceled;
+    defer held.deinit(io);
+    const until = h.waitUntil(io, deadline);
+    while (!held.value().proto.remote_known) {
+        const shared = held.value();
+        if (shared.failure) |f| return switch (f) {
+            .going_away => error.Refused,
+            .protocol => error.ConnectionFailed,
+            .io => |err| err,
+        };
+        try h.pump(io, &held, until);
+    }
+    return held.value().proto.remote;
 }
 
 /// Open a stream with the request's head `fields`; `end_stream` when no

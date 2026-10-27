@@ -40,6 +40,10 @@ local: h2.Settings,
 /// The settings this end sent and the peer has not acknowledged yet.
 local_pending: ?h2.Settings = null,
 remote: h2.Settings = .{},
+/// The peer's first SETTINGS came: `remote` says what it said, not only
+/// the protocol's defaults. A client waits for it before an extended
+/// `CONNECT` (RFC 8441 §3).
+remote_known: bool = false,
 limits: Limits,
 decoder: hpack.Decoder,
 encoder: hpack.Encoder,
@@ -401,6 +405,7 @@ fn settings(c: *Connection, w: *Io.Writer, h: Head, payload: []const u8) Error!?
         if (s.send_window > std.math.maxInt(u31)) return c.connectionError(w, .flow_control_error);
     };
     c.encoder.setLimit(c.remote.header_table_size);
+    c.remote_known = true;
     h2.writeFrame(w, .{ .len = 0, .type = .settings, .flags = Flags.ack, .stream = 0 }, &.{}) catch return error.WriteFailed;
     return .settings;
 }

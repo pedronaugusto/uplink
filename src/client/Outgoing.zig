@@ -121,6 +121,9 @@ pub const FinishError = error{
     InvalidBody,
     BodyReadFailed,
     BodyNotReplayable,
+    /// An extended `CONNECT` on a connection in HTTP/1.1, or to a server
+    /// whose settings do not allow one.
+    ExtendedConnectUnsupported,
     TooManyRedirects,
     InsecureRedirect,
     InvalidRedirect,

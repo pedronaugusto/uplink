@@ -137,6 +137,9 @@ pub const SendError = error{
     BodyReadFailed,
     /// A 307 or 308 asks for a body sent again that was read once.
     BodyNotReplayable,
+    /// An extended `CONNECT` on a connection in HTTP/1.1, or to a server
+    /// whose settings do not allow one: nothing was sent.
+    ExtendedConnectUnsupported,
     /// More redirects in a row than the policy's `max`.
     TooManyRedirects,
     /// A redirect from `https` to `http`, which the policy refuses.

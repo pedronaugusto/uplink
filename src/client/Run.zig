@@ -105,6 +105,8 @@ pub fn init(c: *Shared, io: Io, request: Request) Error!Run {
         error.UnsupportedScheme => error.UnsupportedScheme,
     };
     if (!fields.isToken(request.method.name)) return error.InvalidHeader;
+    // An extended `CONNECT` names its protocol as a token, and is a `CONNECT`.
+    if (request.protocol) |p| if (!request.method.eql(.CONNECT) or !fields.isToken(p)) return error.InvalidHeader;
     for (request.headers) |h| {
         h1.checkHeader(h) catch return error.InvalidHeader;
         for ([_][]const u8{ "host", "content-length", "transfer-encoding" }) |own| {
@@ -199,7 +201,10 @@ pub fn route(run: *Run, io: Io) Error!Context.Route {
 /// request sent whole to an HTTP proxy.
 fn protocolFor(run: *const Run, r: Context.Route) Context.Route.Protocol {
     const choice = run.shared.options.http2;
-    if (choice == .off or run.method.eql(.CONNECT) or named(run.request.headers, "upgrade") or absoluteForm(r)) return .http1;
+    // An extended `CONNECT` is HTTP/2's alone: it goes as any request
+    // that may, and a connection in HTTP/1.1 refuses it.
+    const extended = run.request.protocol != null;
+    if (choice == .off or (run.method.eql(.CONNECT) and !extended) or named(run.request.headers, "upgrade") or absoluteForm(r)) return .http1;
     if (r.secure) return .negotiate;
     return switch (choice) {
         .prior_knowledge => .h2_prior_knowledge,
@@ -322,6 +327,11 @@ fn attempt(run: *Run, io: Io) Error!Response {
         run.progress = false;
         run.releaseEntry(io);
         var lease = try run.acquire(io, r);
+        if (run.request.protocol != null and lease.kind == .h1) {
+            // Nothing went on it: it is kept for what comes next.
+            Response.release(io, &c.context, &c.pool, lease.kind.h1, true);
+            return error.ExtendedConnectUnsupported;
+        }
         const result = switch (lease.kind) {
             .h1 => run.exchange(io, &lease, r),
             .h2 => |h| run.exchangeH2(io, h),
@@ -406,7 +416,7 @@ pub fn switches(r: Context.Route, response: *const Response) bool {
 pub fn switchToH2(run: *Run, io: Io, switched: *Response, lease: *Lease) H2Error!Response {
     const c = run.shared;
     // unreachable: `switches` took a 101 whose body nobody read
-    const conn = (switched.upgrade(io) catch unreachable).conn;
+    const conn = (switched.upgrade(io) catch unreachable).carrier.conn;
     switched.deinit(io);
     const up = H2.upgraded(&c.context, io, conn, run.method.eql(.HEAD)) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
@@ -441,10 +451,16 @@ fn exchangeH2(run: *Run, io: Io, h: *H2) H2Error!Response {
         .streamed => unreachable, // unreachable: as above
     };
     const expect = run.request.expect_continue and has_body;
+    if (run.request.protocol != null) {
+        // The server's settings say whether it takes one (RFC 8441 §3).
+        const settings = h.awaitSettings(io, run.deadline) catch |err| return run.h2Failure(io, err);
+        if (!settings.enable_connect_protocol) return error.ExtendedConnectUnsupported;
+    }
     try run.prepareAttempt(io);
     if (run.diagnostics()) |d| d.stage = .write;
     run.sent = true;
-    const st = try run.openStream(io, h, length, !has_body, expect);
+    // A tunnel's stream stays open for what it carries.
+    const st = try run.openStream(io, h, length, !has_body and run.request.protocol == null, expect);
     errdefer h.finish(io, st);
     if (expect) if (try run.awaitContinueH2(io, h, st)) |refused| return refused;
     switch (run.body) {
@@ -473,11 +489,16 @@ pub fn openStream(run: *Run, io: Io, h: *H2, length: ?u64, end_stream: bool, exp
     list[1] = .{ .name = ":scheme", .value = if (r.secure) "https" else "http" };
     list[2] = .{ .name = ":authority", .value = buffer[0..authority_end] };
     list[3] = .{ .name = ":path", .value = if (target.len == 0) "/" else target };
+    var pseudo: usize = 4;
+    if (run.request.protocol) |p| {
+        list[pseudo] = .{ .name = ":protocol", .value = p };
+        pseudo += 1;
+    }
     const lines_start = w.end;
     const framing: h1.Framing = if (length) |n| .{ .length = n } else .none;
     run.writeFields(io, &w, r, false, framing, expect) catch return error.InvalidHeader;
-    const n = h2_message.appendLines(&list, 4, buffer[lines_start..w.end]) catch return error.InvalidHeader;
-    for (list[4..n]) |*f| f.never_index = isCredential(f.name);
+    const n = h2_message.appendLines(&list, pseudo, buffer[lines_start..w.end]) catch return error.InvalidHeader;
+    for (list[pseudo..n]) |*f| f.never_index = isCredential(f.name);
     return h.open(io, list[0..n], end_stream, run.method.eql(.HEAD)) catch |err| run.h2Failure(io, err);
 }
 

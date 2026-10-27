@@ -351,6 +351,54 @@ const Failed = struct {
     }
 };
 
+test "the client opens a WebSocket over HTTP/2 when the server takes an extended CONNECT, and by Upgrade when it does not" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const running = try Running.startWith(gpa, .{ .h2c = .alongside_http1 }, .of(echo));
+    defer running.stop();
+    var client: Client = .init(gpa, .{ .http2 = .prior_knowledge });
+    defer client.deinit(io);
+    var url_buf: [64]u8 = undefined;
+    const url = running.url(&url_buf, "/");
+    // Two at once, each a stream of the one connection.
+    var first: ws.Opened = undefined;
+    try ws.connect(&first, &client, gpa, io, url, .{ .protocols = &.{"echo"} });
+    defer first.deinit(io);
+    var second: ws.Opened = undefined;
+    try ws.connect(&second, &client, gpa, io, url, .{ .compression = null });
+    defer second.deinit(io);
+    try testing.expect(first.stream.carrier == .stream);
+    try testing.expect(second.stream.carrier == .stream);
+    try testing.expectEqual(first.stream.carrier.stream.h2, second.stream.carrier.stream.h2);
+    try testing.expectEqualStrings("echo", first.protocol.?);
+    const big = try gpa.alloc(u8, 300_000);
+    defer gpa.free(big);
+    for (big, 0..) |*b, i| b.* = @truncate(i % 251);
+    for ([_]*ws.Opened{ &first, &second }) |o| {
+        for ([_][]const u8{ "hello over h2", big }) |payload| {
+            try o.conn.send(io, .binary, payload);
+            _, const back = (try o.conn.readMessage(io, gpa, .limited(1 << 24))).?;
+            defer gpa.free(back);
+            try testing.expectEqualSlices(u8, payload, back);
+        }
+    }
+    first.conn.close(io, wire.ws.Close.normal, "done");
+    try testing.expectEqual(wire.ws.Close.normal, first.conn.peer_close.?.code);
+    try testing.expectEqual(@as(u64, 1), client.stats().connections_opened);
+
+    // A client in HTTP/1.1 asks by Upgrade, over a connection of its own.
+    var plain: Client = .init(gpa, .{});
+    defer plain.deinit(io);
+    var upgraded: ws.Opened = undefined;
+    try ws.connect(&upgraded, &plain, gpa, io, url, .{});
+    defer upgraded.deinit(io);
+    try testing.expect(upgraded.stream.carrier == .conn);
+    try upgraded.conn.send(io, .text, "hello over 1.1");
+    _, const back = (try upgraded.conn.readMessage(io, gpa, .limited(1 << 10))).?;
+    defer gpa.free(back);
+    try testing.expectEqualStrings("hello over 1.1", back);
+}
+
 test "a stream that failed for a cancelation says so on reads and writes, and one that broke does not" {
     const io = test_io.io();
     for ([_]bool{ true, false }) |canceled| {

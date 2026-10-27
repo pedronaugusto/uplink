@@ -69,6 +69,23 @@ test "a request's head is written exactly, with nothing unchecked" {
     try testing.expectEqual(@as(u32, 1), server.requests.load(.monotonic));
 }
 
+test "an extended CONNECT on a connection in HTTP/1.1 is refused with nothing sent, and the connection kept" {
+    const io = test_io.io();
+    const server = try Server.start(testing.allocator, io, Server.fixed(ok_answer));
+    defer server.stop();
+    var client: Client = .init(testing.allocator, .{});
+    defer client.deinit(io);
+    var buf: [64]u8 = undefined;
+    try testing.expectError(error.ExtendedConnectUnsupported, client.send(io, .{ .method = .CONNECT, .url = server.url(&buf, "/"), .protocol = "websocket" }));
+    try testing.expectError(error.InvalidHeader, client.send(io, .{ .url = server.url(&buf, "/"), .protocol = "websocket" }));
+    try testing.expectError(error.InvalidHeader, client.send(io, .{ .method = .CONNECT, .url = server.url(&buf, "/"), .protocol = "web socket" }));
+    const body = try get(&client, io, server.url(&buf, "/"));
+    defer testing.allocator.free(body);
+    try testing.expectEqualStrings("ok", body);
+    try testing.expectEqual(@as(u32, 1), server.requests.load(.monotonic));
+    try testing.expectEqual(@as(u64, 1), client.stats().connections_opened);
+}
+
 test "a 101 not taken over gives its connection to no later request" {
     const io = test_io.io();
     const server = try Server.start(testing.allocator, io, Server.fixed("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: other\r\n\r\n"));
