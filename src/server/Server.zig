@@ -29,6 +29,9 @@ const aegis = @import("aegis");
 const sync = @import("../sync.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const stream_owner = @import("../net/stream.zig");
+const Endpoint = stream_owner.Endpoint;
+const OwnedEndpoint = stream_owner.Owned;
 const reactor = @import("reactor");
 const Context = @import("Context.zig");
 const Connection = @import("Connection.zig");
@@ -112,6 +115,23 @@ pub const ServeError = error{
 /// Returns once accepting has stopped; connections still being served
 /// are `shutdown`'s to finish.
 pub fn serve(s: *Server, io: Io, listener: *Io.net.Server) ServeError!void {
+    return s.serveFrom(io, .{ .socket = listener });
+}
+
+/// `serve` on a Windows named pipe's listener (reactor's `listenPipe`),
+/// a client's end accepted per connection, as Docker's daemon serves its
+/// API on `\\.\pipe\docker_engine`. A request's `remote` is null.
+pub fn servePipe(s: *Server, io: Io, listener: *reactor.net.PipeListener) ServeError!void {
+    return s.serveFrom(io, .{ .pipe = listener });
+}
+
+/// Where connections are accepted from.
+const Listener = union(enum) {
+    socket: *Io.net.Server,
+    pipe: *reactor.net.PipeListener,
+};
+
+fn serveFrom(s: *Server, io: Io, listener: Listener) ServeError!void {
     var result: ServeError!void = {};
     s.acceptor.concurrent(io, acceptLoop, .{ s, io, listener, &result }) catch {
         // No task to spare: accept here, one connection at a time.
@@ -153,36 +173,50 @@ fn acceptingStopped(s: *Server, io: Io) void {
     s.accepting_ended.broadcast(io);
 }
 
-fn acceptLoop(s: *Server, io: Io, listener: *Io.net.Server, result: *ServeError!void) void {
+fn acceptLoop(s: *Server, io: Io, listener: Listener, result: *ServeError!void) void {
     defer s.acceptingStopped(io);
     while (!s.context.isStopping()) {
         if (s.context.options.max_connections) |max| s.context.waitForRoom(io, max) catch |err| {
             result.* = err;
             return;
         };
-        const stream = listener.accept(io) catch |err| switch (err) {
-            error.Canceled => {
-                if (!s.context.isStopping()) result.* = error.Canceled;
-                return;
-            },
-            // A peer gone before its accept, or a resource short for a
-            // moment: the next accept may succeed.
-            error.ConnectionAborted, error.ProcessFdQuotaExceeded, error.SystemFdQuotaExceeded, error.SystemResources => continue,
-            else => {
-                result.* = error.AcceptFailed;
-                return;
-            },
+        const endpoint: Endpoint = switch (listener) {
+            .socket => |l| .{ .socket = l.accept(io) catch |err| switch (err) {
+                error.Canceled => {
+                    if (!s.context.isStopping()) result.* = error.Canceled;
+                    return;
+                },
+                // A peer gone before its accept, or a resource short for a
+                // moment: the next accept may succeed.
+                error.ConnectionAborted, error.ProcessFdQuotaExceeded, error.SystemFdQuotaExceeded, error.SystemResources => continue,
+                else => {
+                    result.* = error.AcceptFailed;
+                    return;
+                },
+            } },
+            .pipe => |l| .{ .pipe = l.accept(io) catch |err| switch (err) {
+                error.Canceled => {
+                    if (!s.context.isStopping()) result.* = error.Canceled;
+                    return;
+                },
+                error.SystemResources => continue,
+                error.Unexpected => {
+                    result.* = error.AcceptFailed;
+                    return;
+                },
+            } },
         };
         if (s.context.isStopping()) {
-            stream.close(io);
+            var owned: OwnedEndpoint = .init(endpoint);
+            owned.deinit(io);
             return;
         }
         // Counted open before its task starts, so the next turn's wait for
         // room sees it.
         s.opened(io);
-        s.tasks.concurrent(io, serveOpened, .{ s, io, stream }) catch {
+        s.tasks.concurrent(io, serveOpened, .{ s, io, endpoint }) catch {
             // No task to spare: this connection is served here, to its end.
-            s.serveOpened(io, stream);
+            s.serveOpened(io, endpoint);
         };
     }
 }
@@ -192,7 +226,7 @@ fn acceptLoop(s: *Server, io: Io, listener: *Io.net.Server, result: *ServeError!
 /// answer that closes it, or `shutdown`.
 pub fn serveConnection(s: *Server, io: Io, stream: Io.net.Stream) void {
     s.opened(io);
-    s.serveOpened(io, stream);
+    s.serveOpened(io, .{ .socket = stream });
 }
 
 fn opened(s: *Server, io: Io) void {
@@ -201,15 +235,18 @@ fn opened(s: *Server, io: Io) void {
 }
 
 /// Serve a connection already counted open, and count it closed.
-fn serveOpened(s: *Server, io: Io, stream: Io.net.Stream) void {
+fn serveOpened(s: *Server, io: Io, endpoint: Endpoint) void {
     defer s.context.ended(io);
-    reactor.net.setOptions(stream.socket, s.context.options.socket) catch |err| {
-        if (s.context.options.observer) |o| o.emit(.{ .option_refused = .{ .error_name = @errorName(err) } });
-        stream.close(io);
-        return;
-    };
-    if (s.context.options.observer) |o| o.emit(.{ .accepted = .{ .remote = stream.socket.address } });
-    Connection.serve(&s.context, s.handler, io, stream);
+    // A pipe has no socket options, and no address to tell.
+    if (endpoint.socketStream()) |stream| {
+        reactor.net.setOptions(stream.socket, s.context.options.socket) catch |err| {
+            if (s.context.options.observer) |o| o.emit(.{ .option_refused = .{ .error_name = @errorName(err) } });
+            stream.close(io);
+            return;
+        };
+        if (s.context.options.observer) |o| o.emit(.{ .accepted = .{ .remote = stream.socket.address } });
+    }
+    Connection.serve(&s.context, s.handler, io, endpoint);
 }
 
 /// Stop: accept no more, end the connections waiting for a request at

@@ -20,6 +20,7 @@ const sync = @import("../sync.zig");
 const reactor = @import("reactor");
 const Io = std.Io;
 const Deadlines = reactor.net.Deadlines;
+const Endpoint = @import("stream.zig").Endpoint;
 
 const Timed = @This();
 
@@ -89,9 +90,9 @@ pub const Error = error{
     Canceled,
 };
 
-/// Operations on `handle`.
-pub fn init(handle: Io.net.Socket.Handle) Timed {
-    return .{ .reads = .{ .watch = .init(handle) }, .writes = .{ .watch = .init(handle) } };
+/// Operations on `endpoint`.
+pub fn init(endpoint: Endpoint) Timed {
+    return .{ .reads = .{ .watch = endpoint.watch() }, .writes = .{ .watch = endpoint.watch() } };
 }
 
 /// Stop keeping deadlines; nothing may be under way.
@@ -156,13 +157,31 @@ pub const Readiness = enum {
     unbounded,
 };
 
-/// Wait up to `timeout` for `handle` to have something to read, reading
+/// Wait up to `timeout` for `endpoint` to have something to read, reading
 /// it into `r`'s empty buffer, without a deadline that ends the socket
 /// when nothing comes: a wait that times out leaves the socket as it was.
-pub fn awaitReadable(io: Io, handle: Io.net.Socket.Handle, r: *Io.Reader, timeout: Io.Duration) Io.Cancelable!Readiness {
+pub fn awaitReadable(io: Io, endpoint: Endpoint, r: *Io.Reader, timeout: Io.Duration) Io.Cancelable!Readiness {
     if (r.seek != r.end) return .ready;
     r.seek = 0;
     r.end = 0;
+    const handle = switch (endpoint) {
+        .socket => |s| s.socket.handle,
+        .pipe => |f| {
+            const found = reactor.net.pipe.readPipeWithin(io, f, r.buffer, timeout) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                // A failure is for the reader to find and name.
+                else => return .ready,
+            };
+            return switch (found) {
+                .ready => |n| {
+                    r.end = n;
+                    return .ready;
+                },
+                .timed_out => .timed_out,
+                .unbounded => .unbounded,
+            };
+        },
+    };
     var data: [1][]u8 = .{r.buffer};
     const result = io.operateTimeout(.{ .net_read = .{ .socket_handle = handle, .data = &data } }, .{
         .duration = .{ .raw = timeout, .clock = .awake },
@@ -199,7 +218,7 @@ test "a read and a write under way at once each end at their own deadline" {
     defer deadlines.deinit(io);
     var unenforced: sync.Counter = .init(.fromRaw(0));
     const keeper: Keeper = .{ .deadlines = &deadlines, .unenforced = &unenforced };
-    var timed: Timed = .init(client.socket.handle);
+    var timed: Timed = .init(.{ .socket = client });
     defer timed.deinit(io, keeper);
 
     // A read waits for bytes that never come, until its deadline; a write

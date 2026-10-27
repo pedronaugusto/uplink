@@ -6,6 +6,7 @@ const std = @import("std");
 const sync = @import("../sync.zig");
 const aegis = @import("aegis");
 const reactor = @import("reactor");
+const Endpoint = @import("../net/stream.zig").Endpoint;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const cloak = @import("cloak");
@@ -216,7 +217,7 @@ pub const Entry = struct {
     /// `stop` leaves the handle alone, which may already name another
     /// socket. Under the list's lock.
     closed: bool = false,
-    socket: Io.net.Socket.Handle,
+    endpoint: Endpoint,
 };
 
 /// A context for a server with `options`.
@@ -389,6 +390,9 @@ fn abort(c: *Context, io: Io, which: enum { idle, all }) void {
     while (it) |node| : (it = node.next) {
         const entry: *Entry = @fieldParentPtr("node", node);
         if (entry.closed) continue;
-        if (which == .all or entry.idle) reactor.net.abort(io, entry.socket);
+        if (which == .all or entry.idle) switch (entry.endpoint) {
+            .socket => |stream| reactor.net.abort(io, stream.socket.handle),
+            .pipe => |file| reactor.net.pipe.disconnect(io, file),
+        };
     }
 }

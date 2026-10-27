@@ -7,6 +7,7 @@ const std = @import("std");
 const sync = @import("../sync.zig");
 const aegis = @import("aegis");
 const Io = std.Io;
+const Endpoint = @import("../net/stream.zig").Endpoint;
 const wire = @import("uplink.wire");
 const h1 = wire.h1;
 const hpack = wire.hpack;
@@ -27,9 +28,9 @@ const Connection = @This();
 socket: Socket,
 handler: *const Handler,
 
-/// Serve `stream` to its end on the caller's task, then close it.
-pub fn serve(context: *Context, handler: *const Handler, io: Io, stream: Io.net.Stream) void {
-    var c: Connection = .{ .socket = .init(context, io, stream), .handler = handler };
+/// Serve `endpoint` to its end on the caller's task, then close it.
+pub fn serve(context: *Context, handler: *const Handler, io: Io, endpoint: Endpoint) void {
+    var c: Connection = .{ .socket = .init(context, io, endpoint), .handler = handler };
     context.enter(io, &c.socket.entry);
     defer context.leave(io, &c.socket.entry);
     defer c.socket.close();
@@ -173,7 +174,7 @@ fn serveOne(c: *Connection) bool {
         .version = rh.version,
         .headers = rh.headers,
         .host = target.authority orelse host_field orelse "",
-        .remote = if (c.socket.stream.borrow().socket.address == .ip4 or c.socket.stream.borrow().socket.address == .ip6) c.socket.stream.borrow().socket.address else null,
+        .remote = c.socket.remote(),
         .secure = c.socket.secure,
         .socket = &c.socket,
         .body = .initStrict(c.socket.reader(), framing, head.bodyBuffer()),

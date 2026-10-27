@@ -362,7 +362,7 @@ test "a dial's socket has the options it asked for, set by reactor" {
         .receive_buffer = .fromRaw(96 << 10),
     } });
     defer dialed.stream.deinit(io);
-    const h = dialed.stream.borrow().socket.handle;
+    const h = dialed.stream.borrow().socket.socket.handle;
     const posix = std.posix;
     try testing.expect(try readOption(h, posix.IPPROTO.TCP, posix.TCP.NODELAY) != 0);
     try testing.expect(try readOption(h, posix.SOL.SOCKET, posix.SO.KEEPALIVE) != 0);
@@ -379,6 +379,6 @@ test "a dial from a local address goes from it, to the name's addresses of its f
     const port = listener.socket.address.getPort();
     var dialed = try dial(io, "127.0.0.1", port, .{ .local_address = .{ .ip4 = .loopback(0) } });
     defer dialed.stream.deinit(io);
-    try testing.expectEqualSlices(u8, &.{ 127, 0, 0, 1 }, &dialed.stream.borrow().socket.address.ip4.bytes);
+    try testing.expectEqualSlices(u8, &.{ 127, 0, 0, 1 }, &dialed.stream.borrow().socket.socket.address.ip4.bytes);
     try testing.expectError(error.AddressFamilyMismatch, dial(io, "::1", port, .{ .local_address = .{ .ip4 = .loopback(0) } }));
 }

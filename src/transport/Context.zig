@@ -166,6 +166,11 @@ pub const Dial = struct {
     /// Connect to this Unix socket instead, whatever the URL's host, for
     /// local daemons. The URL still names the `Host`.
     unix_socket: ?[]const u8 = null,
+    /// Connect to this Windows named pipe instead, whatever the URL's host,
+    /// for a local daemon that serves on one (Docker's
+    /// `\\.\pipe\docker_engine`); not with `unix_socket`. The URL
+    /// still names the `Host`. Elsewhere `NamedPipeUnsupported`.
+    named_pipe: ?[]const u8 = null,
 };
 
 /// Where a connection goes. Connections with equal routes are

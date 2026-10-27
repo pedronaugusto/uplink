@@ -103,6 +103,8 @@ pub const FinishError = error{
     AccessDenied,
     /// The name has no address of `Dial.local_address`'s family.
     AddressFamilyMismatch,
+    /// `Dial.named_pipe` on a system with no named pipes: Windows' alone.
+    NamedPipeUnsupported,
     TimedOut,
     TlsFailed,
     ClientCertificateRejected,
