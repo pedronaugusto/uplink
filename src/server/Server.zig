@@ -181,19 +181,21 @@ fn acceptLoop(s: *Server, io: Io, listener: Listener, result: *ServeError!void) 
             return;
         };
         const endpoint: Endpoint = switch (listener) {
-            .socket => |l| .{ .socket = l.accept(io) catch |err| switch (err) {
-                error.Canceled => {
-                    if (!s.context.isStopping()) result.* = error.Canceled;
-                    return;
+            .socket => |l| .{
+                .socket = l.accept(io) catch |err| switch (err) {
+                    error.Canceled => {
+                        if (!s.context.isStopping()) result.* = error.Canceled;
+                        return;
+                    },
+                    // A peer gone before its accept, or a resource short for a
+                    // moment: the next accept may succeed.
+                    error.ConnectionAborted, error.ProcessFdQuotaExceeded, error.SystemFdQuotaExceeded, error.SystemResources => continue,
+                    else => {
+                        result.* = error.AcceptFailed;
+                        return;
+                    },
                 },
-                // A peer gone before its accept, or a resource short for a
-                // moment: the next accept may succeed.
-                error.ConnectionAborted, error.ProcessFdQuotaExceeded, error.SystemFdQuotaExceeded, error.SystemResources => continue,
-                else => {
-                    result.* = error.AcceptFailed;
-                    return;
-                },
-            } },
+            },
             .pipe => |l| .{ .pipe = l.accept(io) catch |err| switch (err) {
                 error.Canceled => {
                     if (!s.context.isStopping()) result.* = error.Canceled;

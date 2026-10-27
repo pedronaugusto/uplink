@@ -190,9 +190,10 @@ pub const system: Resolver = .{};
 pub const Static = struct {
     entries: []const Entry,
     /// What answers the names not listed.
-    fallback: Resolver = .system,
-    /// Private: the resolver's functions.
-    resolving: Interface = undefined,
+    fallback: Resolver,
+    /// Private: the resolver's functions, set once by `init` so that
+    /// `resolver` writes nothing tasks could race on.
+    resolving: Interface,
 
     /// One name's answer.
     pub const Entry = struct {
@@ -204,8 +205,13 @@ pub const Static = struct {
         addresses: []const IpAddress,
     };
 
+    /// `entries` answered as listed, any other name by `fallback`
+    /// (`.system` when nothing else is wanted).
+    pub fn init(entries: []const Entry, fallback: Resolver) Static {
+        return .{ .entries = entries, .fallback = fallback, .resolving = .{ .lookupFn = staticLookup, .serviceFn = if (fallback.readsServices()) staticService else null } };
+    }
+
     pub fn resolver(s: *Static) Resolver {
-        s.resolving = .{ .lookupFn = staticLookup, .serviceFn = if (s.fallback.readsServices()) staticService else null };
         return .{ .interface = &s.resolving };
     }
 
@@ -284,8 +290,9 @@ pub const Cache = struct {
     /// Private: service names, lower-cased and owned, to their bindings,
     /// none included, reached only through the lock beside them.
     services: aegis.BlockingGuarded(std.StringHashMapUnmanaged(ServiceEntry)),
-    /// Private: the resolver's functions.
-    resolving: Interface = undefined,
+    /// Private: the resolver's functions, set once by `init` so that
+    /// `resolver` writes nothing tasks could race on.
+    resolving: Interface,
 
     pub const Options = struct {
         /// How long an answer is kept.
@@ -314,7 +321,7 @@ pub const Cache = struct {
     };
 
     pub fn init(gpa: Allocator, inner: Resolver, options: Options) Cache {
-        return .{ .gpa = gpa, .inner = inner, .options = options, .entries = .init(.empty), .services = .init(.empty) };
+        return .{ .gpa = gpa, .inner = inner, .options = options, .entries = .init(.empty), .services = .init(.empty), .resolving = .{ .lookupFn = cacheLookup, .serviceFn = if (inner.readsServices()) cacheService else null } };
     }
 
     /// Free every answer. No task may be looking a name up.
@@ -333,7 +340,6 @@ pub const Cache = struct {
     }
 
     pub fn resolver(c: *Cache) Resolver {
-        c.resolving = .{ .lookupFn = cacheLookup, .serviceFn = if (c.inner.readsServices()) cacheService else null };
         return .{ .interface = &c.resolving };
     }
 
@@ -582,7 +588,7 @@ test "static entries answer their names on their ports, and pass the rest on" {
         .{ .host = "git.example", .port = 443, .addresses = &.{.{ .ip4 = .loopback(0) }} },
         .{ .host = "any.example", .addresses = &.{ .{ .ip6 = .loopback(0) }, .{ .ip4 = .loopback(0) } } },
     };
-    var s: Static = .{ .entries = &entries, .fallback = counting.resolver() };
+    var s: Static = .init(&entries, counting.resolver());
     var out: [4]IpAddress = undefined;
     const r = s.resolver();
     const git = try r.lookup(io, "GIT.example", 443, null, &out);

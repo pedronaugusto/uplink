@@ -264,7 +264,7 @@ const Context = struct {
             .{ .host = "www.bench.test", .addresses = &bench_address },
             .{ .host = secure_host, .addresses = &bench_address },
         };
-        c.static = .{ .entries = &c.resolver_entries };
+        c.static = .init(&c.resolver_entries, .system);
         c.fresh = .init(gpa, .{ .tls = .{ .trust = c.trust }, .resolver = c.static.resolver(), .pool = .{ .max_idle_per_route = 0, .max_idle = 0 } });
         c.kept = .init(gpa, .{ .tls = .{ .trust = c.trust }, .resolver = c.static.resolver() });
         c.plain = .init(gpa, .{});

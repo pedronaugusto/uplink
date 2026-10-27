@@ -756,7 +756,7 @@ test "service answers are kept for their time, none included, and a static name 
     try testing.expectEqual(@as(u32, 3), z.asked.load(.monotonic));
     // A name a static entry answers is reached at its addresses alone.
     const pinned = [_]Static.Entry{.{ .host = "svc.example", .addresses = &.{.{ .ip4 = .loopback(0) }} }};
-    var s: Static = .{ .entries = &pinned, .fallback = d.resolver() };
+    var s: Static = .init(&pinned, d.resolver());
     try testing.expectEqual(null, try s.resolver().service(io, gpa, "svc.example", 8443));
     try testing.expect(s.resolver().readsServices());
     try testing.expectEqual(null, try Resolver.system.service(io, gpa, "svc.example", 443));
