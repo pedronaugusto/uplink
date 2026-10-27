@@ -113,6 +113,8 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "client request", .patterns = &.{
         "src/client/Request.zig",
         "src/client/CookieJar.zig",
+        "src/client/CacheStore.zig",
+        "src/client/CacheDisk.zig",
         "src/client/Cache.zig",
         "src/client/OriginAuth.zig",
         "src/client/Upgraded.zig",
@@ -198,6 +200,7 @@ pub const modules: []const gantry.NamedModule = &.{
 pub const references: []const gantry.rules.ReferenceRule = &.{
     .{ .name = "named dependencies", .unresolved_only = true, .except_targets = &.{
         "aegis",
+        "airlock",
         "builtin",
         "cloak",
         "warp",

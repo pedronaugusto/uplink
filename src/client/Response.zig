@@ -218,7 +218,10 @@ fn storedReader(st: *Stored, io: Io) *Io.Reader {
             return &st.bytes;
         },
         .file => |f| {
-            st.file = f.file.readerStreaming(io, &.{});
+            // The body's length frames the read; a seek the file refuses
+            // ends it at once, short, which the framing reports.
+            st.file = f.file.reader(io, &.{});
+            st.file.seekTo(f.offset) catch return Io.Reader.ending;
             return &st.file.interface;
         },
     }
