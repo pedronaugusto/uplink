@@ -14,6 +14,8 @@ pub const Upgraded = @import("client/Upgraded.zig");
 pub const policy = @import("client/policy.zig");
 /// A cookie store, and the Netscape cookie file.
 pub const CookieJar = @import("client/CookieJar.zig");
+/// An HTTP cache (RFC 9111) for `Client.Options.cache`.
+pub const Cache = @import("client/Cache.zig");
 /// Where answers to servers' 401s come from.
 pub const Credentials = @import("client/Credentials.zig");
 /// The hook called before every attempt is written.

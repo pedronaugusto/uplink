@@ -79,9 +79,12 @@ pub const Options = struct {
     decompress: bool = true,
     /// The largest zstd window a request body may ask for.
     max_zstd_window: aegis.units.Bytes(u32) = .literal("8MiB"),
-    /// Turn TCP keepalive on for accepted sockets, probing one idle this
-    /// long.
-    keepalive: ?Duration = null,
+    /// Every accepted socket's options (reactor's `setOptions`): Nagle's
+    /// algorithm off unless asked otherwise. A refusal closes that
+    /// connection and is the observer's `option_refused`. Buffers that
+    /// should fix the window scale are set on the listener, before it
+    /// listens (`reactor.net.listen`).
+    socket: reactor.net.SocketOptions = .{ .nodelay = true },
     /// The most of a request body left unread that the server reads, after
     /// the handler, to keep the connection; past it, the connection closes.
     drain_limit: aegis.units.Bytes(u32) = .literal("64KiB"),
@@ -174,6 +177,9 @@ pub const Observer = struct {
         timed_out: struct { phase: Timeout },
         /// A TLS handshake failed.
         handshake_failed: struct { error_name: []const u8 },
+        /// An accepted socket refused an option it was given, and was
+        /// closed.
+        option_refused: struct { error_name: []const u8 },
     };
 };
 

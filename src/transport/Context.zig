@@ -151,10 +151,14 @@ pub const Timeouts = struct {
 
 /// How connections are made.
 pub const Dial = struct {
-    /// Turn Nagle's algorithm off on every socket.
-    nodelay: bool = true,
-    /// Turn TCP keepalive on, probing a connection idle this long.
-    keepalive: ?Duration = null,
+    /// Every socket's options, set before it connects (reactor's): Nagle's
+    /// algorithm off unless asked otherwise.
+    socket: reactor.net.SocketOptions = .{ .nodelay = true },
+    /// Connect from this address (its port 0 for any), and so only to
+    /// addresses of its family.
+    local_address: ?Io.net.IpAddress = null,
+    /// Send through this interface only.
+    interface: Io.net.Interface = .none,
     /// How long one address is tried alone before the next joins it
     /// (Happy Eyeballs, RFC 8305).
     attempt_delay: Duration = .literal("250ms"),

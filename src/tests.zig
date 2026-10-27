@@ -12,6 +12,8 @@ test {
     _ = @import("testing/Unwiped.zig");
     _ = @import("client/client_test.zig");
     _ = @import("client/policy_test.zig");
+    _ = @import("client/cache_test.zig");
+    _ = @import("client/Cache.zig");
     _ = @import("client/tls_test.zig");
     _ = @import("transport/verify_test.zig");
     _ = @import("ws_test.zig");

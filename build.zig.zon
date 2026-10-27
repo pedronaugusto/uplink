@@ -1,6 +1,6 @@
 .{
     .name = .uplink,
-    .version = "0.9.3",
+    .version = "0.10.1",
     .minimum_zig_version = "0.17.0",
     .fingerprint = 0x4179bf32652e5d1,
     // What a consumer fetches: the module and its documents. The tests,
@@ -21,8 +21,8 @@
         },
 
         .reactor = .{
-            .url = "git+https://github.com/pedronaugusto/reactor?ref=v0.8.1#4d84e4183190bdb6e42086669f1d8f2811b249fd",
-            .hash = "reactor-0.8.1-MjQ-WExBFABvKrcNMDqQ2K6hFcnSc6-ORe0x5xP62gKK",
+            .url = "git+https://github.com/pedronaugusto/reactor?ref=v0.8.5#49d65f118c2ff33e30b0ae6c4ff23f4ccb90451d",
+            .hash = "reactor-0.8.5-MjQ-WG0bFQB41F2V4LHHOThKjKmC_bDQMvoDEzf7nCWj",
             .lazy = true,
         },
 

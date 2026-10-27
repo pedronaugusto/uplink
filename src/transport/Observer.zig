@@ -54,6 +54,13 @@ pub const Event = union(enum) {
     /// (2 for the first retry): for a failed connection, `error_name` says
     /// why; for a status, `status` says which.
     retry: struct { attempt: u8, delay: Duration, status: ?u16, error_name: ?[]const u8 },
+    /// The cache was asked about `url`: `status` is what it gave (`hit`,
+    /// `stale`, `revalidated`, `synthesized`, or `miss` when it went to
+    /// the network), as `Response.cache` names it.
+    cache: struct { url: []const u8, status: []const u8 },
+    /// The cache's store refused a call, by name; the request went on
+    /// without it.
+    cache_failed: struct { error_name: []const u8 },
 };
 
 test "an observer is handed each event" {

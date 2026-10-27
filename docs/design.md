@@ -263,11 +263,17 @@ the lock, and say so where they are declared.
   answers chosen names, as a pinned address does, and passes the rest on;
   `Cache` keeps answers for a minute and wraps another. A client keeps a cache by
   default.
-- **Sockets are tuned in one place** (`net.sys`): `TCP_NODELAY` on by default,
-  keepalive when asked, `SO_NOSIGPIPE` where the system has it, because a
-  library cannot count on its program having ignored the signal. Everything
-  else uplink does to a socket goes through the caller's `Io`, or through
-  reactor's networking over it.
+- **A socket's options are reactor's** (`reactor.net.SocketOptions`): the
+  client's are set before its connect (`Dial.socket`), where the buffers fix
+  the window scale; a server's on each accepted socket (`setOptions`).
+  `TCP_NODELAY` is on by default, `SO_NOSIGPIPE` set where the system has it,
+  because a library cannot count on its program having ignored the signal. A
+  refused option is named: a dial returns it at once (the same for every
+  address), and a server closes that connection and tells its observer
+  (`option_refused`). A local address or interface goes to reactor's connect,
+  and Happy Eyeballs then tries only the addresses of the local family.
+  Everything else uplink does to a socket goes through the caller's `Io`, or
+  through reactor's networking over it.
 
 ### Policy
 
@@ -537,10 +543,14 @@ point. The shape is in the README; what the design depends on is:
   files** need a JavaScript engine. **OCSP** is gone from the ecosystem in favour of
   short-lived certificates. **0-RTT** carries replay risk.
 - **No client pipelining.** Head-of-line blocking and broken intermediaries.
-- **No HTTP cache, no JSON.** A store is a different concern, a layer above the
-  client; JSON belongs to the JSON library, and uplink hands over readers and
-  bytes.
-- **No local address or interface to bind a connection to.**
+- **No JSON.** JSON belongs to the JSON library, and uplink hands over
+  readers and bytes.
+- **The cache sits in the run** (`client/Cache.zig`, RFC 9111): each hop of a
+  request asks it, so a redirect's 301 is cached as its target is. A response
+  goes into the store as the caller reads it, content-coded as it came (one
+  decoder for the network and the store), and is kept only when its body ended
+  whole. A store that fails costs the cache, never the request
+  (`cache_failed`). No ranges: a 206 is not stored.
 - **No `.netrc`**, no bandwidth limit (the caller throttles its reader or
   writer), no IDNA (callers pass punycode).
 - **No event loop of its own.** uplink makes only `Io` calls on sockets, apart

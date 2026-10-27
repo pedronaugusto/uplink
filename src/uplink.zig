@@ -31,6 +31,8 @@ pub const Redirects = client.policy.Redirects;
 pub const Retries = client.policy.Retries;
 /// A cookie store, shareable between clients.
 pub const CookieJar = client.CookieJar;
+/// An HTTP cache (RFC 9111) a client consults before the network.
+pub const Cache = client.Cache;
 /// Where answers to servers' 401s come from: git's credential helpers.
 pub const Credentials = client.Credentials;
 /// The hook called before every attempt is written.

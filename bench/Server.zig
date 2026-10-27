@@ -54,12 +54,12 @@ fn serve(s: *Server) void {
     }
 }
 
-const Which = enum { empty, kib, big, chunked, gzip, redirect, private, authorized };
+const Which = enum { empty, kib, big, chunked, gzip, redirect, private, authorized, cached, tagged, not_modified };
 
 fn which(path: []const u8) Which {
     const table = [_]struct { []const u8, Which }{
         .{ "/1k", .kib },            .{ "/big", .big },         .{ "/chunked", .chunked }, .{ "/gzip", .gzip },
-        .{ "/redirect", .redirect }, .{ "/private", .private },
+        .{ "/redirect", .redirect }, .{ "/private", .private }, .{ "/cached", .cached },   .{ "/tagged", .tagged },
     };
     for (table) |t| if (std.mem.eql(u8, path, t[0])) return t[1];
     return .empty;
@@ -90,6 +90,7 @@ fn requests(s: *Server, r: *Io.Reader, w: *Io.Writer) void {
         const path = head[at..][0 .. std.mem.findScalar(u8, head[at..], ' ') orelse return];
         var reply = which(path);
         if (reply == .private and std.mem.find(u8, head, "\r\nAuthorization: ") != null) reply = .authorized;
+        if (reply == .tagged and std.mem.find(u8, head, "\r\nIf-None-Match: \"t\"") != null) reply = .not_modified;
         r.toss(end);
         s.answer(w, reply) catch return;
         w.flush() catch return;
@@ -124,5 +125,14 @@ fn answer(s: *Server, w: *Io.Writer, a: Which) Io.Writer.Error!void {
             try w.writeAll(s.gzip);
         },
         .redirect => try w.writeAll("HTTP/1.1 302 Found\r\nLocation: /0\r\nContent-Length: 0\r\n\r\n"),
+        .cached => {
+            try w.writeAll("HTTP/1.1 200 OK\r\nCache-Control: max-age=3600\r\nContent-Length: 1024\r\n\r\n");
+            try w.writeAll(&kib);
+        },
+        .tagged => {
+            try w.writeAll("HTTP/1.1 200 OK\r\nCache-Control: max-age=0\r\nETag: \"t\"\r\nContent-Length: 1024\r\n\r\n");
+            try w.writeAll(&kib);
+        },
+        .not_modified => try w.writeAll("HTTP/1.1 304 Not Modified\r\nCache-Control: max-age=0\r\nETag: \"t\"\r\n\r\n"),
     }
 }

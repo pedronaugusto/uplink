@@ -13,6 +13,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - `server.Request.peer_certificate`: the client's leaf certificate (DER) when `tls.ServerOptions.client_certificate` asked for one and the client proved it, in the handshake or answering a post-handshake request; null otherwise and on a resumed session. What a resource server checks an RFC 8705 certificate-bound token against (clearance's `bearer.Verifier`). The certificate is kept only on connections that ask for one.
+## [0.10.1] - 2026-10-25
+
+### Added
+
+- An HTTP cache (RFC 9111): `Client.Options.cache`, a `Cache` over a `Store` (`Cache.Memory`, bounded by bytes, least recently used out first; or the caller's), private by default or shared. A fresh stored response is served with its `Age`, without the network; a stale one with validators is asked about (`If-None-Match`, `If-Modified-Since`) and a 304 brings its head up to date (§3.2); `Vary` keeps a variant per value of the fields it names; an unsafe method's success removes its URL and its same-origin `Location` and `Content-Location` (§4.4); `only-if-cached` with nothing usable is a 504 the cache makes; `stale-if-error` serves the stale response to a 5xx; a body is stored as the caller reads it, as it came, and kept only when read whole. `Response.cache` says where a response came from; the observer gets `cache` and, when the store fails, `cache_failed`, the request going on without it. `wire.cache` gains a request's directives, `storable`, `lifetime` (with §4.2.2's heuristic), `currentAge` and `use`. The bench gains `client/cache/hit` and `client/cache/revalidated`, compiled.
+
+## [0.10.0] - 2026-10-25
+
+### Breaking
+
+- A connection's socket options are reactor's: `Dial.socket` (and `dial.Options.socket`), a `reactor.net.SocketOptions` with `nodelay` on by default, replaces `Dial.nodelay` and `Dial.keepalive`, and adds keepalive's interval and probe count, the buffers and the traffic class. A server's `socket` option replaces its `keepalive`. `net.sys.tune` is gone. A refused option was passed over; a dial now returns it at once (`DialError.OptionUnsupported`), and a server closes that connection and tells its observer (`option_refused`). The client's errors (`Client` calls, `Outgoing.FinishError`, `transport.Connection.OpenError`) gain `OptionUnsupported`, `AccessDenied` and `AddressFamilyMismatch`.
+
+### Added
+
+- `Dial.local_address` and `Dial.interface`: a connection from a local address or through an interface, by reactor's connect. With a local address only the name's addresses of its family are tried, and a name with none is `DialError.AddressFamilyMismatch`. A dial whose every address was refused to this process is `DialError.AccessDenied`, where it was `ConnectionFailed`.
+
+### Changed
+
+- reactor 0.8.5, for its socket options.
 
 ## [0.9.3] - 2026-10-22
 

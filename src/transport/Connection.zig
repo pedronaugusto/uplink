@@ -95,6 +95,13 @@ pub const OpenError = error{
     InvalidHostName,
     NameNotResolved,
     ConnectionFailed,
+    /// A socket option `Dial.socket` asked for is one the system has none
+    /// of, or refuses.
+    OptionUnsupported,
+    /// Every address was refused to this process.
+    AccessDenied,
+    /// The name has no address of `Dial.local_address`'s family.
+    AddressFamilyMismatch,
     TimedOut,
     TlsFailed,
     ClientCertificateRejected,
@@ -195,8 +202,9 @@ fn openOnce(ctx: *Context, io: Io, route: Context.Route, options: OpenOptions, a
         }
     }
     const dial_options: dial.Options = .{
-        .nodelay = ctx.dial.nodelay,
-        .keepalive = ctx.dial.keepalive,
+        .socket = ctx.dial.socket,
+        .local_address = ctx.dial.local_address,
+        .interface = ctx.dial.interface,
         .timeout = limit,
         .resolver = ctx.resolve(),
         .attempt_delay = ctx.dial.attempt_delay,
