@@ -21,6 +21,7 @@ const Method = wire.Method;
 const Server = @import("../testing/Server.zig");
 const TestProxy = @import("../testing/Proxy.zig");
 const Diagnostics = @import("../transport/Diagnostics.zig");
+const Body = @import("../transport/Body.zig");
 const Observer = @import("../transport/Observer.zig");
 const Proxy = @import("../transport/Proxy.zig");
 const Resolver = @import("../net/Resolver.zig");
@@ -470,7 +471,7 @@ test "a body left unread is drained when it is small, so the connection is kept"
     defer server.stop();
     var buf: [64]u8 = undefined;
     for ([_]struct { u32, u64 }{ .{ 64 << 10, 1 }, .{ 10, 3 } }) |case| {
-        var client: Client = .init(gpa, .{ .pool = .{ .drain = .{ .bytes = .fromRaw(case[0]) } } });
+        var client: Client = .init(gpa, .{ .pool = .{ .drain = Body.Drain{ .bytes = .fromRaw(case[0]) } } });
         defer client.deinit(io);
         for (0..3) |_| {
             var response = try client.send(io, .{ .url = server.url(&buf, "/") });

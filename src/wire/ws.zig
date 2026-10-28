@@ -89,8 +89,8 @@ pub fn parseHeader(bytes: []const u8) HeadError!?struct { Header, usize } {
 
 /// Write `h` into `out`; the bytes written.
 pub fn writeHeader(out: *[Header.max_len]u8, h: Header) []const u8 {
-    out[0] = @as(u8, @intFromBool(h.fin)) << 7 | @as(u8, @intFromBool(h.rsv1)) << 6 |
-        @as(u8, @intFromBool(h.rsv2)) << 5 | @as(u8, @intFromBool(h.rsv3)) << 4 | @backingInt(h.opcode);
+    out[0] = (@as(u8, @intFromBool(h.fin)) << 7) | (@as(u8, @intFromBool(h.rsv1)) << 6) |
+        (@as(u8, @intFromBool(h.rsv2)) << 5) | (@as(u8, @intFromBool(h.rsv3)) << 4) | @backingInt(h.opcode);
     const masked: u8 = if (h.mask != null) 0x80 else 0;
     var at: usize = 2;
     if (h.len < 126) {

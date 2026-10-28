@@ -393,7 +393,6 @@ pub const ChunkedDecoder = struct {
     /// Trailer bytes so far.
     trailer_len: u32 = 0,
     /// Where a strict read is inside a chunk extension.
-    // aegis: hot-loop: the place in an extension's grammar, set per byte read
     ext: Extension = .name_start,
 
     /// The grammar of a chunk extension, read strictly (RFC 9112 §7.1.1):
@@ -540,7 +539,7 @@ pub const ChunkedDecoder = struct {
         };
         if (digit) |v| {
             if (d.remaining >> 60 != 0) return error.ChunkSizeOverflow;
-            d.remaining = d.remaining << 4 | v;
+            d.remaining = (d.remaining << 4) | v;
             d.count += 1;
             return;
         }

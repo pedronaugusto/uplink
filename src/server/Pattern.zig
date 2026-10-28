@@ -158,7 +158,7 @@ pub fn unescape(text: []const u8, out: []u8) ?[]const u8 {
             if (i + 2 >= text.len) return null;
             const hi = hexValue(text[i + 1]) orelse return null;
             const lo = hexValue(text[i + 2]) orelse return null;
-            out[n] = hi << 4 | lo;
+            out[n] = (hi << 4) | lo;
             i += 3;
         } else {
             out[n] = text[i];
@@ -189,7 +189,7 @@ pub fn eqlEscaped(literal: []const u8, escaped: []const u8) bool {
             if (j + 2 >= escaped.len) return false;
             const hi = hexValue(escaped[j + 1]) orelse return false;
             const lo = hexValue(escaped[j + 2]) orelse return false;
-            c = hi << 4 | lo;
+            c = (hi << 4) | lo;
             j += 3;
         } else j += 1;
         if (c != literal[i]) return false;

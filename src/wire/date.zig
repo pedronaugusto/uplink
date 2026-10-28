@@ -161,7 +161,7 @@ pub fn format(at: Second, out: *[formatted_len]u8) []const u8 {
     // 1970-01-01 was a Thursday.
     const weekday: usize = @intCast(@mod(days + 3, 7));
     return std.mem.print(out, "{s}, {d:0>2} {s} {d:0>4} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
-        short_days[weekday], day, months[month - 1], year, in_day / 3600, in_day / 60 % 60, in_day % 60,
+        short_days[weekday], day, months[month - 1], year, in_day / 3600, (in_day / 60) % 60, in_day % 60,
     }) catch unreachable; // unreachable: every field has its fixed width, 29 bytes in all
 }
 

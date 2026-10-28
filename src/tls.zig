@@ -288,7 +288,7 @@ fn compressed(gpa: Allocator, algorithm: Decoding, in: []const u8) ![]u8 {
 test "warp's decoders give back a compressed certificate exactly, and refuse any other length" {
     const gpa = std.testing.allocator;
     var certificate: [3000]u8 = undefined;
-    for (&certificate, 0..) |*b, i| b.* = @truncate(i *% 7 ^ i >> 5);
+    for (&certificate, 0..) |*b, i| b.* = @truncate((i *% 7) ^ (i >> 5));
     for ([_]Decoding{ .zstd, .zlib }) |algorithm| {
         const codec = decoder(algorithm, &gpa);
         const packed_bytes = try compressed(gpa, algorithm, &certificate);
