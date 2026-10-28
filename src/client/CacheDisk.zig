@@ -52,7 +52,7 @@ pub const Options = struct {
     level: airlock.Level = .data,
     /// Where the syncs run: on a `reactor.Runtime`, `reactor.syncLane`, so
     /// that a sync holds no worker. Null syncs on the calling task.
-    blocking: ?airlock.Blocking = null,
+    blocking: ?*airlock.Blocking = null,
 };
 
 /// What `open` fails with: the directory's listing or a temp's removal,
@@ -274,18 +274,14 @@ const Framing = struct {
             std.mem.readInt(u32, h[at + 20 ..][0..4], .little),
             std.mem.readInt(u32, h[at + 24 ..][0..4], .little),
         };
-        // Within the limit each, so their sum and the framing around them
-        // stay far below what a u64 holds.
-        var text: u64 = 0;
-        for (lengths) |l| {
-            if (l > layout.max_text) return error.NotAVariant;
-            text += l;
-        }
-        if (text > layout.max_text or lengths[0] != key_len) return error.NotAVariant;
-        const framing = layout.header_len + text + layout.trailer_len;
-        if (raw.size < framing) return error.NotAVariant;
+        // Together no longer than a store keeps.
+        var text: aegis.int.Ranged(u64, 0, layout.max_text) = .literal(0);
+        for (lengths) |l| text = text.add(l) catch return error.NotAVariant;
+        if (lengths[0] != key_len) return error.NotAVariant;
+        const framing = aegis.int.Checked(u64).init(text.raw()).add(layout.header_len + layout.trailer_len) catch return error.NotAVariant;
+        const rest = aegis.int.Checked(u64).init(raw.size).sub(framing.raw()) catch return error.NotAVariant;
         const body: Size = .decode(raw.trailer[0..8].*, .little);
-        if (!body.eql(.fromRaw(raw.size - framing))) return error.NotAVariant;
+        if (!body.eql(.fromRaw(rest.raw()))) return error.NotAVariant;
         return .{
             .requested = std.mem.readInt(i64, h[at..][0..8], .little),
             .received = std.mem.readInt(i64, h[at + 8 ..][0..8], .little),

@@ -178,7 +178,7 @@ pub fn startAnswer(c: *Socket) void {
 /// The peer's address, when the connection is over IP: none for a Unix
 /// socket or a named pipe.
 pub fn remote(c: *Socket) ?Io.net.IpAddress {
-    const stream = c.stream.borrow().socketStream() orelse return null;
+    const stream = (c.stream.borrow().socketStream() orelse return null).get();
     const address = stream.socket.address;
     return if (address == .ip4 or address == .ip6) address else null;
 }
@@ -202,7 +202,7 @@ pub fn awaitEnd(c: *Socket, io: Io, timeout: Io.Timeout) Io.Cancelable!bool {
     if (c.failed() != .none) return true;
     const until = timeout.toDeadline(io);
     const r = &c.input.interface;
-    const stream = c.stream.borrow().socketStream() orelse return c.awaitPipeEnd(io, until);
+    const stream = (c.stream.borrow().socketStream() orelse return c.awaitPipeEnd(io, until)).get();
     while (true) {
         if (r.seek == r.end) {
             r.seek = 0;
@@ -322,7 +322,7 @@ fn linger(c: *Socket) void {
     if (c.failed() != .none or c.timed.fired()) return;
     // A pipe has no half close; what was written stays for the client to
     // read after the close.
-    const stream = c.stream.borrow().socketStream() orelse return;
+    const stream = (c.stream.borrow().socketStream() orelse return).get();
     stream.shutdown(io, .send) catch return;
     const until = Io.Clock.awake.now(io).addDuration(span.toIo(time));
     var buf: [4096]u8 = undefined;

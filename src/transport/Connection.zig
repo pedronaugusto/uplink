@@ -404,7 +404,7 @@ pub fn alive(conn: *Connection, io: Io) Io.Cancelable!bool {
     const r = &conn.input.interface;
     const secure = conn.session_on[0] or conn.session_on[1];
     if (r.seek != r.end) return secure;
-    if (conn.stream.borrow().socketStream()) |stream| if (sys.peek(stream.socket.handle)) |seen| return switch (seen) {
+    if (conn.stream.borrow().socketStream()) |stream| if (sys.peek(stream.get().socket.handle)) |seen| return switch (seen) {
         .idle => true,
         .readable => secure,
         .closed => false,
