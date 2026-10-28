@@ -73,7 +73,7 @@ pub fn deinit(oa: *OriginAuth, io: Io) void {
 
 fn free(oa: *OriginAuth, e: *Entry) void {
     if (e.digest) |*d| d.deinit();
-    e.bytes.deinit();
+    e.bytes.deinit(oa.gpa);
     oa.gpa.destroy(e);
 }
 
@@ -172,7 +172,7 @@ fn copy(oa: *OriginAuth, query: Credentials.Query, secret: Credentials.Secret) A
     const e = try oa.gpa.create(Entry);
     errdefer oa.gpa.destroy(e);
     e.bytes = try .init(oa.gpa, len);
-    errdefer e.bytes.deinit();
+    errdefer e.bytes.deinit(oa.gpa);
     e.bytes.resizeWithinCapacity(len) catch unreachable; // unreachable: `len` is the capacity just made
     const bytes = e.bytes.exposeMut();
     var at: usize = 0;

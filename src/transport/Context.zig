@@ -263,7 +263,7 @@ pub const Proxies = struct {
         if (p.choice == .fixed) p.fixed.auth.deinit(io);
         for (&p.from_env) |*e| {
             if (e.state.load(.acquire) == .some) e.slot.auth.deinit(io);
-            if (e.credential) |*c| c.deinit();
+            if (e.credential) |*c| c.deinit(p.gpa);
         }
         var held = p.arena.acquireUncancelable(io);
         held.value().deinit();

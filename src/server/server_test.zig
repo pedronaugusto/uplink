@@ -427,6 +427,28 @@ fn whoami(io: Io, request: *Request, response: *Response) anyerror!void {
     try response.send(io, if (request.secure) "secure" else "plain");
 }
 
+/// Answers with the SHA-256 of the client's certificate, in hex, or `none`.
+fn certificateOf(io: Io, request: *Request, response: *Response) anyerror!void {
+    const der = request.peer_certificate orelse return response.send(io, "none");
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(der, &digest, .{});
+    try response.send(io, &std.fmt.bytesToHex(digest, .lower));
+}
+
+/// The DER of a PEM certificate's one block.
+fn derOf(gpa: std.mem.Allocator, pem: []const u8) ![]u8 {
+    const begin = "-----BEGIN CERTIFICATE-----";
+    const start = (std.mem.find(u8, pem, begin) orelse return error.NoCertificate) + begin.len;
+    const end = std.mem.find(u8, pem[start..], "-----END") orelse return error.NoCertificate;
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(gpa);
+    for (pem[start..][0..end]) |c| if (!std.ascii.isWhitespace(c)) try text.append(gpa, c);
+    const der = try gpa.alloc(u8, try std.base64.standard.Decoder.calcSizeForSlice(text.items));
+    errdefer gpa.free(der);
+    try std.base64.standard.Decoder.decode(der, text.items);
+    return der;
+}
+
 test "TLS is terminated with cloak, a client certificate asked for and checked" {
     const gpa = testing.allocator;
     const io = test_io.io();
@@ -488,6 +510,82 @@ test "TLS is terminated with cloak, a client certificate asked for and checked" 
         defer client.deinit(io);
         try testing.expectError(error.ClientCertificateRejected, client.send(io, .{ .url = url }));
     }
+}
+
+test "a request carries the client certificate the handshake proved, and none without one" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const pki = try openssl.Pki.make(gpa, io);
+    defer pki.destroy();
+    const cert = try pki.read(io, "server-ec.pem");
+    defer gpa.free(cert);
+    const key_pem = try pki.read(io, "server-ec.key");
+    defer gpa.free(key_pem);
+    const key = try cloak.PrivateKey.parse(gpa, key_pem, .{});
+    defer key.deinit();
+    var identity = try cloak.Identity.initPem(gpa, cert, key, .{});
+    defer identity.deinit();
+    const ca = try pki.read(io, "ca.pem");
+    defer gpa.free(ca);
+    var authorities: cloak.Trust = .init(gpa);
+    defer authorities.deinit();
+    try authorities.addPem(ca, .{});
+    var clients = try authorities.freeze();
+    defer clients.deinit();
+    var servers_builder: cloak.Trust = .init(gpa);
+    defer servers_builder.deinit();
+    try servers_builder.addPem(cert, .{});
+    var servers = try servers_builder.freeze();
+    defer servers.deinit();
+    const client_cert = try pki.read(io, "p256.pem");
+    defer gpa.free(client_cert);
+    const client_key_pem = try pki.read(io, "p256.key");
+    defer gpa.free(client_key_pem);
+    const client_key = try cloak.PrivateKey.parse(gpa, client_key_pem, .{});
+    defer client_key.deinit();
+    var auth = try cloak.ClientAuth.initPem(gpa, client_cert, client_key, .{});
+    defer auth.deinit();
+    const der = try derOf(gpa, client_cert);
+    defer gpa.free(der);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(der, &digest, .{});
+    const expected = std.fmt.bytesToHex(digest, .lower);
+    const credentials = [_]cloak.tls.Credential{.{ .identity = identity }};
+    for ([_]cloak.tls.ClientCertificate{ .optional, .required }) |asked| {
+        const running = try Running.start(gpa, .{ .tls = .{ .credentials = &credentials, .client_certificate = asked, .client_trust = clients } }, .of(certificateOf));
+        defer running.stop();
+        var url_buf: [64]u8 = undefined;
+        const url = try std.mem.print(&url_buf, "https://127.0.0.1:{d}/", .{running.port});
+        var client: Client = .init(gpa, .{ .tls = .{ .trust = servers, .client_auth = auth } });
+        defer client.deinit(io);
+        var response = try client.send(io, .{ .url = url });
+        defer response.deinit(io);
+        const body = try response.collect(gpa, io, .limited(1 << 20));
+        defer gpa.free(body);
+        try testing.expectEqualStrings(&expected, body);
+        if (asked == .optional) {
+            // A client with no certificate to give.
+            var anonymous: Client = .init(gpa, .{ .tls = .{ .trust = servers } });
+            defer anonymous.deinit(io);
+            var plain = try anonymous.send(io, .{ .url = url });
+            defer plain.deinit(io);
+            const none = try plain.collect(gpa, io, .limited(1 << 20));
+            defer gpa.free(none);
+            try testing.expectEqualStrings("none", none);
+        }
+    }
+    // A server that asks for none keeps none.
+    const running = try Running.start(gpa, .{ .tls = .{ .credentials = &credentials } }, .of(certificateOf));
+    defer running.stop();
+    var url_buf: [64]u8 = undefined;
+    const url = try std.mem.print(&url_buf, "https://127.0.0.1:{d}/", .{running.port});
+    var client: Client = .init(gpa, .{ .tls = .{ .trust = servers, .client_auth = auth } });
+    defer client.deinit(io);
+    var response = try client.send(io, .{ .url = url });
+    defer response.deinit(io);
+    const body = try response.collect(gpa, io, .limited(1 << 20));
+    defer gpa.free(body);
+    try testing.expectEqualStrings("none", body);
 }
 
 /// Connect to `running` over a fresh socket.

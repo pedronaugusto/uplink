@@ -35,6 +35,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A 101 the caller does not take over (`Response.upgrade`) gives its connection back to no later request: the connection speaks another protocol after it, and was kept as an HTTP/1.1 one.
 - A server's answer to a `HEAD`, or a 304, with a declared length and no body written says that length and keeps its connection, where `end` took it for a short body and closed the connection.
 
+### Breaking
+
+- Pins cloak 0.23 (was 0.19.0): a build with uplink moves to that line.
+
+### Added
+
+- `server.Request.peer_certificate`: the client's leaf certificate (DER) when `tls.ServerOptions.client_certificate` asked for one and the client proved it, in the handshake or answering a post-handshake request; null otherwise and on a resumed session. What a resource server checks an RFC 8705 certificate-bound token against (clearance's `bearer.Verifier`). The certificate is kept only on connections that ask for one.
 ## [0.10.1] - 2026-10-25
 
 ### Added
