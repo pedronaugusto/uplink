@@ -109,7 +109,7 @@ pub fn deinit(t: *Timed, io: Io, keeper: Keeper) void {
 /// Whether a deadline fired on the socket, which is then never to be used
 /// again.
 pub fn fired(t: *const Timed) bool {
-    return t.reads.watch.fired.load(.acquire) or t.writes.watch.fired.load(.acquire);
+    return t.reads.watch.fired.raised(.acquire) or t.writes.watch.fired.raised(.acquire);
 }
 
 /// Perform `op`, ended at `deadline` on the awake clock when there is one.
