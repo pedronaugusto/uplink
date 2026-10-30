@@ -374,7 +374,7 @@ fn control(c: *Conn, io: Io, h: ws.Header) ReadError!?u16 {
 
 /// Read the current frame's whole payload into `out`, unmasked.
 fn readPayload(c: *Conn, out: []u8) ReadError!void {
-    std.debug.assert(out.len == c.reading.remaining);
+    aegis.assert.invariant(out.len == c.reading.remaining, "out.len == c.reading.remaining");
     c.transport.reader.readSliceAll(out) catch |err| return c.lost(switch (err) {
         error.EndOfStream => error.EndOfStream,
         error.ReadFailed => error.ReadFailed,

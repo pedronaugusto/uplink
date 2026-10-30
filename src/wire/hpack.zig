@@ -9,6 +9,7 @@
 //! code table.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const huffman_codes = @import("hpack/huffman_codes.zig").codes;
 
@@ -108,7 +109,7 @@ pub const Table = struct {
 
     /// Change the most the table may hold, evicting what no longer fits.
     pub fn setMaxSize(t: *Table, max_size: usize) void {
-        std.debug.assert(t.bytes.len >= bytesFor(max_size));
+        aegis.assert.invariant(t.bytes.len >= bytesFor(max_size), "t.bytes.len >= bytesFor(max_size)");
         t.max_size = max_size;
         while (t.size > t.max_size) t.evictOldest();
     }

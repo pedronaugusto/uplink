@@ -7,14 +7,15 @@
 //! holds every `T` placed.
 
 const std = @import("std");
+const aegis = @import("aegis");
 
 /// The `count` `T`s that start `offset` bytes into `bytes`, a slice of
 /// bytes declared aligned for a `T`.
 pub fn many(comptime T: type, bytes: anytype, offset: usize, count: usize) []T {
     comptime std.debug.assert(declared(@TypeOf(bytes)) >= @alignOf(T));
-    std.debug.assert(std.mem.isAligned(offset, @alignOf(T)));
+    aegis.assert.invariant(std.mem.isAligned(offset, @alignOf(T)), "std.mem.isAligned(offset, @alignOf(T))");
     const part = bytes[offset..][0 .. count * @sizeOf(T)];
-    const typed: []align(@alignOf(T)) u8 = @alignCast(part); // aegis: internal: `bytes` is declared aligned for a `T` and `offset` is checked to keep that
+    const typed: []align(@alignOf(T)) u8 = @alignCast(part); // aegis: internal(A019): `bytes` is declared aligned for a `T` and `offset` is checked to keep that
     return std.mem.bytesAsSlice(T, typed);
 }
 

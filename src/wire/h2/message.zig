@@ -151,7 +151,7 @@ pub fn copy(buffer: []align(@alignOf(Field)) u8, fields: []const hpack.Field) er
     for (fields) |f| bytes += f.name.len + f.value.len;
     const fields_at = std.mem.alignForward(usize, bytes, @alignOf(Field));
     if (fields_at + fields.len * @sizeOf(Field) > buffer.len) return error.NoSpaceLeft;
-    const out: [*]Field = @ptrCast(@alignCast(buffer.ptr + fields_at)); // aegis: internal: `buffer` is declared aligned for a Field, `fields_at` keeps that, and the check above leaves room for every field
+    const out: [*]Field = @ptrCast(@alignCast(buffer.ptr + fields_at)); // aegis: internal(A019): `buffer` is declared aligned for a Field, `fields_at` keeps that, and the check above leaves room for every field
     var at: usize = 0;
     for (fields, 0..) |f, i| {
         @memcpy(buffer[at..][0..f.name.len], f.name);

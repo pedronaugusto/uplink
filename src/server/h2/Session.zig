@@ -309,7 +309,7 @@ pub const Stream = struct {
     pub fn deliver(st: *Stream, gpa: Allocator, bytes: []const u8, end: bool) Allocator.Error!void {
         if (bytes.len != 0) {
             if (st.recv.len == 0) st.recv = try gpa.alloc(u8, stream_window.raw());
-            std.debug.assert(st.recv_len + bytes.len <= st.recv.len);
+            aegis.assert.invariant(st.recv_len + bytes.len <= st.recv.len, "st.recv_len + bytes.len <= st.recv.len");
             var at = (st.recv_start + st.recv_len) % st.recv.len;
             var rest = bytes;
             while (rest.len != 0) {

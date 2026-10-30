@@ -60,7 +60,7 @@ fn readLen(max_window: aegis.units.Bytes(u32)) usize {
 
 /// The reading part of `buffer`, and its state after it.
 pub fn split(z: *const ZstdBuffer, buffer: Buffer) struct { []u8, *State } {
-    std.debug.assert(buffer.len == z.len);
+    aegis.assert.invariant(buffer.len == z.len, "buffer.len == z.len");
     const read = readLen(z.max_window);
     const at = std.mem.alignForward(usize, read, @alignOf(State));
     return .{ buffer[0..read], place.one(State, buffer, at) };
@@ -81,7 +81,7 @@ pub fn acquire(z: *ZstdBuffer, gpa: Allocator) Allocator.Error!Buffer {
 
 /// Give a buffer back: kept when none is, freed otherwise.
 pub fn release(z: *ZstdBuffer, gpa: Allocator, buffer: Buffer) void {
-    std.debug.assert(buffer.len == z.len);
+    aegis.assert.invariant(buffer.len == z.len, "buffer.len == z.len");
     {
         var held = z.kept.acquire();
         defer held.deinit();

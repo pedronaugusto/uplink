@@ -51,7 +51,7 @@ const gaa_flag_skip_anycast = 0x2;
 const gaa_flag_skip_multicast = 0x4;
 const gaa_flag_skip_friendly_name = 0x20;
 
-// aegis: boundary: iphlpapi's GetAdaptersAddresses, declared as Windows documents it; `load` is its one caller
+// aegis: boundary(A019): iphlpapi's GetAdaptersAddresses, declared as Windows documents it; `load` is its one caller
 extern "iphlpapi" fn GetAdaptersAddresses(family: Ulong, flags: Ulong, reserved: ?*anyopaque, addresses: ?*Adapter, size: *Ulong) callconv(.winapi) Ulong;
 
 /// The servers of the adapters that are up, into `servers`, using
@@ -60,7 +60,7 @@ extern "iphlpapi" fn GetAdaptersAddresses(family: Ulong, flags: Ulong, reserved:
 pub fn load(servers: []IpAddress, buffer: []align(8) u8) ?usize {
     if (builtin.os.tag != .windows) unreachable; // unreachable: `Dns.System.load` calls this on Windows alone
     var size: Ulong = @intCast(@min(buffer.len, std.math.maxInt(Ulong))); // safe: clamped to a Ulong
-    const first: *Adapter = @ptrCast(buffer.ptr); // aegis: boundary: the system writes its adapter records into this 8-aligned buffer
+    const first: *Adapter = @ptrCast(buffer.ptr); // aegis: boundary(A019): the system writes its adapter records into this 8-aligned buffer
     const status = GetAdaptersAddresses(0, gaa_flag_skip_unicast | gaa_flag_skip_anycast | gaa_flag_skip_multicast | gaa_flag_skip_friendly_name, null, first, &size);
     if (status != 0) return null;
     var count: usize = 0;
@@ -83,7 +83,7 @@ pub fn load(servers: []IpAddress, buffer: []align(8) u8) ?usize {
 }
 
 fn fromSockaddr(a: SocketAddress) ?IpAddress {
-    const raw: [*]const u8 = @ptrCast(a.sockaddr orelse return null); // aegis: boundary: a sockaddr the system wrote, read as its bytes
+    const raw: [*]const u8 = @ptrCast(a.sockaddr orelse return null); // aegis: boundary(A019): a sockaddr the system wrote, read as its bytes
     const len: usize = @intCast(@max(a.sockaddr_length, 0)); // safe: clamped at zero
     if (len < 2) return null;
     const family = std.mem.readInt(u16, raw[0..2], .little);

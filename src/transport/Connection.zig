@@ -686,7 +686,7 @@ const SocketReader = struct {
 
     /// Read into `buffer` from now on, the reader having none.
     fn give(sr: *SocketReader, buffer: BufferPool.Buffer) void {
-        std.debug.assert(sr.pooled.len == 0);
+        aegis.assert.invariant(sr.pooled.len == 0, "sr.pooled.len == 0");
         sr.pooled = buffer;
         sr.interface.buffer = buffer;
     }
@@ -745,7 +745,7 @@ const SocketWriter = struct {
 
     /// Write through `buffer` from now on, the writer having none.
     fn give(sw: *SocketWriter, buffer: BufferPool.Buffer) void {
-        std.debug.assert(sw.pooled.len == 0);
+        aegis.assert.invariant(sw.pooled.len == 0, "sw.pooled.len == 0");
         sw.pooled = buffer;
         sw.interface.buffer = buffer;
     }

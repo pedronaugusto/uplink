@@ -24,6 +24,7 @@
 //! attempt runs unbounded, and the result says so.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const reactor = @import("reactor");
 const Io = std.Io;
 const IpAddress = Io.net.IpAddress;
@@ -346,7 +347,7 @@ fn ofFamily(addresses: []const IpAddress, local: IpAddress, out: []IpAddress) []
 /// The addresses in Happy Eyeballs order (RFC 8305 §4): the resolver's
 /// order within each family, the families alternating from the first's.
 pub fn interleave(addresses: []const IpAddress, out: []IpAddress) []IpAddress {
-    std.debug.assert(out.len >= addresses.len);
+    aegis.assert.invariant(out.len >= addresses.len, "out.len >= addresses.len");
     if (addresses.len == 0) return out[0..0];
     const first = std.meta.activeTag(addresses[0]);
     var a: usize = 0;

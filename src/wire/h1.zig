@@ -382,7 +382,7 @@ pub fn keepAlive(version: Version, headers: *const Headers) bool {
 /// bytes are consumed here, and the data between them is handed to the
 /// caller in place, never copied.
 pub const ChunkedDecoder = struct {
-    // aegis: hot-loop: the decoder's place in the chunk grammar, set per byte read
+    // aegis: hot-loop(A017): the decoder's place in the chunk grammar, set per byte read
     state: State = .size,
     lenience: Lenience = .response,
     /// Data bytes left in the current chunk, or the size being read.
@@ -449,7 +449,7 @@ pub const ChunkedDecoder = struct {
     pub fn take(d: *ChunkedDecoder, n: usize) void {
         if (n == 0) return;
         std.debug.assert(d.state == .data);
-        std.debug.assert(n <= d.remaining);
+        aegis.assert.invariant(n <= d.remaining, "n <= d.remaining");
         d.remaining -= n;
         if (d.remaining == 0) d.state = .data_cr;
     }

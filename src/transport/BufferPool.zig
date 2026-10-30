@@ -74,7 +74,7 @@ pub fn deinit(p: *BufferPool, io: Io) void {
     for (&lists.free, classes) |*head, len| {
         while (head.*) |node| {
             head.* = node.next;
-            std.debug.assert(node.bytes.len == len);
+            aegis.assert.invariant(node.bytes.len == len, "node.bytes.len == len");
             p.gpa.free(node.bytes);
         }
     }
@@ -101,7 +101,7 @@ pub fn acquire(p: *BufferPool, io: Io, class: Class) Allocator.Error!Buffer {
 /// Give back a buffer `acquire` returned.
 pub fn release(p: *BufferPool, io: Io, buffer: Buffer) void {
     const class = Class.fitting(buffer.len).?;
-    std.debug.assert(buffer.len == class.len());
+    aegis.assert.invariant(buffer.len == class.len(), "buffer.len == class.len()");
     const i = @backingInt(class);
     const node = place.one(Node, buffer, 0);
     {
