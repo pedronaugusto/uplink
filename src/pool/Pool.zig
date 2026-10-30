@@ -412,12 +412,6 @@ const testing = std.testing;
 const test_io = @import("../testing/io.zig");
 const shakedown = @import("shakedown");
 
-fn connWith(route: Route) Connection {
-    var c: Connection = undefined;
-    c.route = route;
-    return c;
-}
-
 test "the last kept is taken first, a route keeps its cap, and the pool its own" {
     const io = test_io.io();
     var pool: Pool = .init(testing.allocator, .{ .max_idle_per_route = 2, .max_idle = 3 });
@@ -450,7 +444,8 @@ test "a pool that keeps nothing hands every connection back" {
     const io = test_io.io();
     var pool: Pool = .init(testing.allocator, .{ .max_idle = 0 });
     defer pool.deinit(io);
-    var conn = connWith(try Route.init(false, "a", 80, null));
+    var conn: Connection = undefined;
+    conn.route = try Route.init(false, "a", 80, null);
     try testing.expectEqual(&conn, pool.keep(io, .{ .h1 = &conn }).evicted.?.h1);
 }
 
@@ -460,9 +455,12 @@ test "a connection idle past its time is handed out to be closed, not used" {
     var pool: Pool = .init(testing.allocator, .{ .idle_timeout = .literal("90s") });
     defer pool.deinit(io);
     const route: Route = try .init(false, "a", 80, null);
-    var a = connWith(route);
-    var b = connWith(try Route.init(false, "b", 80, null));
-    var c = connWith(try Route.init(false, "c", 80, null));
+    var a: Connection = undefined;
+    a.route = route;
+    var b: Connection = undefined;
+    b.route = try Route.init(false, "b", 80, null);
+    var c: Connection = undefined;
+    c.route = try Route.init(false, "c", 80, null);
     try testing.expectEqual(Kept{}, pool.keep(io, .{ .h1 = &a }));
     clock.advance(.fromSeconds(60));
     try testing.expectEqual(Kept{}, pool.keep(io, .{ .h1 = &b }));
@@ -500,7 +498,8 @@ test "a full route makes exchanges wait in order, for a kept connection or for r
     try waitForWaiters(&pool, &route, 2);
     // The connection comes back: the first waiter has it. Then it closes:
     // the second gets room for a new one.
-    var conn = connWith(route);
+    var conn: Connection = undefined;
+    conn.route = route;
     try testing.expectEqual(Kept{}, pool.keep(io, .{ .h1 = &conn }));
     pool.closed(io, &route);
     try group.await(io);
