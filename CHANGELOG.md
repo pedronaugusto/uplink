@@ -33,6 +33,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Pins cloak 0.23.1 (was 0.23.0): its x25519 routines link on Windows.
 - On preflight 0.18.1, under the aegis pack: the counters, gauges and flags are aegis's atomic cells over domains of their own; an exchange waiting for its route, the accept loop's end and `shutdown`'s drain wait on an aegis `Condition` under the lock of the state they wait for, where each had an `Io.Event`; the ticket key a server draws is an aegis `Secret`; the zstd buffer kept for the next body is guarded. A socket's deadline mode, a response's life, a server socket's phase and a multipart body's parts are aegis state machines, and the response's framing is chosen in one place for HTTP/1 and HTTP/2. Pool buffers carry their alignment in their type (`BufferPool.Buffer`), so what is placed in one, a head's fields, a trailer's, a decoder's state, an encoder, a free list's link, is checked at compile time to be aligned and in every safe build to fit; the conformance and CI programs read their files through `aegis.own.readFile`.
 
 ### Fixed
