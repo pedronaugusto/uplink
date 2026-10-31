@@ -84,7 +84,11 @@ fn oversize(start: []const u8) Error {
 fn gatherLong(io: Io, pool: *BufferPool, r: *Io.Reader, limits: h1.Limits) Error!Head {
     const buffer = try pool.acquire(io, .large);
     errdefer pool.release(io, buffer);
-    const cap = @min(limits.max_head.raw(), buffer.len - fieldsBytes(limits.max_fields) - min_body_buffer - @alignOf(Field));
+    // The fields' room and the body's beside the head: past about two
+    // thousand fields, they leave the head none.
+    const reserved = fieldsBytes(limits.max_fields) + min_body_buffer + @alignOf(Field);
+    if (reserved >= buffer.len) return error.HeadTooLarge;
+    const cap = @min(limits.max_head.raw(), buffer.len - reserved);
     var len: usize = 0;
     while (true) {
         const chunk = r.buffered();
@@ -169,4 +173,15 @@ test "a head is taken exactly from what follows it, short or longer than the rea
     try testing.expectError(error.EndOfStream, gather(io, &pool, &cut, .{}, &progress));
     var huge: Io.Reader = .fixed("GET / HTTP/1.1\r\nX: " ++ repeat("a", 100));
     try testing.expectError(error.HeadTooLarge, gather(io, &pool, &huge, .{ .max_head = .fromRaw(64) }, &progress));
+}
+
+test "a head longer than the reader's buffer, with more fields than a large buffer has room for, is too large" {
+    const io = test_io.io();
+    var pool: BufferPool = .init(testing.allocator, 2);
+    defer pool.deinit(io);
+    var progress = false;
+    var source: Io.Reader = .fixed("GET /long HTTP/1.1\r\nX-Pad: " ++ repeat("p", 40) ++ "\r\n\r\n");
+    var small: [8]u8 = undefined;
+    var limited = source.limited(.unlimited, &small);
+    try testing.expectError(error.HeadTooLarge, gather(io, &pool, &limited.interface, .{ .max_fields = std.math.maxInt(u16) }, &progress));
 }
