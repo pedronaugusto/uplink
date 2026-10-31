@@ -101,6 +101,7 @@ test "a store keeps no more than its bound, the least recently used evicted and 
     };
     var dir = try tmp.dir.createDirPathOpen(io, "store", .{ .open_options = .{ .iterate = true } });
     defer dir.close(io);
+    // aegis: no-danger(A004): a test's sizes, two and a half stored variants of a few hundred bytes
     var disk: Cache.Disk = try .open(testing.allocator, io, dir, .{ .max_bytes = .fromRaw(2 * one + one / 2) });
     defer disk.deinit(io);
     const store = disk.store();
@@ -112,6 +113,7 @@ test "a store keeps no more than its bound, the least recently used evicted and 
     try put(store, io, "c", "", &body);
     try testing.expectEqual(@as(usize, 0), try store.lookup(io, "b", &out));
     try testing.expectEqual(@as(usize, 2), try files(io, dir));
+    // aegis: no-danger(A004): a test's sizes, two stored variants of a few hundred bytes
     try testing.expectEqual(2 * one, disk.bytes(io).raw());
     // A variant larger than the store is declined as it grows.
     const big: [4096]u8 = @splat('y');

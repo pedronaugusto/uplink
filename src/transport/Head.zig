@@ -9,6 +9,7 @@
 //! parses a response in it, and the server a request.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const layout = @import("../place.zig");
 const Io = std.Io;
 const wire = @import("uplink.wire");
@@ -27,6 +28,15 @@ max_fields: u16,
 
 /// The smallest body reader buffer a head buffer leaves.
 pub const min_body_buffer = 1024;
+
+/// The most fields a head is gathered with (`Limits.max_fields`): a head
+/// longer than the connection's buffer is gathered into a large buffer,
+/// which must hold their room and the body's beside it.
+pub const field_limit: u16 = 256;
+
+comptime {
+    std.debug.assert(fieldsBytes(field_limit) + min_body_buffer + @alignOf(Field) < BufferPool.Class.large.len());
+}
 
 /// Why no head was gathered.
 pub const Error = error{
@@ -83,6 +93,7 @@ fn oversize(start: []const u8) Error {
 /// A head longer than the connection's buffer: gathered piece by piece into
 /// a large pooled buffer.
 fn gatherLong(io: Io, pool: *BufferPool, r: *Io.Reader, limits: h1.Limits) Error!Head {
+    aegis.assert.pre(limits.max_fields <= field_limit, "a head is gathered with at most `field_limit` fields");
     const buffer = try pool.acquire(io, .large);
     errdefer pool.release(io, buffer);
     const cap = @min(limits.max_head.raw(), buffer.len - fieldsBytes(limits.max_fields) - min_body_buffer - @alignOf(Field));
@@ -169,4 +180,19 @@ test "a head is taken exactly from what follows it, short or longer than the rea
     try testing.expectError(error.EndOfStream, gather(io, &pool, &cut, .{}, &progress));
     var huge: Io.Reader = .fixed("GET / HTTP/1.1\r\nX: " ++ repeat("a", 100));
     try testing.expectError(error.HeadTooLarge, gather(io, &pool, &huge, .{ .max_head = .fromRaw(64) }, &progress));
+}
+
+test "a head longer than the reader's buffer has room for the most fields a head takes" {
+    const io = test_io.io();
+    var pool: BufferPool = .init(testing.allocator, 2);
+    defer pool.deinit(io);
+    var progress = false;
+    const text = "GET /long HTTP/1.1\r\nX-Pad: " ++ repeat("p", 40) ++ "\r\n\r\n";
+    var source: Io.Reader = .fixed(text);
+    var small: [8]u8 = undefined;
+    var limited = source.limited(.unlimited, &small);
+    var long = try gather(io, &pool, &limited.interface, .{ .max_fields = field_limit }, &progress);
+    defer long.release(io, &pool);
+    try testing.expectEqual(@as(usize, field_limit), long.fields().len);
+    try testing.expect(long.bodyBuffer().len >= min_body_buffer);
 }

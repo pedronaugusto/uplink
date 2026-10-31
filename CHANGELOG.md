@@ -30,6 +30,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Every interface uplink defines is a value its implementor embeds, and its functions take a pointer to that value, from which the implementor finds itself: `net.Resolver`, `net.Dns.Transport`, `Credentials`, both `Observer`s, `Prepare`, `CookieJar.PublicSuffix`, `ws.Conn.Transport` and `Cache.Store` no longer carry a context pointer, and are held by pointer (`Resolver.interface`, `Dns.transport`, the `credentials`, `observer` and `public_suffix` options, `Cache.store`). `server.Handler` is `*const Handler`: `Handler.of(fn)` makes one from a function, `Router.handler()` and `Files.handler()` give theirs, and `Handler.init` is gone.
 - `net.Resolver.Static` is made by `Static.init(entries, fallback)`, as `Resolver.Cache` is by its `init`: each sets its functions once, and `resolver()` writes nothing, where it wrote them on every call and two tasks dialing through one client raced on them (ThreadSanitizer).
 - `wire.sigv4.formatDate` returns null past `wire.sigv4.max_time`, the last time its sixteen bytes hold.
+- A server's `limits.max_fields` is at most 256 (`transport.Head.field_limit`), checked at `init` as `max_head` is; the client takes at most that many, as it took 256.
 
 ### Changed
 
@@ -43,6 +44,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A server's answer to a `HEAD`, or a 304, with a declared length and no body written says that length and keeps its connection, where `end` took it for a short body and closed the connection.
 - The reverse proxy takes the upstream's reader and writer before its two tasks start: each task took its own, and each set the connection's `Io`, a race ThreadSanitizer found.
 - `wire.sigv4`'s `sign` and `presign` refuse a time past 9999-12-31T23:59:59 (`InvalidRequest`): its date has no room for a fifth digit of the year, and the write was `unreachable` there, undefined behavior in a fast build, with the date left unwritten.
+- A server whose `limits.max_fields` passed about two thousand underflowed when it gathered a head longer than its connection's buffer: a panic, or in a fast build its fields laid past the large buffer they share with the head. Its limit is now checked at `init`.
+- `Retries.backoff` with a `cap` at the longest `Duration` overflowed past it, a panic or in a fast build undefined behavior; a base doubled past any `Duration` saturated, where it now counts as the cap.
 
 ### Breaking
 

@@ -67,7 +67,8 @@ pub const Options = struct {
     /// How long a request with `expect_continue` waits for the server's
     /// go-ahead before sending its body anyway.
     expect_continue_timeout: Duration = .literal("1s"),
-    /// The largest response head, and the most fields in one.
+    /// The largest response head, and the most fields in one; past 64 KiB
+    /// and 256 fields, those.
     limits: h1.Limits = .{},
     /// Whether requests go in HTTP/2, many at once over one connection
     /// per route. A `CONNECT`, a request with `Upgrade` and one sent whole

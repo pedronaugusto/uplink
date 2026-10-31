@@ -14,6 +14,7 @@ const Request = @import("Request.zig");
 const Response = @import("Response.zig");
 const Outgoing = @import("Outgoing.zig");
 const Run = @import("Run.zig");
+const Head = @import("../transport/Head.zig");
 const Shared = @import("Shared.zig");
 
 const Client = @This();
@@ -25,7 +26,7 @@ shared: Shared,
 pub fn init(gpa: Allocator, options: Options) Client {
     var o = options;
     o.limits.max_head = .fromRaw(@min(o.limits.max_head.raw(), 64 << 10));
-    o.limits.max_fields = @min(o.limits.max_fields, 256);
+    o.limits.max_fields = @min(o.limits.max_fields, Head.field_limit);
     return .{ .shared = .{
         .context = .init(gpa, .{
             .proxy = options.proxy,

@@ -17,6 +17,7 @@ const span = @import("../span.zig");
 const Body = @import("../transport/Body.zig");
 const Duration = span.Duration;
 const BufferPool = @import("../transport/BufferPool.zig");
+const Head = @import("../transport/Head.zig");
 const Timed = @import("../net/Timed.zig");
 const ZstdBuffer = @import("../coding/ZstdBuffer.zig");
 const Encoder = @import("../coding/Encoder.zig");
@@ -60,7 +61,7 @@ pub const H2c = enum {
 /// How a server reads, limits and answers.
 pub const Options = struct {
     /// The largest request head, its blank line included, at most 64 KiB:
-    /// past it, a 431. And the most fields in one.
+    /// past it, a 431. And the most fields in one, at most 256.
     limits: h1.Limits = .{ .max_head = .literal("16KiB"), .max_fields = 100 },
     /// The largest request body: past it a 413, or, for a body whose
     /// length was not declared, a failed read. Null is no limit.
@@ -225,6 +226,7 @@ pub const Entry = struct {
 /// A context for a server with `options`.
 pub fn init(gpa: Allocator, options: Options) Context {
     aegis.assert.pre(options.limits.max_head.compare(.literal("64KiB")) != .gt, "a request head is at most 64 KiB");
+    aegis.assert.pre(options.limits.max_fields <= Head.field_limit, "a request head has at most 256 fields");
     if (options.compression) |c| aegis.assert.pre(c.codings.len <= 3, "each coding is offered once");
     const own: ?tls.ServerOptions.Rotation = if (options.tls) |t| switch (t.tickets) {
         .own => |r| r,

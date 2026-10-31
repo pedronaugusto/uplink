@@ -99,9 +99,12 @@ pub const Retries = struct {
     pub fn backoff(r: Retries, next: u8, random: u64) Duration {
         std.debug.assert(next >= 2);
         const shift: u6 = @intCast(@min(next - 2, 40));
-        const ceiling = @min(r.cap.raw(), r.base.raw() *| (@as(u64, 1) << shift));
-        if (ceiling == 0) return .fromRaw(0);
-        return .fromRaw(random % (ceiling + 1));
+        // Past what a Duration holds is past any cap.
+        const grown = r.base.mul(@as(u64, 1) << shift) catch r.cap;
+        const ceiling = if (grown.compare(r.cap) == .gt) r.cap else grown;
+        // A wait of up to every Duration is any random one.
+        const choices = ceiling.add(.fromRaw(1)) catch return .fromRaw(random);
+        return .fromRaw(random % choices.raw());
     }
 };
 
@@ -158,6 +161,10 @@ test "backoff grows from its base to its cap, at random below each" {
         try testing.expect(d.compare(.literal("1s")) != .gt);
     }
     try testing.expectEqual(@as(u64, 0), (Retries{ .base = .fromRaw(0) }).backoff(3, 7).raw());
+    // A cap at the longest Duration: no overflow past it.
+    const unbounded: Retries = .{ .base = .fromRaw(std.math.maxInt(u64) / 2 + 1), .cap = .fromRaw(std.math.maxInt(u64)) };
+    try testing.expectEqual(@as(u64, 12345), unbounded.backoff(2, 12345).raw());
+    try testing.expectEqual(@as(u64, 12345), unbounded.backoff(40, 12345).raw());
     try testing.expect(r.retriesStatus(.ok) == false);
     try testing.expect((Retries{ .statuses = Retries.transient }).retriesStatus(.service_unavailable));
 }

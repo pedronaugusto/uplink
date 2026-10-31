@@ -127,6 +127,7 @@ fn serveFile(f: *const Files, io: Io, request: *Request, response: *Response, re
     // no longer hold is at its end.
     const modified = wire.date.Second.fromTimestamp(stat.mtime, .down) catch wire.date.Second.fromRaw(std.math.maxInt(i64));
     var etag_buf: [48]u8 = undefined;
+    // aegis: no-danger(A004): the etag shows the modification time's bits in hex; nothing reads them as a time
     const etag = try std.mem.print(&etag_buf, "\"{x}-{x}\"", .{ size, @as(u96, @bitCast(Mtime.fromTimestamp(stat.mtime, .exact).raw())) });
     var date_buf: [wire.date.formatted_len]u8 = undefined;
     const last_modified = wire.date.format(modified, &date_buf);
