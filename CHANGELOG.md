@@ -29,6 +29,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `transport.Body.state` is a state machine (`state.current()` reads it): a body ends once, read whole or in one of its failures.
 - Every interface uplink defines is a value its implementor embeds, and its functions take a pointer to that value, from which the implementor finds itself: `net.Resolver`, `net.Dns.Transport`, `Credentials`, both `Observer`s, `Prepare`, `CookieJar.PublicSuffix`, `ws.Conn.Transport` and `Cache.Store` no longer carry a context pointer, and are held by pointer (`Resolver.interface`, `Dns.transport`, the `credentials`, `observer` and `public_suffix` options, `Cache.store`). `server.Handler` is `*const Handler`: `Handler.of(fn)` makes one from a function, `Router.handler()` and `Files.handler()` give theirs, and `Handler.init` is gone.
 - `net.Resolver.Static` is made by `Static.init(entries, fallback)`, as `Resolver.Cache` is by its `init`: each sets its functions once, and `resolver()` writes nothing, where it wrote them on every call and two tasks dialing through one client raced on them (ThreadSanitizer).
+- `wire.sigv4.formatDate` returns null past `wire.sigv4.max_time`, the last time its sixteen bytes hold.
 
 ### Changed
 
@@ -40,6 +41,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A 101 the caller does not take over (`Response.upgrade`) gives its connection back to no later request: the connection speaks another protocol after it, and was kept as an HTTP/1.1 one.
 - A server's answer to a `HEAD`, or a 304, with a declared length and no body written says that length and keeps its connection, where `end` took it for a short body and closed the connection.
 - The reverse proxy takes the upstream's reader and writer before its two tasks start: each task took its own, and each set the connection's `Io`, a race ThreadSanitizer found.
+- `wire.sigv4`'s `sign` and `presign` refuse a time past 9999-12-31T23:59:59 (`InvalidRequest`): its date has no room for a fifth digit of the year, and the write was `unreachable` there, undefined behavior in a fast build, with the date left unwritten.
 
 ### Breaking
 

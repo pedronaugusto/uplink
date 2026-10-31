@@ -114,7 +114,7 @@ pub const Signer = struct {
     /// epoch.
     pub fn sign(s: Signer, request: Request, time: i64, out: *Signed) Error!void {
         out.* = .{ .payload = request.payload, .session_token = s.key.session_token };
-        _ = formatDate(time, &out.date);
+        _ = formatDate(time, &out.date) orelse return error.InvalidRequest;
         var extra: [3]std.http.Header = undefined;
         var n: usize = 0;
         extra[n] = .{ .name = "x-amz-content-sha256", .value = request.payload };
@@ -149,7 +149,7 @@ pub const Signer = struct {
     pub fn presign(s: Signer, w: *Writer, text: []const u8, request: Request, time: i64, expires: u32) Error!void {
         if (expires == 0 or expires > 7 * 24 * 3600) return error.InvalidRequest;
         var date: [16]u8 = undefined;
-        _ = formatDate(time, &date);
+        _ = formatDate(time, &date) orelse return error.InvalidRequest;
         var credential_buffer: [256]u8 = undefined;
         var cw: Writer = .fixed(&credential_buffer);
         cw.print("{s}/", .{s.key.access_key}) catch return error.RequestTooLarge;
@@ -449,16 +449,21 @@ fn hexOf(bytes: []const u8, out: []u8) []const u8 {
     return out[0 .. 2 * bytes.len];
 }
 
+/// The last time SigV4's date holds, 9999-12-31T23:59:59Z: its year has
+/// four digits.
+pub const max_time: i64 = 253402300799;
+
 /// `time`, seconds since the Unix epoch, as SigV4 writes it:
-/// `YYYYMMDDTHHMMSSZ`.
-pub fn formatDate(time: i64, out: *[16]u8) []const u8 {
+/// `YYYYMMDDTHHMMSSZ`. Null past `max_time`.
+pub fn formatDate(time: i64, out: *[16]u8) ?[]const u8 {
+    if (time > max_time) return null;
     const secs: u64 = @intCast(@max(time, 0)); // safe: a time before 1970 is written as 1970's start
     const epoch: std.time.epoch.EpochSeconds = .{ .secs = secs };
     const day = epoch.getEpochDay().calculateYearDay();
     const month_day = day.calculateMonthDay();
     const clock = epoch.getDaySeconds();
     const parts = .{ day.year, month_day.month.numeric(), month_day.day_index + 1, clock.getHoursIntoDay(), clock.getMinutesIntoHour(), clock.getSecondsIntoMinute() };
-    // unreachable: sixteen bytes hold the date while the year has four digits, which an i64 of seconds reaches past only after 9999
+    // unreachable: sixteen bytes hold the date while the year has four digits, as it has up to `max_time`
     return std.mem.print(out, "{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}Z", parts) catch unreachable;
 }
 
@@ -473,7 +478,20 @@ const example_time = 1369353600; // 2013-05-24T00:00:00Z
 
 test "the date is written as SigV4 writes it" {
     var buf: [16]u8 = undefined;
-    try std.testing.expectEqualStrings("20130524T000000Z", formatDate(example_time, &buf));
+    try std.testing.expectEqualStrings("20130524T000000Z", formatDate(example_time, &buf).?);
+    try std.testing.expectEqualStrings("99991231T235959Z", formatDate(max_time, &buf).?);
+}
+
+test "a time past the year 9999 is no request to sign" {
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqual(null, formatDate(max_time + 1, &buf));
+    try std.testing.expectEqual(null, formatDate(std.math.maxInt(i64), &buf));
+    const text = "https://examplebucket.s3.amazonaws.com/test.txt";
+    var signed: Signed = undefined;
+    try std.testing.expectError(error.InvalidRequest, example.sign(.{ .method = "GET", .url = try url_mod.parse(text) }, max_time + 1, &signed));
+    var out: [512]u8 = undefined;
+    var w: Writer = .fixed(&out);
+    try std.testing.expectError(error.InvalidRequest, example.presign(&w, text, .{ .method = "GET", .url = try url_mod.parse(text) }, max_time + 1, 60));
 }
 
 test "a GET is signed as AWS's example signs it" {
