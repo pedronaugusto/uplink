@@ -108,6 +108,7 @@ fn dialBy(io: Io, host: []const u8, port: u16, hints: []const IpAddress, options
     const literal = reactor.net.literal(host, port) != null;
     const looking = Io.Clock.awake.now(io);
     var bounded = true;
+    // aegis: design(A019): Resolver.lookupWithin's contract returns the part of `out` it wrote; a resolver is any implementor's, behind a function pointer
     const addresses = options.resolver.lookupWithin(io, host, port, null, &storage, remaining(io, options.timeout, started), &bounded) catch |err| switch (err) {
         error.NameNotResolved => if (hints.len != 0) hints else return error.NameNotResolved,
         error.InvalidHostName => return error.InvalidHostName,

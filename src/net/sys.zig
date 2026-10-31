@@ -27,6 +27,7 @@ pub fn peek(handle: Io.net.Socket.Handle) ?Peek {
     if (os == .windows or os == .wasi) return null;
     var byte: [1]u8 = undefined;
     while (true) {
+        // aegis: boundary(A019): recvfrom(2) writes the peeked byte; only its count is read
         const rc = std.posix.system.recvfrom(handle, &byte, byte.len, std.posix.MSG.PEEK | std.posix.MSG.DONTWAIT, null, null);
         switch (std.posix.errno(rc)) {
             .SUCCESS => return if (rc == 0) .closed else .readable,

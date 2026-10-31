@@ -451,6 +451,7 @@ pub const Cache = struct {
         if (c.cached(io, key, now, port, family, out)) |found| return found;
         // Every family is asked for, so a later lookup of either finds it.
         var fresh: [max_kept]IpAddress = undefined;
+        // aegis: design(A019): Resolver.lookup's contract returns the part of `out` it wrote; the inner resolver is any implementor's, behind a function pointer
         const got = try c.inner.lookup(io, host, port, null, &fresh);
         c.keep(io, key, now, got);
         return pick(got, port, family, out) orelse error.NameNotResolved;

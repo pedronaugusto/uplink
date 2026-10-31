@@ -209,11 +209,13 @@ fn of(iface: *Store) *Disk {
 
 fn heldOf(d: *const Disk, handle: *Handle) *Held {
     aegis.assert.pre(handle.store == &d.storing, "a handle this store gave");
+    // aegis: design(A019): a handle this store gave (asserted above) to an Entry is a Held's `handle`; only `lookup` makes an Entry
     return @alignCast(@fieldParentPtr("handle", handle));
 }
 
 fn writtenOf(d: *const Disk, handle: *Handle) *Written {
     aegis.assert.pre(handle.store == &d.storing, "a handle this store gave");
+    // aegis: design(A019): a handle this store gave (asserted above) to a Writing is a Written's `handle`; only `begin` makes a Writing
     return @alignCast(@fieldParentPtr("handle", handle));
 }
 

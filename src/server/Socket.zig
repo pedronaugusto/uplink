@@ -326,6 +326,7 @@ fn linger(c: *Socket) void {
     stream.shutdown(io, .send) catch return;
     const until = Io.Clock.awake.now(io).addDuration(span.toIo(time));
     var buf: [4096]u8 = undefined;
+    // aegis: boundary(A019): the kernel writes what each read takes into `buf`, which the drain never reads
     var data: [1][]u8 = .{&buf};
     while (true) {
         // A deadline that ends the wait aborts the socket, which is

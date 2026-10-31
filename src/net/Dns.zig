@@ -130,6 +130,7 @@ fn ask(d: *const Dns, io: Io, name: []const u8, kind: dns.Type, port: u16, out: 
     const id = queryId(io);
     const query = dns.writeQuery(&query_buf, id, name, kind) catch return error.InvalidName;
     var answer_buf: [dns.max_message]u8 = undefined;
+    // aegis: design(A019): Transport.exchange's contract returns the part of `answer` it wrote; a transport is any implementor's, behind a function pointer
     const answer = d.transport.exchange(io, query, &answer_buf) catch |err| return switch (err) {
         error.NoAnswer => error.NoAnswer,
         error.Canceled => error.Canceled,
@@ -196,6 +197,7 @@ pub fn https(d: *const Dns, io: Io, gpa: Allocator, host: []const u8) (NameError
         const id = queryId(io);
         const query = dns.writeQuery(&query_buf, id, name, .https) catch return error.InvalidName;
         var answer_buf: [dns.max_message]u8 = undefined;
+        // aegis: design(A019): Transport.exchange's contract returns the part of `answer` it wrote; a transport is any implementor's, behind a function pointer
         const answer = d.transport.exchange(io, query, &answer_buf) catch |err| return switch (err) {
             error.NoAnswer => error.NoAnswer,
             error.Canceled => error.Canceled,

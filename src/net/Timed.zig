@@ -202,6 +202,7 @@ const test_io = @import("../testing/io.zig");
 fn readUntil(t: *Timed, io: Io, keeper: Keeper, handle: Io.net.Socket.Handle, deadline: Io.Timestamp, done: *std.atomic.Value(bool)) Error!Io.Operation.Result {
     defer done.store(true, .release);
     var buf: [16]u8 = undefined;
+    // aegis: boundary(A019): the kernel writes what a read takes into `buf`; nothing reads it here, the read only waits
     var data: [1][]u8 = .{&buf};
     return t.perform(io, keeper, .{ .net_read = .{ .socket_handle = handle, .data = &data } }, deadline);
 }

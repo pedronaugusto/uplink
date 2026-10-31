@@ -152,6 +152,7 @@ pub fn open(ctx: *Context, io: Io, route: Context.Route, options: OpenOptions) O
     // writes over `untouched` only when the server authenticated as the
     // config's public name (RFC 9849 §6.1.6).
     var untouched: [1]u8 = undefined;
+    // aegis: design(A019): `untouched` is only an address that says cloak wrote no retry configs; its byte is never read
     var retry: []u8 = &untouched;
     defer if (retry.ptr != &untouched) ctx.gpa.free(retry);
     while (true) : (attempts += 1) {
@@ -1018,6 +1019,7 @@ fn socksLookup(conn: *Connection, ipv4: bool, until: ?Io.Timestamp) OpenError!Io
     const timeout: ?Io.Duration = if (until) |u| Io.Clock.awake.now(io).durationTo(u) else null;
     if (timeout) |t| if (t.nanoseconds <= 0) return conn.timedOutOpen();
     var bounded = true;
+    // aegis: design(A019): Resolver.lookupWithin's contract returns the part of `out` it wrote; a resolver is any implementor's, behind a function pointer
     const addresses = conn.ctx.resolve().lookupWithin(io, conn.route.host(), conn.route.port, if (ipv4) .ip4 else null, &storage, if (timeout) |t| span.of(t) else null, &bounded) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
         error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,

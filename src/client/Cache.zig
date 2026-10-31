@@ -189,6 +189,7 @@ pub const Memory = struct {
     /// The item `handle` is a field of: one of this store's own.
     fn itemOf(m: *const Memory, handle: *Handle) *Item {
         aegis.assert.pre(handle.store == &m.storing, "a handle this store gave");
+        // aegis: design(A019): a handle this store gave (asserted above) is an Item's `handle`, made only in `begin` and named by Entry and Writing
         return @alignCast(@fieldParentPtr("handle", handle));
     }
 

@@ -1161,6 +1161,7 @@ fn fromCache(run: *Run, io: Io) Error!?Response {
     const asked = rules.readRequest(&request_fields);
     if (asked.no_store and !asked.only_if_cached) return null;
     var found: [Cache.max_variants]Cache.Entry = undefined;
+    // aegis: design(A019): Store.lookup's contract (CacheStore.zig) writes out[0..n] it counts; a store is any implementor's, behind a function pointer
     const n = cache.store.lookup(io, run.url_text, &found) catch |err| {
         run.cacheFailed(err);
         return null;
