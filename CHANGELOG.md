@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `Outgoing.finish` after a body write that failed said `BodyIncomplete`, the bytes it had not taken, where the write had failed for a reason of its own: a cancel was lost, a dead connection called a short body. It now returns why the write failed (`Canceled`, `TimedOut`, `ConnectionFailed`, ...), over HTTP/1.1 and over HTTP/2. In every release since `Client.begin` came.
+
 ## [0.10.2] - 2026-10-31
 
 ### Added
