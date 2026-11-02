@@ -422,6 +422,29 @@ test "a body the caller writes goes exactly at its length, or in chunks" {
     try testing.expectEqual(@as(u32, 0), client.stats().in_use);
 }
 
+test "a body write a cancel stops is Canceled at finish, not a body cut short" {
+    const gpa = testing.allocator;
+    const server = try Server.start(gpa, test_io.io(), .{ .answer = echo });
+    defer server.stop();
+    var buf: [64]u8 = undefined;
+    const url = server.url(&buf, "/upload");
+    // More than the body writer's buffer holds, so the write the cancel
+    // stops is one `writeAll` makes, the head with it.
+    const body = try gpa.alloc(u8, 256 << 10);
+    defer gpa.free(body);
+    @memset(body, 'x');
+    const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .net_write, .n = 1 } }, .fault = .cancel, .times = 1 }};
+    const faults = try shakedown.FaultIo.init(gpa, test_io.io(), .{ .plan = &plan });
+    defer faults.deinit();
+    const io = faults.io();
+    var client: Client = .init(gpa, .{});
+    defer client.deinit(io);
+    var out = try client.begin(io, .{ .method = .POST, .url = url, .body = .{ .streamed = .{ .length = body.len } } });
+    defer out.deinit(io);
+    try testing.expectError(error.WriteFailed, out.writer().writeAll(body));
+    try testing.expectError(error.Canceled, out.finish(io));
+}
+
 fn writeAndFlush(w: *Io.Writer, bytes: []const u8) Io.Writer.Error!void {
     try w.writeAll(bytes);
     try w.flush();

@@ -13,8 +13,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Windows named pipes, both ends (reactor's `connectPipe` and `listenPipe`): `Dial.named_pipe` sends a client's requests over the pipe at that path whatever the URL's host, as `unix_socket` does a Unix socket's, the connection kept and reused as a socket's; `Server.servePipe` serves on a pipe listener, as Docker's daemon serves its API on `\\.\pipe\docker_engine`, a request's `remote` null. A connection's stream is a socket or a pipe (`net/stream.zig`'s `Endpoint`), each read, write, deadline and wait made for its kind; a pipe's deadlines are kept on reactor's runtime and counted unenforced elsewhere, it has no half close to linger in, and the server's shutdown ends its client by the pipe's disconnect. Off Windows a named pipe is `NamedPipeUnsupported`.
 - `server.Request.rawReader`: the body as it came, its codings left on whatever the server's `decompress`, for a handler that forwards it.
 - `server.Request.length`: the body's declared length, which the server holds the body to: `Content-Length` over HTTP/1.1, `content-length` over HTTP/2, 0 for none, null for a chunked body.
-- `Cache.Memory.overhead`: what each variant costs against the store's bound beyond its key, `Vary` values, head and body, which the build decides (a safe build's record is larger). A store sized for a count of variants is sized with it; the suite's own LRU test guessed it, and held three variants in ReleaseFast where it meant to hold two.
 - `Cache.Disk`: a cache's store in a directory, bounded by bytes and evicting the least recently used variant, each variant one file written through airlock (temp, sync, rename, directory sync; `Options.level` says how durable), its index rebuilt from the directory at `open`, a crash's temps removed. A file that is not a variant of the key asked for is never served: the lookup fails by name (`cache_failed`) and the file goes. uplink depends on airlock (lazy, with the client). Every exchange of the cache's tests runs over both stores.
+- `server.Request.peer_certificate`: the client's leaf certificate (DER) when `tls.ServerOptions.client_certificate` asked for one and the client proved it, in the handshake or answering a post-handshake request; null otherwise and on a resumed session. What a resource server checks an RFC 8705 certificate-bound token against (clearance's `bearer.Verifier`). The certificate is kept only on connections that ask for one.
 
 ### Breaking
 
@@ -32,6 +32,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `net.Resolver.Static` is made by `Static.init(entries, fallback)`, as `Resolver.Cache` is by its `init`: each sets its functions once, and `resolver()` writes nothing, where it wrote them on every call and two tasks dialing through one client raced on them (ThreadSanitizer).
 - `wire.sigv4.formatDate` returns null past `wire.sigv4.max_time`, the last time its sixteen bytes hold.
 - A server's `limits.max_fields` is at most 256 (`transport.Head.field_limit`), checked at `init` as `max_head` is; the client takes at most that many, as it took 256.
+- Pins cloak 0.23 (was 0.19.0): a build with uplink moves to that line.
 
 ### Changed
 
@@ -45,16 +46,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A server's answer to a `HEAD`, or a 304, with a declared length and no body written says that length and keeps its connection, where `end` took it for a short body and closed the connection.
 - The reverse proxy takes the upstream's reader and writer before its two tasks start: each task took its own, and each set the connection's `Io`, a race ThreadSanitizer found.
 - `wire.sigv4`'s `sign` and `presign` refuse a time past 9999-12-31T23:59:59 (`InvalidRequest`): its date has no room for a fifth digit of the year, and the write was `unreachable` there, undefined behavior in a fast build, with the date left unwritten.
-- A server whose `limits.max_fields` passed about two thousand underflowed when it gathered a head longer than its connection's buffer: a panic, or in a fast build its fields laid past the large buffer they share with the head. Its limit is now checked at `init`.
 - `Retries.backoff` with a `cap` at the longest `Duration` overflowed past it, a panic or in a fast build undefined behavior; a base doubled past any `Duration` saturated, where it now counts as the cap.
+- `Outgoing.finish` after a body write that failed said `BodyIncomplete`, the bytes it had not taken, where the write had failed for a reason of its own: a cancel was lost, a dead connection called a short body. It now returns why the write failed (`Canceled`, `TimedOut`, `ConnectionFailed`, ...), over HTTP/1.1 and over HTTP/2. In every release since `Client.begin` came.
 
-### Breaking
-
-- Pins cloak 0.23 (was 0.19.0): a build with uplink moves to that line.
+## [0.10.2] - 2026-10-31
 
 ### Added
 
-- `server.Request.peer_certificate`: the client's leaf certificate (DER) when `tls.ServerOptions.client_certificate` asked for one and the client proved it, in the handshake or answering a post-handshake request; null otherwise and on a resumed session. What a resource server checks an RFC 8705 certificate-bound token against (clearance's `bearer.Verifier`). The certificate is kept only on connections that ask for one.
+- `Cache.Memory.overhead`: what each variant costs against the store's bound beyond its key, `Vary` values, head and body, which the build decides (a safe build's record is larger). A store sized for a count of variants is sized with it; the suite's own LRU test guessed it, and held three variants in ReleaseFast where it meant to hold two.
+
+### Fixed
+
+- A server whose `limits.max_fields` passed about two thousand underflowed when it gathered a head longer than its connection's buffer: a panic, or in a fast build its fields laid past the large buffer they share with the head. Such a head is now too large (a 431), as one copied whole already was. In every release since 0.4.0.
+
 ## [0.10.1] - 2026-10-25
 
 ### Added

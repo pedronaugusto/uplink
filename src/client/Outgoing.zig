@@ -203,6 +203,9 @@ pub fn finish(o: *Outgoing, io: Io) FinishError!Response {
         .length => |*lw| {
             if (lw.overflowed) return error.BodyTooLong;
             lw.interface.flush() catch return o.writeFailed(conn);
+            // A write that failed left the body short: why it failed is the
+            // answer, a cancel among the reasons.
+            if (lw.failed) return conn.writeError();
             if (lw.remaining != 0) return error.BodyIncomplete;
         },
         .chunked => |*cw| cw.end() catch return conn.writeError(),
@@ -231,6 +234,8 @@ fn finishStream(o: *Outgoing, io: Io) FinishError!Response {
     dw.io = io;
     if (dw.overflowed) return error.BodyTooLong;
     dw.interface.flush() catch return if (dw.overflowed) error.BodyTooLong else Run.noRefusal(o.run.h2Failure(io, dw.failure.?));
+    // A send that failed left the body short: why it failed is the answer.
+    if (dw.failure) |failure| return Run.noRefusal(o.run.h2Failure(io, failure));
     if (dw.remaining) |n| if (n != 0) return error.BodyIncomplete;
     if (!st.sent_end) o.run.sendH2(io, h, st, "", true) catch |err| return Run.noRefusal(err);
     const first = o.run.receiveH2(io, h, st) catch |err| return Run.noRefusal(err);

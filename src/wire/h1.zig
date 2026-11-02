@@ -733,6 +733,8 @@ pub const LengthWriter = struct {
     remaining: u64,
     /// Set when a write would have gone past the declared length.
     overflowed: bool = false,
+    /// Set when a write to `out` failed: `out` says why.
+    failed: bool = false,
     interface: Io.Writer,
 
     pub fn init(out: *Io.Writer, length: u64, buffer: []u8) LengthWriter {
@@ -749,11 +751,18 @@ pub const LengthWriter = struct {
             lw.overflowed = true;
             return error.WriteFailed;
         }
+        lw.put(buffered, data, splat) catch {
+            lw.failed = true;
+            return error.WriteFailed;
+        };
+        lw.remaining -= total;
+        return w.consume(@intCast(total));
+    }
+
+    fn put(lw: *LengthWriter, buffered: []const u8, data: []const []const u8, splat: usize) Io.Writer.Error!void {
         try lw.out.writeAll(buffered);
         for (data[0 .. data.len - 1]) |d| try lw.out.writeAll(d);
         try lw.out.splatBytesAll(data[data.len - 1], splat);
-        lw.remaining -= total;
-        return w.consume(@intCast(total));
     }
 };
 
