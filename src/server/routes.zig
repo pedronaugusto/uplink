@@ -112,7 +112,7 @@ pub fn Routes(comptime table: anytype) type {
         const Self = @This();
 
         /// The routes as the server's handler.
-        pub fn handler() *const Handler {
+        pub fn handler() *Handler {
             return .of(serve);
         }
 

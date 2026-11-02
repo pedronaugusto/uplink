@@ -18,7 +18,7 @@ const Running = struct {
     task: Io.Future(Server.ServeError!void),
     port: u16,
 
-    fn start(gpa: std.mem.Allocator, options: Server.Options, handler: *const Server.Handler) !*Running {
+    fn start(gpa: std.mem.Allocator, options: Server.Options, handler: *Server.Handler) !*Running {
         const io = test_io.io();
         const r = try gpa.create(Running);
         errdefer gpa.destroy(r);

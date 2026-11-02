@@ -45,11 +45,11 @@ pub fn init(root: Io.Dir, options: Options) Files {
 }
 
 /// The file server as the server's handler.
-pub fn handler(f: *const Files) *const Handler {
+pub fn handler(f: *Files) *Handler {
     return &f.handling;
 }
 
-fn handled(h: *const Handler, io: Io, request: *Request, response: *Response) anyerror!void {
+fn handled(h: *Handler, io: Io, request: *Request, response: *Response) anyerror!void {
     const f: *const Files = @alignCast(@fieldParentPtr("handling", h));
     return f.serve(io, request, response);
 }

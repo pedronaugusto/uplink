@@ -19,7 +19,7 @@ const Running = struct {
     task: Io.Future(Server.ServeError!void),
     port: u16,
 
-    fn start(gpa: std.mem.Allocator, options: Server.Options, handler: *const Server.Handler) !*Running {
+    fn start(gpa: std.mem.Allocator, options: Server.Options, handler: *Server.Handler) !*Running {
         const io = test_io.io();
         const r = try gpa.create(Running);
         errdefer gpa.destroy(r);
@@ -73,7 +73,7 @@ const Fixture = struct {
     proxy: ReverseProxy,
     upstream_url: [64]u8,
 
-    fn start(f: *Fixture, handler: *const Server.Handler, path: []const u8, options: ReverseProxy.Options) !void {
+    fn start(f: *Fixture, handler: *Server.Handler, path: []const u8, options: ReverseProxy.Options) !void {
         const gpa = testing.allocator;
         f.upstream = try Running.start(gpa, .{}, handler);
         errdefer f.upstream.stop();

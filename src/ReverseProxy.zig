@@ -123,7 +123,7 @@ pub const Error = error{
     OutOfMemory,
 };
 
-fn handle(h: *const Handler, io: Io, request: *Request, response: *Response) anyerror!void {
+fn handle(h: *Handler, io: Io, request: *Request, response: *Response) anyerror!void {
     const p: *const ReverseProxy = @alignCast(@fieldParentPtr("handler", h));
     return p.forward(io, request, response);
 }

@@ -55,7 +55,7 @@ pub const Timeout = Context.Timeout;
 
 /// Private: what the connections share.
 context: Context,
-handler: *const Handler,
+handler: *Handler,
 /// Private: the connection tasks `serve` started.
 tasks: Io.Group = .init,
 /// Private: the accept loop, when it runs as a task of its own.
@@ -69,7 +69,7 @@ accepting_ended: aegis.Condition = .initLimit(std.math.maxInt(usize)),
 acceptor_taken: sync.Latch = .init(.clear),
 
 /// A server answering every request with `handler`.
-pub fn init(gpa: Allocator, options: Options, handler: *const Handler) Server {
+pub fn init(gpa: Allocator, options: Options, handler: *Handler) Server {
     return .{ .context = .init(gpa, options), .handler = handler };
 }
 

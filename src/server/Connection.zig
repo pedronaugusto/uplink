@@ -26,10 +26,10 @@ const h2_serve = @import("h2.zig");
 const Connection = @This();
 
 socket: Socket,
-handler: *const Handler,
+handler: *Handler,
 
 /// Serve `endpoint` to its end on the caller's task, then close it.
-pub fn serve(context: *Context, handler: *const Handler, io: Io, endpoint: Endpoint) void {
+pub fn serve(context: *Context, handler: *Handler, io: Io, endpoint: Endpoint) void {
     var c: Connection = .{ .socket = .init(context, io, endpoint), .handler = handler };
     context.enter(io, &c.socket.entry);
     defer context.leave(io, &c.socket.entry);
