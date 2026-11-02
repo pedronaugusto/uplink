@@ -38,6 +38,9 @@ encoders: ?Encoder.Pool,
 /// Private: the server's own ticket keys, when its TLS options ask for
 /// them.
 tickets: ?cloak.tls.TicketKeys,
+/// Private: the sink every session writes its secrets to, when the TLS
+/// options name a writer for them.
+key_log: ?tls.KeyLogWriter,
 /// Private: the connections being served.
 live: aegis.BlockingGuarded(Live),
 /// Private: set by `stop`.
@@ -245,6 +248,7 @@ pub fn init(gpa: Allocator, options: Options) Context {
         .zstd = .init(options.max_zstd_window),
         .encoders = if (options.compression) |c| .init(gpa, c.settings, options.max_free_buffers) else null,
         .tickets = if (own) |r| cloak.tls.TicketKeys.init(gpa, .{ .lifetime = span.toIo(r.lifetime), .rotation = span.toIo(r.rotation) }) catch unreachable else null, // unreachable: both spans were checked above
+        .key_log = if (options.tls) |t| if (t.key_log) |w| .init(w) else null else null,
         .live = .init(.{}),
     };
 }

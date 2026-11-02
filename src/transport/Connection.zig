@@ -795,7 +795,8 @@ fn startTls(conn: *Connection, slot: usize, host: []const u8, offer: Offer) (Ope
     defer conn.handshake_until = null;
     const session = &conn.sessions[slot];
     var report: cloak.tls.Session.Diagnostics = .{};
-    var codecs = [_]cloak.tls.certificate_compression.Codec{ tls.decoder(.zstd, &ctx.gpa), tls.decoder(.zlib, &ctx.gpa) };
+    var decoders = [_]tls.Decoder{ .init(.zstd, ctx.gpa), .init(.zlib, ctx.gpa) };
+    var codecs = [_]*tls.Codec{ &decoders[0].codec, &decoders[1].codec };
     var namespace_buf: [Io.net.HostName.max_len + 32]u8 = undefined;
     session.open(ctx.gpa, io, conn.readerBelow(slot), conn.writerBelow(slot), read_buffer, write_buffer, .{
         .identity = tls.reference(host),
@@ -804,7 +805,7 @@ fn startTls(conn: *Connection, slot: usize, host: []const u8, offer: Offer) (Ope
         .min_version = if (target) ctx.tls.min_version else .tls12,
         .max_version = if (target) ctx.tls.max_version else .tls13,
         .credentials = if (auth != null) conn.credentials[slot .. slot + 1] else &.{},
-        .key_log = if (ctx.tls.key_log) |sink| tls.keyLog(sink) else null,
+        .key_log = if (ctx.key_log) |*sink| &sink.key_log else null,
         .alpn = offer.alpn,
         .resumption = if (ctx.tls.resumption) |r| .{
             .cache = try ctx.sessions.get(ctx.gpa, io, r),

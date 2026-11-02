@@ -371,7 +371,7 @@ pub fn handshake(c: *Socket, options: tls.ServerOptions) error{Failed}!void {
         // Kept only where a client is asked for one: `Request.peer_certificate`.
         .keep_peer_leaf = options.client_certificate != .none,
         .client_trust = if (options.client_trust) |t| .{ .snapshot = t } else .none,
-        .key_log = if (options.key_log) |w| tls.keyLog(w) else null,
+        .key_log = if (s.key_log) |*sink| &sink.key_log else null,
         .tickets = tickets,
         .tls12_tickets = options.tls12_tickets,
         .ech_keys = options.ech_keys,

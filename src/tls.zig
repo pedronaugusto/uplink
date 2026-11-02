@@ -82,10 +82,10 @@ pub const ClientOptions = struct {
         zstd_zlib,
         none,
         /// The caller's decoders, its preference first; borrowed for as long
-        /// as the client is used. `decoder` makes warp's, so a caller can
+        /// as the client is used. `Decoder` holds warp's, so a caller can
         /// offer them beside one of its own (brotli, which uplink does not
         /// decode).
-        codecs: []const Codec,
+        codecs: []const *Codec,
     };
 
     /// When a client offers Encrypted Client Hello.
@@ -171,22 +171,28 @@ pub const server_protocols_h1: []const []const u8 = &.{"http/1.1"};
 /// also what a socket under TLS reads and writes in.
 pub const record_buffer_len = 16 * 1024 + 5 + 256;
 
-/// Which of warp's decoders `decoder` makes.
+/// Which of warp's decoders a `Decoder` is.
 pub const Decoding = enum { zstd, zlib };
 
-/// warp's decoder for `algorithm` as a certificate codec. Its working state
-/// (a zstd decoder's tables, under 96 KiB; a zlib one's, about 11 KiB) is
-/// allocated from `gpa` for each certificate and freed after it; `gpa` must
-/// outlive the handshakes the codec serves.
-pub fn decoder(algorithm: Decoding, gpa: *const Allocator) Codec {
-    return switch (algorithm) {
-        .zstd => .{ .algorithm = .zstd, .context = @ptrCast(@constCast(gpa)), .decompress = decodeZstd }, // aegis: boundary(A019): cloak's Codec carries its context as *anyopaque; decodeZstd reads it back as the allocator, never writing it
-        .zlib => .{ .algorithm = .zlib, .context = @ptrCast(@constCast(gpa)), .decompress = decodeZlib }, // aegis: boundary(A019): cloak's Codec carries its context as *anyopaque; decodeZlib reads it back as the allocator, never writing it
-    };
-}
+/// warp's decoder for one algorithm as a certificate codec. A connection is
+/// given `&codec`, so the decoder stays where it is while the handshakes it
+/// serves run. Its working state (a zstd decoder's tables, under 96 KiB; a
+/// zlib one's, about 11 KiB) is allocated from `gpa` for each certificate
+/// and freed after it.
+pub const Decoder = struct {
+    gpa: Allocator,
+    codec: Codec,
 
-fn decodeZstd(context: ?*anyopaque, input: []const u8, out: []u8) cloak.tls.certificate_compression.Error!void {
-    const gpa: *const Allocator = @ptrCast(@alignCast(context.?)); // aegis: boundary(A019): cloak gives back the context `decoder` registered, an allocator
+    pub fn init(algorithm: Decoding, gpa: Allocator) Decoder {
+        return .{ .gpa = gpa, .codec = switch (algorithm) {
+            .zstd => .{ .algorithm = .zstd, .decompress = decodeZstd },
+            .zlib => .{ .algorithm = .zlib, .decompress = decodeZlib },
+        } };
+    }
+};
+
+fn decodeZstd(codec: *Codec, input: []const u8, out: []u8) cloak.tls.certificate_compression.Error!void {
+    const gpa = @as(*Decoder, @fieldParentPtr("codec", codec)).gpa;
     const d = gpa.create(warp.zstd.Decompressor) catch return error.Failed;
     defer gpa.destroy(d);
     d.* = .init;
@@ -195,8 +201,8 @@ fn decodeZstd(context: ?*anyopaque, input: []const u8, out: []u8) cloak.tls.cert
     if (r.in_len != input.len or r.out_len != out.len) return error.Failed;
 }
 
-fn decodeZlib(context: ?*anyopaque, input: []const u8, out: []u8) cloak.tls.certificate_compression.Error!void {
-    const gpa: *const Allocator = @ptrCast(@alignCast(context.?)); // aegis: boundary(A019): cloak gives back the context `decoder` registered, an allocator
+fn decodeZlib(codec: *Codec, input: []const u8, out: []u8) cloak.tls.certificate_compression.Error!void {
+    const gpa = @as(*Decoder, @fieldParentPtr("codec", codec)).gpa;
     const d = gpa.create(warp.Decompressor) catch return error.Failed;
     defer gpa.destroy(d);
     d.* = .init;
@@ -234,16 +240,23 @@ pub fn reference(host: []const u8) cloak.certificates.types.Identity {
     };
 }
 
-/// A key log sink that writes each line to `writer`.
-pub fn keyLog(writer: *Io.Writer) cloak.tls.Connection.KeyLog {
-    return .{ .context = writer, .write = writeKeyLog };
-}
+/// A key log sink that writes each line to `writer`. A connection is given
+/// `&key_log`, so the sink stays where it is for as long as the connections
+/// it serves.
+pub const KeyLogWriter = struct {
+    writer: *Io.Writer,
+    key_log: cloak.tls.Connection.KeyLog = .{ .write = write },
 
-fn writeKeyLog(context: ?*anyopaque, line: []const u8) void {
-    const writer: *Io.Writer = @ptrCast(@alignCast(context.?)); // aegis: boundary(A019): cloak's KeyLog gives back the context `keyLog` registered, a writer
-    // A capture that cannot be written is the caller's to notice; it must not fail the handshake it describes.
-    writer.writeAll(line) catch return;
-}
+    pub fn init(writer: *Io.Writer) KeyLogWriter {
+        return .{ .writer = writer };
+    }
+
+    fn write(log: *cloak.tls.Connection.KeyLog, line: []const u8) void {
+        const sink: *KeyLogWriter = @fieldParentPtr("key_log", log);
+        // A capture that cannot be written is the caller's to notice; it must not fail the handshake it describes.
+        sink.writer.writeAll(line) catch return;
+    }
+};
 
 test "an alert is a refusal of a client certificate when it says so" {
     try std.testing.expect(refusesCertificate(.certificate_required));
@@ -260,8 +273,8 @@ test "a host is named as the address it is or the name it is" {
 test "the key log writes the lines it is given" {
     var out: Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
-    const sink = keyLog(&out.writer);
-    sink.write(sink.context, "CLIENT_RANDOM x\n");
+    var sink: KeyLogWriter = .init(&out.writer);
+    sink.key_log.write(&sink.key_log, "CLIENT_RANDOM x\n");
     try std.testing.expectEqualStrings("CLIENT_RANDOM x\n", out.written());
 }
 
@@ -290,27 +303,29 @@ test "warp's decoders give back a compressed certificate exactly, and refuse any
     var certificate: [3000]u8 = undefined;
     for (&certificate, 0..) |*b, i| b.* = @truncate((i *% 7) ^ (i >> 5));
     for ([_]Decoding{ .zstd, .zlib }) |algorithm| {
-        const codec = decoder(algorithm, &gpa);
+        var decoder: Decoder = .init(algorithm, gpa);
+        const codec = &decoder.codec;
         const packed_bytes = try compressed(gpa, algorithm, &certificate);
         defer gpa.free(packed_bytes);
         var out: [certificate.len]u8 = undefined;
-        try codec.decompress.?(codec.context, packed_bytes, &out);
+        try codec.decompress.?(codec, packed_bytes, &out);
         try std.testing.expectEqualSlices(u8, &certificate, &out);
         // A declared length the stream does not fill, or overruns.
         var short: [certificate.len - 1]u8 = undefined;
-        try std.testing.expectError(error.Failed, codec.decompress.?(codec.context, packed_bytes, &short));
+        try std.testing.expectError(error.Failed, codec.decompress.?(codec, packed_bytes, &short));
         var long: [certificate.len + 1]u8 = undefined;
-        try std.testing.expectError(error.Failed, codec.decompress.?(codec.context, packed_bytes, &long));
+        try std.testing.expectError(error.Failed, codec.decompress.?(codec, packed_bytes, &long));
         // Bytes after the stream, and a stream cut short.
         const trailing = try std.mem.concat(gpa, u8, &.{ packed_bytes, "x" });
         defer gpa.free(trailing);
-        try std.testing.expectError(error.Failed, codec.decompress.?(codec.context, trailing, &out));
-        try std.testing.expectError(error.Failed, codec.decompress.?(codec.context, packed_bytes[0 .. packed_bytes.len - 1], &out));
+        try std.testing.expectError(error.Failed, codec.decompress.?(codec, trailing, &out));
+        try std.testing.expectError(error.Failed, codec.decompress.?(codec, packed_bytes[0 .. packed_bytes.len - 1], &out));
     }
 }
 
 test "a decoder that cannot allocate its state fails the certificate" {
-    const codec = decoder(.zstd, &std.testing.failing_allocator);
+    var decoder: Decoder = .init(.zstd, std.testing.failing_allocator);
+    const codec = &decoder.codec;
     var out: [4]u8 = undefined;
-    try std.testing.expectError(error.Failed, codec.decompress.?(codec.context, "abcd", &out));
+    try std.testing.expectError(error.Failed, codec.decompress.?(codec, "abcd", &out));
 }

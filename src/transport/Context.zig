@@ -32,6 +32,9 @@ buffers: BufferPool,
 deadlines: reactor.net.Deadlines,
 proxies: Proxies,
 tls: tls_mod.ClientOptions,
+/// Private: the sink every session writes its secrets to, when `tls` names a
+/// writer for them.
+key_log: ?tls_mod.KeyLogWriter,
 system_trust: SystemTrust = .init,
 /// The tickets of sessions to resume, made at the first handshake that
 /// can use them.
@@ -77,6 +80,7 @@ pub fn init(gpa: Allocator, options: Options) Context {
         .deadlines = .init(span.toIo(options.timeouts.shortestPerOperation() orelse .literal("10s"))),
         .proxies = .init(gpa, options.proxy),
         .tls = options.tls,
+        .key_log = if (options.tls.key_log) |w| .init(w) else null,
         .timeouts = options.timeouts,
         .dial = options.dial,
         .resolver = options.resolver orelse .system,

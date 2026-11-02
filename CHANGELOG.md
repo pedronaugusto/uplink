@@ -18,6 +18,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- The certificate decoders and the key log sink are cloak's context-less interfaces, each a field of uplink's own type that a connection is given a pointer to: `tls.decoder` is `tls.Decoder` (`.init(algorithm, gpa)`, offered as `&decoder.codec`), `tls.keyLog` is `tls.KeyLogWriter`, and `ClientOptions.CertificateCompression.codecs` takes `[]const *tls.Codec`. Pins cloak main e7c45f4, which links on x86_64 Windows (0.23.1 did not).
 - The unread body a finished exchange drains has one budget, `transport.Body.Drain` (`bytes`, 64 KiB, and `time`, 100 ms, from the drain's start), on both ends: `Pool.Options.drain` and `server.Options.drain` replace `drain_limit`. A body that does not end within it closes its connection instead of keeping it.
 - `Cache.Body.file` names where the body begins in its file (`offset`): a store keeping a variant's head and body in one file serves the body from there.
 - The client's errors (`Client.SendError`, `Outgoing.FinishError`, `transport.Connection.OpenError`, `net.dial.DialError`) gain `NamedPipeUnsupported`. `Server.serveConnection` is as it was; `server.Socket.init` takes a `net.stream.Endpoint`.
