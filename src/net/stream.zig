@@ -66,9 +66,9 @@ pub const Endpoint = union(enum) {
 
     /// The socket, lent for what only a socket has: options, a peek, a
     /// half close; null for a pipe. The endpoint's owner closes it.
-    pub fn socketStream(e: Endpoint) ?aegis.own.Lent(Io.net.Stream) {
+    pub fn socketStream(e: Endpoint) ?Io.net.Stream {
         return switch (e) {
-            .socket => |s| .{ .data = s },
+            .socket => |s| s,
             .pipe => null,
         };
     }

@@ -228,17 +228,17 @@ pub const Entry = struct {
 
 /// A context for a server with `options`.
 pub fn init(gpa: Allocator, options: Options) Context {
-    aegis.assert.pre(options.limits.max_head.compare(.literal("64KiB")) != .gt, "a request head is at most 64 KiB");
-    aegis.assert.pre(options.limits.max_fields <= Head.field_limit, "a request head has at most 256 fields");
-    if (options.compression) |c| aegis.assert.pre(c.codings.len <= 3, "each coding is offered once");
+    aegis.assert.invariant(options.limits.max_head.compare(.literal("64KiB")) != .gt, "a request head is at most 64 KiB");
+    aegis.assert.invariant(options.limits.max_fields <= Head.field_limit, "a request head has at most 256 fields");
+    if (options.compression) |c| aegis.assert.invariant(c.codings.len <= 3, "each coding is offered once");
     const own: ?tls.ServerOptions.Rotation = if (options.tls) |t| switch (t.tickets) {
         .own => |r| r,
         .none, .keys => null,
     } else null;
     if (own) |r| {
         const week: Duration = .literal("7d");
-        aegis.assert.pre(r.lifetime.compare(.literal("1s")) != .lt and r.lifetime.compare(week) != .gt, "a ticket lives one second to seven days");
-        aegis.assert.pre(r.rotation.compare(.literal("1s")) != .lt and r.rotation.compare(week) != .gt, "a ticket key issues one second to seven days");
+        aegis.assert.invariant(r.lifetime.compare(.literal("1s")) != .lt and r.lifetime.compare(week) != .gt, "a ticket lives one second to seven days");
+        aegis.assert.invariant(r.rotation.compare(.literal("1s")) != .lt and r.rotation.compare(week) != .gt, "a ticket key issues one second to seven days");
     }
     return .{
         .gpa = gpa,
@@ -270,7 +270,7 @@ pub fn ticketKeys(c: *Context, io: Io) error{ OutOfMemory, EntropyUnavailable, C
     if (issuing) return keys;
     // Two handshakes that both find no key draw one each: the first is
     // replaced at once and opens the tickets it issued until they expire.
-    var material: aegis.secret.Secret([32]u8) = .init(@splat(0));
+    var material: aegis.Secret([32]u8) = .init(@splat(0));
     defer material.deinit();
     try io.randomSecure(material.exposeMut());
     keys.rotate(material.expose(), now) catch |err| return switch (err) {
@@ -329,7 +329,7 @@ pub fn openNow(c: *Context, io: Io) u32 {
 pub fn waitForRoom(c: *Context, io: Io, max: u32) Io.Cancelable!void {
     var held = try c.live.acquire(io);
     defer held.deinit(io);
-    while (held.value().open >= max) c.changed.wait(io, &held, .none) catch |err| switch (err) {
+    while (held.value().open >= max) held.wait(&c.changed, io, .none) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         // No deadline, and no limit on the waiters.
         error.Timeout, error.WaiterLimit => unreachable,
@@ -386,7 +386,7 @@ pub fn stop(c: *Context, io: Io) void {
 fn drain(c: *Context, io: Io, grace: Io.Timeout) void {
     var held = c.live.acquireUncancelable(io);
     defer held.deinit(io);
-    while (held.value().count != 0) c.changed.wait(io, &held, grace) catch return;
+    while (held.value().count != 0) held.wait(&c.changed, io, grace) catch return;
 }
 
 /// End the sockets of the idle connections, or of all of them.

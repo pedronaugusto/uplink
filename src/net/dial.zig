@@ -312,7 +312,7 @@ pub fn dialUnix(io: Io, path: []const u8, options: Options) DialError!Dialed {
 /// the socket options do not apply. Elsewhere `NamedPipeUnsupported`.
 pub fn dialPipe(io: Io, path: []const u8, options: Options) DialError!Dialed {
     const timeout: Io.Timeout = if (options.timeout) |t| .{ .duration = .{ .raw = span.toIo(t), .clock = .awake } } else .none;
-    const file = reactor.net.connectPipe(io, path, .{ .timeout = timeout }) catch |err| return switch (err) {
+    var file = reactor.net.connectPipe(io, path, .{ .timeout = timeout }) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
         error.NamedPipeUnsupported => error.NamedPipeUnsupported,
         error.InvalidPipeName => error.InvalidHostName,
@@ -322,7 +322,9 @@ pub fn dialPipe(io: Io, path: []const u8, options: Options) DialError!Dialed {
         error.Timeout => error.TimedOut,
         error.Unexpected => error.ConnectionFailed,
     };
-    return .{ .stream = .init(.{ .pipe = file }) };
+    var pipe: Io.File = undefined;
+    file.take(&pipe);
+    return .{ .stream = .init(.{ .pipe = pipe }) };
 }
 
 fn unixNow(io: Io, path: []const u8) DialError!Dialed {
@@ -493,8 +495,10 @@ fn waitFor(io: Io, delay: Io.Duration, armed_at: usize) Io.Cancelable!usize {
 }
 
 fn connectOne(io: Io, address: IpAddress, deadline: Io.Timeout, local: Local) reactor.net.ConnectError!Won {
-    const c = try reactor.net.connect(io, &address, .{ .timeout = deadline, .socket = local.socket, .local_address = local.address, .interface = local.interface });
-    return .{ .stream = .init(.{ .socket = c.stream }), .address = address, .timeout_enforced = c.timeout_enforced };
+    var c = try reactor.net.connect(io, &address, .{ .timeout = deadline, .socket = local.socket, .local_address = local.address, .interface = local.interface });
+    var stream: Io.net.Stream = undefined;
+    c.stream.take(&stream);
+    return .{ .stream = .init(.{ .socket = stream }), .address = address, .timeout_enforced = c.timeout_enforced };
 }
 
 const testing = std.testing;

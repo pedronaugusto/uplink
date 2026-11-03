@@ -115,7 +115,7 @@ const Waiter = struct {
 
 /// An empty pool.
 pub fn init(gpa: Allocator, options: Options) Pool {
-    aegis.assert.pre((options.max_per_route orelse 1) != 0, "a route limit allows at least one connection");
+    aegis.assert.invariant((options.max_per_route orelse 1) != 0, "a route limit allows at least one connection");
     return .{ .gpa = gpa, .state = .init(.{}), .options = options };
 }
 
@@ -124,13 +124,13 @@ pub fn init(gpa: Allocator, options: Options) Pool {
 pub fn deinit(p: *Pool, io: Io) void {
     var held = p.state.acquireUncancelable(io);
     const s = held.value();
-    aegis.assert.pre(s.len == 0, "every idle connection was drained");
+    aegis.assert.invariant(s.len == 0, "every idle connection was drained");
     for (s.routes.items) |r| {
-        aegis.assert.pre(r.waiters.first == null, "no exchange waits on a pool being freed");
+        aegis.assert.invariant(r.waiters.first == null, "no exchange waits on a pool being freed");
         p.gpa.destroy(r);
     }
     s.routes.deinit(p.gpa);
-    aegis.assert.pre(s.multiplexed.items.len == 0, "every shared connection was drained");
+    aegis.assert.invariant(s.multiplexed.items.len == 0, "every shared connection was drained");
     s.multiplexed.deinit(p.gpa);
     p.gpa.free(s.idle);
     held.deinit(io);
@@ -198,7 +198,7 @@ pub fn acquire(p: *Pool, io: Io, route: *const Route, deadline: ?Io.Timestamp, w
     };
     waited.* = true;
     const timeout: Io.Timeout = if (deadline) |d| .{ .deadline = .{ .raw = d, .clock = .awake } } else .none;
-    while (w.granted == .none) p.grants.wait(io, &held, timeout) catch |err| {
+    while (w.granted == .none) held.wait(&p.grants, io, timeout) catch |err| {
         // Granted as the wait gave up: the grant is taken all the same; a
         // canceled exchange gives it back through the caller's cleanup.
         if (w.granted != .none) break;

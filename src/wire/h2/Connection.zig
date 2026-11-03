@@ -211,7 +211,7 @@ pub const Memory = struct {
 /// A connection as `role`, advertising `local` (whose header table size
 /// sizes the decoder's table), within `limits`.
 pub fn init(role: Role, local: h2.Settings, limits: Limits, memory: Memory) Connection {
-    aegis.assert.pre(limits.connection_window.compare(Limits.max_window) != .gt, "a window is at most 2^31-1 bytes");
+    aegis.assert.invariant(limits.connection_window.compare(Limits.max_window) != .gt, "a window is at most 2^31-1 bytes");
     return .{
         .role = role,
         .local = .{},
@@ -247,7 +247,7 @@ pub fn start(c: *Connection, w: *Io.Writer) Io.Writer.Error!void {
 /// RFC 7540 §3.2): stream 1 is that request, ended on this side, whose
 /// response comes on it; the next stream is 3.
 pub fn upgradeClient(c: *Connection) void {
-    aegis.assert.pre(c.role == .client and c.next_stream == 1, "a client's connection upgrades before any stream");
+    aegis.assert.invariant(c.role == .client and c.next_stream == 1, "a client's connection upgrades before any stream");
     c.next_stream = 3;
     c.openUpgraded(.end_local);
 }
@@ -257,7 +257,7 @@ pub fn upgradeClient(c: *Connection) void {
 /// carried, taken as the client's as if a SETTINGS frame had brought them,
 /// and stream 1 is the request, ended on the client's side.
 pub fn upgradeServer(c: *Connection, client_settings: []const u8) h2.Settings.Error!void {
-    aegis.assert.pre(c.role == .server and c.last_peer_stream == 0, "a server's connection upgrades before any stream");
+    aegis.assert.invariant(c.role == .server and c.last_peer_stream == 0, "a server's connection upgrades before any stream");
     try c.remote.apply(client_settings, false);
     c.last_peer_stream = 1;
     c.openUpgraded(.end_remote);

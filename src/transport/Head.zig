@@ -93,7 +93,7 @@ fn oversize(start: []const u8) Error {
 /// A head longer than the connection's buffer: gathered piece by piece into
 /// a large pooled buffer.
 fn gatherLong(io: Io, pool: *BufferPool, r: *Io.Reader, limits: h1.Limits) Error!Head {
-    aegis.assert.pre(limits.max_fields <= field_limit, "a head is gathered with at most `field_limit` fields");
+    aegis.assert.invariant(limits.max_fields <= field_limit, "a head is gathered with at most `field_limit` fields");
     const buffer = try pool.acquire(io, .large);
     errdefer pool.release(io, buffer);
     const cap = @min(limits.max_head.raw(), buffer.len - fieldsBytes(limits.max_fields) - min_body_buffer - @alignOf(Field));

@@ -16,6 +16,7 @@
 //! layer reads from the one before it.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const place = @import("../place.zig");
 const warp = @import("warp");
 const Allocator = std.mem.Allocator;
@@ -110,7 +111,7 @@ pub fn start(d: *Decoder, source: *Io.Reader, zstd: *const ZstdBuffer) *Io.Reade
             },
             else => flate: {
                 const state = flateOf(l);
-                state.* = .init(in, l.buffer[0..flateSplit(l.buffer.len).history], .{ .accept = accept(l.coding) });
+                state.* = Flate.init(in, l.buffer[0..flateSplit(l.buffer.len).history], .{ .accept = accept(l.coding) }) catch aegis.assert.never("a large buffer's history holds the window and its lookahead (checked at comptime above), and the options name a container");
                 break :flate &state.interface;
             },
         };

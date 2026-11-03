@@ -156,7 +156,7 @@ fn reapAcceptor(s: *Server, io: Io) void {
 fn awaitAccepting(s: *Server, io: Io) Io.Cancelable!void {
     var held = try s.accepting_done.acquire(io);
     defer held.deinit(io);
-    while (!held.value().*) s.accepting_ended.wait(io, &held, .none) catch |err| switch (err) {
+    while (!held.value().*) held.wait(&s.accepting_ended, io, .none) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         // No deadline, and no limit on the waiters.
         error.Timeout, error.WaiterLimit => unreachable,
@@ -196,16 +196,22 @@ fn acceptLoop(s: *Server, io: Io, listener: Listener, result: *ServeError!void) 
                     },
                 },
             },
-            .pipe => |l| .{ .pipe = l.accept(io) catch |err| switch (err) {
-                error.Canceled => {
-                    if (!s.context.isStopping()) result.* = error.Canceled;
-                    return;
-                },
-                error.SystemResources => continue,
-                error.Unexpected => {
-                    result.* = error.AcceptFailed;
-                    return;
-                },
+            .pipe => |l| .{ .pipe = pipe: {
+                var accepted = l.accept(io) catch |err| switch (err) {
+                    error.Canceled => {
+                        if (!s.context.isStopping()) result.* = error.Canceled;
+                        return;
+                    },
+                    error.SystemResources => continue,
+                    error.Unexpected => {
+                        result.* = error.AcceptFailed;
+                        return;
+                    },
+                };
+                // The endpoint's owner closes it from here.
+                var file: Io.File = undefined;
+                accepted.take(&file);
+                break :pipe file;
             } },
         };
         if (s.context.isStopping()) {
@@ -240,8 +246,7 @@ fn opened(s: *Server, io: Io) void {
 fn serveOpened(s: *Server, io: Io, endpoint: Endpoint) void {
     defer s.context.ended(io);
     // A pipe has no socket options, and no address to tell.
-    if (endpoint.socketStream()) |lent| {
-        const stream = lent.get();
+    if (endpoint.socketStream()) |stream| {
         reactor.net.setOptions(stream.socket, s.context.options.socket) catch |err| {
             if (s.context.options.observer) |o| o.emit(.{ .option_refused = .{ .error_name = @errorName(err) } });
             var owned: OwnedEndpoint = .init(endpoint);

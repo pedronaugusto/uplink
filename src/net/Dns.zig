@@ -389,12 +389,12 @@ pub const Stub = struct {
     /// two-byte length.
     fn overTcp(s: *Stub, io: Io, server: IpAddress, query: []const u8, answer: []u8) TryError![]u8 {
         const deadline = Io.Clock.awake.now(io).addDuration(span.toIo(s.timeout));
-        const connected = reactor.net.connect(io, &server, .{ .mode = .stream, .timeout = .{ .deadline = .{ .raw = deadline, .clock = .awake } } }) catch |err| return switch (err) {
+        var connected = reactor.net.connect(io, &server, .{ .mode = .stream, .timeout = .{ .deadline = .{ .raw = deadline, .clock = .awake } } }) catch |err| return switch (err) {
             error.Canceled => error.Canceled,
             else => error.Failed,
         };
-        const stream = connected.stream;
-        defer stream.close(io);
+        defer connected.stream.deinit(io);
+        const stream = connected.stream.borrow().*;
         var timed: Timed = .init(.{ .socket = stream });
         defer timed.deinit(io, s.keeper());
         var length: [2]u8 = undefined;

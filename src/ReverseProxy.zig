@@ -227,7 +227,7 @@ const Pipe = struct {
     fn awaitTaken(pipe: *Pipe, io: Io) Io.Cancelable!Response.Hijacked {
         var held = try pipe.hijacked.acquire(io);
         defer held.deinit(io);
-        while (held.value().* == null) pipe.taken.wait(io, &held, .none) catch |err| switch (err) {
+        while (held.value().* == null) held.wait(&pipe.taken, io, .none) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             // No deadline, and two waiters at most.
             error.Timeout, error.WaiterLimit => unreachable,

@@ -63,7 +63,7 @@ pub fn deinit(oa: *OriginAuth, io: Io) void {
     var held = oa.entries.acquireUncancelable(io);
     const entries = held.value();
     for (entries.items) |e| {
-        aegis.assert.pre(e.refs == 1, "no request holds an answer being freed");
+        aegis.assert.invariant(e.refs == 1, "no request holds an answer being freed");
         oa.free(e);
     }
     entries.deinit(oa.gpa);

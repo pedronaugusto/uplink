@@ -164,11 +164,11 @@ pub const Pool = struct {
         e.* = .{ .coding = coding, .block = block, .state = undefined, .writer_ = undefined };
         switch (coding) {
             .gzip, .deflate => {
-                e.state = .{ .flate = .initBuffer(memory, deflateOptions(p.settings, if (coding == .gzip) .gzip else .zlib)) };
-                e.writer_ = .{ .flate = .init(&e.state.flate, output, stage) };
+                e.state = .{ .flate = warp.Deflate.initBuffer(memory, deflateOptions(p.settings, if (coding == .gzip) .gzip else .zlib)) catch aegis.assert.never("the codec memory is what Deflate.memory asks for these options") };
+                e.writer_ = .{ .flate = warp.Deflate.Writer.init(&e.state.flate, output, stage) catch aegis.assert.never("the stage is stage_len, the 4 KiB a Deflate writer needs") };
             },
             .zstd => {
-                e.state = .{ .zstd = .initBuffer(memory, zstdOptions(p.settings)) };
+                e.state = .{ .zstd = warp.zstd.Compress.initBuffer(memory, zstdOptions(p.settings)) catch aegis.assert.never("the codec memory is what zstd.Compress.memory asks for these options") };
                 e.writer_ = .{ .zstd = .init(&e.state.zstd, output, stage) };
             },
         }

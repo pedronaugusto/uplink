@@ -521,7 +521,7 @@ fn waitUntil(h: *const H2, io: Io, deadline: ?Io.Timestamp) ?Io.Timestamp {
 /// no longer than `deadline`. Called and returns with the lock held.
 fn awaitChange(h: *H2, io: Io, held: anytype, deadline: ?Io.Timestamp) Error!void {
     const timeout: Io.Timeout = if (deadline) |d| .{ .deadline = .{ .raw = d, .clock = .awake } } else .none;
-    h.changed.wait(io, held, timeout) catch |err| return switch (err) {
+    held.wait(&h.changed, io, timeout) catch |err| return switch (err) {
         error.Timeout => if (deadline != null and Io.Clock.awake.now(io).nanoseconds >= deadline.?.nanoseconds) error.TimedOut else {},
         error.Canceled => error.Canceled,
         error.WaiterLimit => error.ConnectionFailed,

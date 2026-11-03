@@ -181,7 +181,7 @@ pub fn sendFrames(s: *Session) void {
             continue;
         }
         if (held.value().closed) return;
-        s.changed.wait(io, &held, .none) catch return;
+        held.wait(&s.changed, io, .none) catch return;
     }
 }
 
@@ -197,7 +197,7 @@ pub fn startSending(s: *Session, group: *Io.Group) void {
 /// the stream is reset or the connection ends.
 fn awaitRoom(s: *Session, st: *Stream, io: Io, held: anytype) WriteError!void {
     while (held.value().outbox.backlog() >= Outbox.high_water and st.reset_code == null and !held.value().closed) {
-        s.changed.wait(io, held, .none) catch |err| return switch (err) {
+        held.wait(&s.changed, io, .none) catch |err| return switch (err) {
             error.Canceled => error.Canceled,
             error.WaiterLimit => error.WriteFailed,
             error.Timeout => unreachable, // unreachable: the wait has no deadline
@@ -289,7 +289,7 @@ pub const Stream = struct {
         while (st.recv_len == 0) {
             if (st.recv_end) return error.EndOfStream;
             if (st.reset_code != null or held.value().closed) return error.StreamClosed;
-            s.changed.wait(io, &held, .none) catch return error.Canceled;
+            held.wait(&s.changed, io, .none) catch return error.Canceled;
         }
         const first = @min(st.recv_len, st.recv.len - st.recv_start);
         const n = @min(first, limit.toInt() orelse first);
@@ -364,7 +364,7 @@ pub const Stream = struct {
                 // The window is shut: what went goes out, and the reading
                 // task wakes this when a WINDOW_UPDATE opens it.
                 s.post(shared);
-                s.changed.wait(io, &held, .none) catch return error.Canceled;
+                held.wait(&s.changed, io, .none) catch return error.Canceled;
             } else {
                 // The frame goes before the next is encoded.
                 s.post(shared);
@@ -380,7 +380,7 @@ pub const Stream = struct {
         defer held.deinit(io);
         const until = Io.Clock.awake.now(io).addDuration(timeout);
         while (st.recv_len == 0 and !st.recv_end and st.reset_code == null and !held.value().closed) {
-            s.changed.wait(io, &held, .{ .deadline = .{ .raw = until, .clock = .awake } }) catch |err| switch (err) {
+            held.wait(&s.changed, io, .{ .deadline = .{ .raw = until, .clock = .awake } }) catch |err| switch (err) {
                 error.Timeout => return .timed_out,
                 error.Canceled => return error.Canceled,
                 error.WaiterLimit => return .unbounded,
@@ -398,7 +398,7 @@ pub const Stream = struct {
         defer held.deinit(io);
         const deadline = timeout.toDeadline(io);
         while (st.reset_code == null and !held.value().closed) {
-            s.changed.wait(io, &held, deadline) catch |err| return switch (err) {
+            held.wait(&s.changed, io, deadline) catch |err| return switch (err) {
                 error.Timeout, error.WaiterLimit => false,
                 error.Canceled => error.Canceled,
             };

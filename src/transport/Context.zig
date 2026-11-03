@@ -70,9 +70,9 @@ pub const Options = struct {
 /// resolver points at its cache.
 pub fn init(gpa: Allocator, options: Options) Context {
     if (options.tls.resumption) |r| {
-        aegis.assert.pre(r.max_tickets >= 1 and r.max_tickets <= 1 << 20, "a ticket cache keeps 1 to 2^20 tickets");
-        aegis.assert.pre(r.per_server >= 1 and r.per_server <= 16, "a server keeps 1 to 16 tickets");
-        aegis.assert.pre(r.max_bytes.compare(.literal("4KiB")) != .lt, "a ticket cache holds at least 4 KiB");
+        aegis.assert.invariant(r.max_tickets >= 1 and r.max_tickets <= 1 << 20, "a ticket cache keeps 1 to 2^20 tickets");
+        aegis.assert.invariant(r.per_server >= 1 and r.per_server <= 16, "a server keeps 1 to 16 tickets");
+        aegis.assert.invariant(r.max_bytes.compare(.literal("4KiB")) != .lt, "a ticket cache holds at least 4 KiB");
     }
     return .{
         .gpa = gpa,

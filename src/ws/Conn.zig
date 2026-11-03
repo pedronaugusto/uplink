@@ -406,7 +406,7 @@ fn startInflate(c: *Conn) ReadError!void {
     // The window kept is 32 KiB whatever the peer's, which reaches no
     // farther than it says; a decoder needs at least the peer's.
     _ = bits;
-    i.state = .init(&i.window, .{ .accept = .raw, .window_bits = 15 });
+    i.state = warp.Inflate.init(&i.window, .{ .accept = .raw, .window_bits = 15 }) catch aegis.assert.never("the inflater's window is the 32 KiB a 15-bit window needs");
     c.reading.inflate = i;
 }
 
@@ -551,7 +551,10 @@ fn compress(c: *Conn, w: *Writing, input: []const u8, end: bool) WriteError![]co
     const params = c.deflate.?;
     if (w.deflate == null) {
         const bits: u4 = (if (c.role == .server) params.server_max_window_bits else params.client_max_window_bits) orelse 15;
-        w.deflate = try warp.Deflate.init(c.gpa, .{ .level = c.options.deflate_level, .max_level = c.options.deflate_level, .container = .raw, .window_bits = @max(bits, 9) });
+        w.deflate = warp.Deflate.init(c.gpa, .{ .level = c.options.deflate_level, .max_level = c.options.deflate_level, .container = .raw, .window_bits = @max(bits, 9) }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidOptions => aegis.assert.never("the window is at least 9 bits and the hash bits are warp's own"),
+        };
     }
     const d = &w.deflate.?;
     w.compressed.clearRetainingCapacity();
