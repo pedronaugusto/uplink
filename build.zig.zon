@@ -33,8 +33,8 @@
         },
 
         .warp = .{
-            .url = "git+https://github.com/pedronaugusto/warp#de67e2cf5ee55f250a35bbfd0681f40e5d42ce32",
-            .hash = "warp-0.4.5-JASxFaQ3LgA2AtgBjSNoEaErQVp0b5RrVlk6Z0JqsYF2",
+            .url = "git+https://github.com/pedronaugusto/warp#569a2f8dfbfb1c76fc8169580aca87caf202be23",
+            .hash = "warp-0.4.5-JASxFT1SLgArBun4tHrtpl1pVOisfAzYOqjegSaTVPrO",
             .lazy = true,
         },
 
