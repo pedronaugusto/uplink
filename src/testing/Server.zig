@@ -110,9 +110,11 @@ pub fn stop(s: *Server) void {
     s.stopping.store(true, .release);
     if (s.path) |p| {
         const address = Io.net.UnixAddress.init(p) catch unreachable; // unreachable: the server listened on it
+        // glint-ignore: Z026 -- a wake that cannot connect finds the server already gone, which is what the stop waits for
         if (address.connect(io)) |stream| stream.close(io) else |_| {}
     } else {
         const address = Io.net.IpAddress.parse("127.0.0.1", s.port) catch unreachable; // unreachable: a literal address
+        // glint-ignore: Z026 -- a wake that cannot connect finds the server already gone, which is what the stop waits for
         if (address.connect(io, .{ .mode = .stream })) |stream| stream.close(io) else |_| {}
     }
     s.task.await(io);

@@ -407,10 +407,12 @@ test "fuzz: any target is read or refused, and one read names a path, a query or
             const text = buf[0..len];
             const methods = [_]Method{ .GET, .CONNECT, .OPTIONS };
             const method = gen.oneOf(s, Method, &methods);
+            // glint-ignore: Z026 -- a generated target may parse or not; the property checks only one that does
             if (Target.parse(method, text)) |t| {
                 if (t.path.len != 0) try std.testing.expect(t.path[0] == '/');
                 if (t.query) |q| try std.testing.expect(std.mem.findScalar(u8, q, '?') == null or std.mem.findScalar(u8, text, '?') != null);
             } else |_| {}
+            // glint-ignore: Z026 -- a generated target may parse or not; the property checks only one that does
             if (Target.parseExtended(text)) |t| {
                 try std.testing.expect(t.path.len != 0 and t.path[0] == '/');
             } else |_| {}

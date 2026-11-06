@@ -376,6 +376,7 @@ const no_domain = "";
 /// or a name whose last two labels hash there. curl sends a cookie with no
 /// domain only to such hosts (`Curl_cookie_getlist`).
 fn sharesNoDomain(host: []const u8) bool {
+    // glint-ignore: Z026 -- a host that is no address literal is a name, judged below
     if (Io.net.IpAddress.parseLiteral(host)) |_| return true else |_| {}
     var top = host;
     if (std.mem.findScalarLast(u8, host, '.')) |last| {

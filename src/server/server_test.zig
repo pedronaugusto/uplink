@@ -317,6 +317,18 @@ test "a gzip request body is decoded, its checksum verified" {
     try testing.expect(std.mem.endsWith(u8, got, "\r\n\r\na gzip request body"));
 }
 
+test "a request body in a coding the server cannot read is refused with 415, never handed on as if decoded" {
+    const gpa = testing.allocator;
+    const running = try Running.start(gpa, .{}, .of(echo));
+    defer running.stop();
+    const got = try running.raw(gpa, "POST / HTTP/1.1\r\nHost: x\r\nContent-Encoding: snappy\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc");
+    defer gpa.free(got);
+    testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 415 ")) catch |err| {
+        std.debug.print("got {any}\n", .{got});
+        return err;
+    };
+}
+
 test "shutdown ends idle connections at once and lets an answer under way finish" {
     const gpa = testing.allocator;
     const io = test_io.io();

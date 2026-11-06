@@ -299,6 +299,7 @@ fn uppercaseBypassed(list: []const u8, host: []const u8, port: u16) bool {
             if (entry_host.len == 0) continue;
         }
         const port_ok = entry_port.len == 0 or std.mem.eql(u8, entry_port, port_text);
+        // glint-ignore: Z026 -- an entry that is no address literal is a domain, matched below
         if (IpAddress.parse(entry_host, 0)) |entry_ip| {
             if (ip) |a| if (sameAddress(a, entry_ip) and port_ok) return true;
             continue;

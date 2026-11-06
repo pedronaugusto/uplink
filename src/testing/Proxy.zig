@@ -61,6 +61,7 @@ pub fn stop(p: *Proxy) void {
     const io = p.io;
     p.stopping.store(true, .release);
     const address = Io.net.IpAddress.parse("127.0.0.1", p.port) catch unreachable; // unreachable: a literal address
+    // glint-ignore: Z026 -- a wake that cannot connect finds the proxy already gone, which is what the stop waits for
     if (address.connect(io, .{ .mode = .stream })) |stream| stream.close(io) else |_| {}
     p.task.await(io);
     p.group.cancel(io);

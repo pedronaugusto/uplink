@@ -187,10 +187,14 @@ fn serveOne(c: *Connection) bool {
     if (options.max_body) |max| request.body.cap(max.raw());
     defer if (request.body.trailer.len != 0) s.buffers.release(io, request.body.trailer);
     if (options.decompress and framing != .none) {
-        if (coding.Codings.of(&rh.headers)) |codings| {
-            if (codings.len != 0 and Decoder.decodes(codings.slice()))
-                request.decoder = Decoder.init(io, s.gpa, &s.buffers, &s.zstd, codings.slice()) catch return c.refuse(.service_unavailable, "out of memory");
-        } else |_| {}
+        // A body coded in a way the server cannot read is refused (RFC 9110, section 8.4.1),
+        // never handed on as if it were decoded.
+        const codings = coding.Codings.of(&rh.headers) catch |err| return c.refuse(.unsupported_media_type, switch (err) {
+            error.UnknownCoding => "unknown content coding",
+            error.TooManyCodings => "too many codings",
+        });
+        if (codings.len != 0 and Decoder.decodes(codings.slice()))
+            request.decoder = Decoder.init(io, s.gpa, &s.buffers, &s.zstd, codings.slice()) catch return c.refuse(.service_unavailable, "out of memory");
     }
     defer if (request.decoder) |*d| d.deinit(io, s.gpa, &s.buffers, &s.zstd);
 

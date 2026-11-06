@@ -309,18 +309,26 @@ fn answer(session: *Session, handler: *Handler, st: *Stream) void {
         .expects_continue = std.ascii.eqlIgnoreCase(std.mem.trim(u8, requestExpect(head.fields), " \t"), "100-continue") and body_coming,
     };
     defer request.release(io);
-    if (context.options.decompress and body_coming) {
+    // A body coded in a way the server cannot read is refused (RFC 9110, section 8.4.1),
+    // never handed on as if it were decoded.
+    const unreadable: ?wire.coding.Codings.Error = if (context.options.decompress and body_coming) codings: {
         const headers: wire.fields.Headers = .init(head.fields);
-        if (wire.coding.Codings.of(&headers)) |codings| {
-            if (codings.len != 0 and Decoder.decodes(codings.slice()))
-                request.decoder = Decoder.init(io, context.gpa, &context.buffers, &context.zstd, codings.slice()) catch return st.reset(io, .internal_error);
-        } else |_| {}
-    }
+        const codings = wire.coding.Codings.of(&headers) catch |err| break :codings err;
+        if (codings.len != 0 and Decoder.decodes(codings.slice()))
+            request.decoder = Decoder.init(io, context.gpa, &context.buffers, &context.zstd, codings.slice()) catch return st.reset(io, .internal_error);
+        break :codings null;
+    } else null;
     defer if (request.decoder) |*d| d.deinit(io, context.gpa, &context.buffers, &context.zstd);
     var response: Response = .init(session.socket, head.method.eql(.HEAD), false, request.headers.getKnown(.@"accept-encoding"));
     response.stream = st;
     defer response.release(io);
     sync.bump(&context.counters.requests);
+    if (unreadable) |err| {
+        if (context.options.observer) |o| o.emit(.{ .refused = .{ .status = @backingInt(std.http.Status.unsupported_media_type), .reason = codingRefusal(err) } });
+        response.status = .unsupported_media_type;
+        response.end(io) catch return st.reset(io, .internal_error);
+        return st.refuseRest(io);
+    }
     const arrived = Io.Clock.awake.now(io);
     handler.handle(io, &request, &response) catch |err| {
         if (context.options.observer) |o| o.emit(.{ .failed = .{ .method = head.method.name, .path = target.path, .error_name = @errorName(err), .head_sent = response.headSent() } });
@@ -367,4 +375,12 @@ fn finish(session: *Session, st: *Stream) void {
     if (st.recv.len != 0) session.context.gpa.free(st.recv);
     session.context.gpa.destroy(st);
     session.changed.broadcast(io);
+}
+
+/// Why a request's codings were refused, for the observer.
+fn codingRefusal(err: wire.coding.Codings.Error) []const u8 {
+    return switch (err) {
+        error.UnknownCoding => "unknown content coding",
+        error.TooManyCodings => "too many codings",
+    };
 }

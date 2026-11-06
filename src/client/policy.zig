@@ -112,6 +112,7 @@ pub const Retries = struct {
 /// against `now` on the calendar clock. Null when the value is neither.
 pub fn retryAfter(value: []const u8, now: date.Second) ?Duration {
     const text = std.mem.trim(u8, value, " \t");
+    // glint-ignore: Z026 -- a value that is no count of seconds is read as an HTTP date below
     if (std.fmt.parseUnsigned(u32, text, 10)) |n| return date.Seconds.fromRaw(n).convert(.nanosecond, u64, .exact) catch unreachable else |_| {} // unreachable: a u32 of seconds is 136 years of nanoseconds
     const at = date.parse(text) orelse return null;
     const ahead = now.saturatingDurationTo(at);

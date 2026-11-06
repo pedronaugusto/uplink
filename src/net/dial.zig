@@ -279,6 +279,7 @@ pub fn dialUnix(io: Io, path: []const u8, options: Options) DialError!Dialed {
     var buffer: [2]Race = undefined;
     var race: Io.Select(Race) = .init(io, &buffer);
     defer while (race.cancel()) |late| switch (late) {
+        // glint-ignore: Z026 -- a late dial that failed made no stream to close
         .connected => |result| if (result) |d| {
             var unclaimed = d;
             unclaimed.stream.deinit(io);
@@ -428,6 +429,7 @@ fn connectAny(io: Io, addresses: []const IpAddress, delay: Io.Duration, deadline
     var buffer: [2 * max_addresses]Event = undefined;
     var race: Io.Select(Event) = .init(io, &buffer);
     defer while (race.cancel()) |late| switch (late) {
+        // glint-ignore: Z026 -- a late dial that failed made no stream to close
         .connected => |result| if (result) |c| {
             var unclaimed = c;
             unclaimed.stream.deinit(io);

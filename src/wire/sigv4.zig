@@ -326,6 +326,7 @@ const Canonical = struct {
             while (i < text.len) : (i += 1) {
                 var byte = text[i];
                 if (byte == '%' and i + 2 < text.len) {
+                    // glint-ignore: Z026 -- a percent sign followed by no hex is kept as it is
                     if (std.fmt.parseInt(u8, text[i + 1 .. i + 3], 16)) |b| {
                         byte = b;
                         i += 2;
@@ -373,6 +374,7 @@ const Canonical = struct {
         while (i < raw_path.len) : (i += 1) {
             var byte = raw_path[i];
             if (byte == '%' and i + 2 < raw_path.len) {
+                // glint-ignore: Z026 -- a percent sign followed by no hex is kept as it is
                 if (std.fmt.parseInt(u8, raw_path[i + 1 .. i + 3], 16)) |b| {
                     byte = b;
                     i += 2;

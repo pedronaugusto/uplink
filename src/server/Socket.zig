@@ -251,7 +251,7 @@ fn awaitPipeEnd(c: *Socket, io: Io, until: Io.Timeout) Io.Cancelable!bool {
             r.end = 0;
         }
         if (r.end == r.buffer.len) return waitOut(io, until);
-        const left = until.toDurationFromNow(io) orelse Io.Clock.Duration{ .raw = .fromSeconds(std.math.maxInt(u32)), .clock = .awake };
+        const left = until.toDurationFromNow(io) orelse Io.Clock.Duration{ .raw = aegis.units.Duration(.second, u32).fromRaw(std.math.maxInt(u32)).toIoDuration(), .clock = .awake };
         if (left.raw.nanoseconds <= 0) return false;
         const found = reactor.net.pipe.readPipeWithin(io, c.stream.borrow().pipe, r.buffer[r.end..], left.raw) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
