@@ -196,23 +196,25 @@ fn acceptLoop(s: *Server, io: Io, listener: Listener, result: *ServeError!void) 
                     },
                 },
             },
-            .pipe => |l| .{ .pipe = pipe: {
-                var accepted = l.accept(io) catch |err| switch (err) {
-                    error.Canceled => {
-                        if (!s.context.isStopping()) result.* = error.Canceled;
-                        return;
-                    },
-                    error.SystemResources => continue,
-                    error.Unexpected => {
-                        result.* = error.AcceptFailed;
-                        return;
-                    },
-                };
-                // The endpoint's owner closes it from here.
-                var file: Io.File = undefined;
-                accepted.take(&file);
-                break :pipe file;
-            } },
+            .pipe => |l| .{
+                .pipe = pipe: {
+                    var accepted = l.accept(io) catch |err| switch (err) {
+                        error.Canceled => {
+                            if (!s.context.isStopping()) result.* = error.Canceled;
+                            return;
+                        },
+                        error.SystemResources => continue,
+                        error.Unexpected => {
+                            result.* = error.AcceptFailed;
+                            return;
+                        },
+                    };
+                    // The endpoint's owner closes it from here.
+                    var file: Io.File = undefined;
+                    accepted.take(&file);
+                    break :pipe file;
+                },
+            },
         };
         if (s.context.isStopping()) {
             var owned: OwnedEndpoint = .init(endpoint);
