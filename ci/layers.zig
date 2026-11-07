@@ -98,6 +98,9 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "transport multiplexed", .patterns = &.{
         "src/transport/H2.zig",
     } },
+    .{ .name = "transport tunnels", .patterns = &.{
+        "src/transport/H2Tunnel.zig",
+    } },
     .{ .name = "transport", .patterns = &.{
         "src/transport.zig",
     } },

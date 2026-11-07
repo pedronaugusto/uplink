@@ -15,6 +15,11 @@ const Proxy = @import("../transport/Proxy.zig");
 const openssl = @import("../testing/openssl.zig");
 const TestProxy = @import("../testing/Proxy.zig");
 const Server = @import("../testing/Server.zig");
+const serving = struct {
+    const Server = @import("../server/Server.zig");
+    const Request = @import("../server/Request.zig");
+    const Response = @import("../server/Response.zig");
+};
 
 /// `GET /` over TLS to `port`: the status page, in `gpa`.
 fn fetch(gpa: Allocator, io: Io, client: *Client, port: u16, diagnostics: ?*Diagnostics) ![]u8 {
@@ -282,6 +287,249 @@ test "TLS to the server runs inside a CONNECT tunnel and inside SOCKS" {
         defer gpa.free(log);
         try testing.expect(std.mem.find(u8, log, "127.0.0.1:") != null);
     }
+}
+
+/// A proxy that speaks HTTP/2: each `CONNECT` is answered by connecting to its
+/// authority and passing bytes both ways until either end ends.
+const H2Proxy = struct {
+    /// The `CONNECT`s it was asked, and the `proxy-authorization` it was shown.
+    connects: std.atomic.Value(u32) = .init(0),
+    authorized: std.atomic.Value(u32) = .init(0),
+    require: ?[]const u8 = null,
+    handler: serving.Server.Handler = .{ .handleFn = handle },
+
+    fn handle(handler: *serving.Server.Handler, io: Io, request: *serving.Request, response: *serving.Response) anyerror!void {
+        const p: *H2Proxy = @alignCast(@fieldParentPtr("handler", handler));
+        if (!request.method.eql(.CONNECT)) {
+            response.status = .method_not_allowed;
+            return response.end(io);
+        }
+        _ = p.connects.fetchAdd(1, .monotonic);
+        if (p.require) |want| {
+            const shown = request.headers.get("proxy-authorization") orelse "";
+            if (!std.mem.eql(u8, shown, want)) {
+                response.status = .proxy_auth_required;
+                try response.header("Proxy-Authenticate", "Basic realm=\"tunnel\"");
+                return response.end(io);
+            }
+            _ = p.authorized.fetchAdd(1, .monotonic);
+        }
+        const colon = std.mem.findScalarLast(u8, request.target, ':').?;
+        const port = try std.fmt.parseInt(u16, request.target[colon + 1 ..], 10);
+        const address = try Io.net.IpAddress.parse(request.target[0..colon], port);
+        const stream = try address.connect(io, .{ .mode = .stream });
+        defer stream.close(io);
+        var taken = try response.hijack(io);
+        var up: Io.Future(void) = try io.concurrent(pass, .{ io, taken.reader, stream });
+        defer up.cancel(io);
+        var from_buffer: [16 << 10]u8 = undefined;
+        var from = stream.reader(io, &from_buffer);
+        while (true) {
+            const n = from.interface.stream(taken.writer, .unlimited) catch break;
+            if (n == 0) continue;
+            taken.flush() catch break;
+        }
+    }
+
+    fn pass(io: Io, from: *Io.Reader, stream: Io.net.Stream) void {
+        var to_buffer: [16 << 10]u8 = undefined;
+        var to = stream.writer(io, &to_buffer);
+        while (true) {
+            _ = from.stream(&to.interface, .unlimited) catch return;
+            to.interface.flush() catch return;
+        }
+    }
+
+    const Running = struct {
+        server: serving.Server,
+        listener: Io.net.Server,
+        task: Io.Future(serving.Server.ServeError!void),
+        port: u16,
+
+        fn start(gpa: Allocator, io: Io, p: *H2Proxy, r: *Running) !void {
+            return r.startOn(gpa, io, .{ .h2c = .only }, &p.handler);
+        }
+
+        fn startOn(r: *Running, gpa: Allocator, io: Io, options: serving.Server.Options, handler: *serving.Server.Handler) !void {
+            r.listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
+            r.port = r.listener.socket.address.getPort();
+            r.server = .init(gpa, options, handler);
+            r.task = io.concurrent(serving.Server.serve, .{ &r.server, io, &r.listener }) catch return error.SkipZigTest;
+        }
+
+        fn stop(r: *Running, io: Io) void {
+            r.server.shutdown(io);
+            r.task.await(io) catch |err| std.debug.print("the proxy's serve ended with {t}\n", .{err});
+            r.server.deinit(io);
+            r.listener.deinit(io);
+        }
+    };
+};
+
+fn throughH2Proxy(gpa: Allocator, io: Io, proxy_url: []const u8, trust: cloak.Trust.Snapshot, target_port: u16, diagnostics: ?*Diagnostics) ![]u8 {
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    var proxy = try Proxy.parse(arena_state.allocator(), proxy_url, .lowercase);
+    proxy.http2 = true;
+    var client: Client = .init(gpa, .{ .tls = .{ .trust = trust }, .proxy = .{ .fixed = proxy } });
+    defer client.deinit(io);
+    return fetch(gpa, io, &client, target_port, diagnostics);
+}
+
+test "TLS to the server runs inside a CONNECT stream of an HTTP/2 proxy" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const pki = try openssl.Pki.make(gpa, io);
+    defer pki.destroy();
+    var target = try openssl.SServer.start(gpa, io, pki, .{});
+    defer target.stop(io);
+    const trust = try trusting(io, pki, "server.pem");
+    defer trust.deinit();
+    var h2_proxy: H2Proxy = .{};
+    var running: H2Proxy.Running = undefined;
+    try H2Proxy.Running.start(gpa, io, &h2_proxy, &running);
+    defer running.stop(io);
+    var url_buf: [64]u8 = undefined;
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}", .{running.port});
+    const page = try throughH2Proxy(gpa, io, url, trust, target.port, null);
+    defer gpa.free(page);
+    try testing.expect(std.mem.find(u8, page, "Protocol") != null);
+    try testing.expectEqual(@as(u32, 1), h2_proxy.connects.load(.monotonic));
+}
+
+test "an HTTP/2 proxy that asks is answered on a new connection, and one that refuses says so" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const pki = try openssl.Pki.make(gpa, io);
+    defer pki.destroy();
+    var target = try openssl.SServer.start(gpa, io, pki, .{});
+    defer target.stop(io);
+    const trust = try trusting(io, pki, "server.pem");
+    defer trust.deinit();
+    var h2_proxy: H2Proxy = .{ .require = "Basic dXNlcjpzZWNyZXQ=" };
+    var running: H2Proxy.Running = undefined;
+    try H2Proxy.Running.start(gpa, io, &h2_proxy, &running);
+    defer running.stop(io);
+    var url_buf: [96]u8 = undefined;
+    const answered = try std.mem.print(&url_buf, "http://user:secret@127.0.0.1:{d}", .{running.port});
+    const page = try throughH2Proxy(gpa, io, answered, trust, target.port, null);
+    defer gpa.free(page);
+    try testing.expectEqual(@as(u32, 1), h2_proxy.authorized.load(.monotonic));
+    // No credential to answer with: the proxy's 407 is the failure.
+    var bare_buf: [64]u8 = undefined;
+    const bare = try std.mem.print(&bare_buf, "http://127.0.0.1:{d}", .{running.port});
+    var diagnostics: Diagnostics = .{};
+    try testing.expectError(error.ProxyAuthenticationRequired, throughH2Proxy(gpa, io, bare, trust, target.port, &diagnostics));
+    try testing.expectEqual(@as(?u16, 407), diagnostics.proxy_status);
+}
+
+test "a proxy named http2 that does not speak it fails, and is not asked again over HTTP/1.1" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const pki = try openssl.Pki.make(gpa, io);
+    defer pki.destroy();
+    const trust = try trusting(io, pki, "server.pem");
+    defer trust.deinit();
+    // An HTTP/1.1 proxy given HTTP/2's preface: it never answers a CONNECT.
+    const http1 = try TestProxy.start(gpa, io, .{});
+    defer http1.stop();
+    var url_buf: [64]u8 = undefined;
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}", .{http1.port});
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    var proxy = try Proxy.parse(arena_state.allocator(), url, .lowercase);
+    proxy.http2 = true;
+    var client: Client = .init(gpa, .{
+        .tls = .{ .trust = trust },
+        .proxy = .{ .fixed = proxy },
+        .timeouts = .{ .handshake = .literal("500ms") },
+    });
+    defer client.deinit(io);
+    var page_url_buf: [64]u8 = undefined;
+    const page_url = try std.mem.print(&page_url_buf, "https://127.0.0.1:{d}/", .{http1.port});
+    if (client.send(io, .{ .url = page_url })) |response| {
+        var unexpected = response;
+        unexpected.deinit(io);
+        return error.TestUnexpectedResult;
+    } else |_| {}
+    const log = try http1.lines(gpa);
+    defer gpa.free(log);
+    try testing.expectEqual(@as(?usize, null), std.mem.find(u8, log, "CONNECT"));
+}
+
+fn echoBody(io: Io, request: *serving.Request, response: *serving.Response) anyerror!void {
+    const body = try request.collect(testing.allocator, io, .limited(4 << 20));
+    defer testing.allocator.free(body);
+    const w = try response.writer(io);
+    try w.writeAll(body);
+    try response.end(io);
+}
+
+test "an https HTTP/2 proxy carries a body past the flow-control windows, both ways" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const pki = try openssl.Pki.make(gpa, io);
+    defer pki.destroy();
+    const cert = try pki.read(io, "server-ec.pem");
+    defer gpa.free(cert);
+    const key_pem = try pki.read(io, "server-ec.key");
+    defer gpa.free(key_pem);
+    const key = try cloak.PrivateKey.parse(gpa, key_pem, .{});
+    defer key.deinit();
+    var identity = try cloak.Identity.initPem(gpa, cert, key, .{});
+    defer identity.deinit();
+    var builder: cloak.Trust = .init(gpa);
+    defer builder.deinit();
+    try builder.addPem(cert, .{});
+    var trust = try builder.freeze();
+    defer trust.deinit();
+    const credentials = [_]cloak.tls.Credential{.{ .identity = identity }};
+
+    var target: H2Proxy.Running = undefined;
+    try target.startOn(gpa, io, .{ .tls = .{ .credentials = &credentials } }, serving.Server.Handler.of(echoBody));
+    defer target.stop(io);
+    var h2_proxy: H2Proxy = .{};
+    var proxying: H2Proxy.Running = undefined;
+    try proxying.startOn(gpa, io, .{ .tls = .{ .credentials = &credentials } }, &h2_proxy.handler);
+    defer proxying.stop(io);
+
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    var proxy_url_buf: [64]u8 = undefined;
+    var proxy = try Proxy.parse(arena_state.allocator(), try std.mem.print(&proxy_url_buf, "https://127.0.0.1:{d}", .{proxying.port}), .lowercase);
+    proxy.http2 = true;
+    var client: Client = .init(gpa, .{ .tls = .{ .trust = trust }, .proxy = .{ .fixed = proxy } });
+    defer client.deinit(io);
+
+    const sent = try gpa.alloc(u8, 1 << 20);
+    defer gpa.free(sent);
+    for (sent, 0..) |*b, i| b.* = @truncate(i *% 31);
+    var url_buf: [64]u8 = undefined;
+    const url = try std.mem.print(&url_buf, "https://127.0.0.1:{d}/", .{target.port});
+    // A second round reuses the tunnel the first left in the pool.
+    for (0..2) |_| {
+        var response = try client.send(io, .{ .url = url, .method = .POST, .body = .{ .bytes = sent } });
+        defer response.deinit(io);
+        const back = try response.collect(gpa, io, .limited(2 << 20));
+        defer gpa.free(back);
+        try testing.expectEqualSlices(u8, sent, back);
+    }
+    try testing.expectEqual(@as(u32, 1), h2_proxy.connects.load(.monotonic));
+}
+
+test "an https proxy named http2 that does not agree h2 by ALPN is refused by name" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const pki = try openssl.Pki.make(gpa, io);
+    defer pki.destroy();
+    // `openssl s_server` given no `-alpn` agrees nothing.
+    var no_alpn = try openssl.SServer.start(gpa, io, pki, .{});
+    defer no_alpn.stop(io);
+    const trust = try trusting(io, pki, "server.pem");
+    defer trust.deinit();
+    var url_buf: [64]u8 = undefined;
+    const url = try std.mem.print(&url_buf, "https://127.0.0.1:{d}", .{no_alpn.port});
+    try testing.expectError(error.ProxyProtocolError, throughH2Proxy(gpa, io, url, trust, no_alpn.port, null));
 }
 
 test "a handshake that does not come is given up on at the handshake timeout" {

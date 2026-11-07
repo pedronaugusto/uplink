@@ -49,8 +49,8 @@ ctx: *Context,
 /// adapters, which cannot take one per call. A shared connection's stays
 /// the one it was made shared with.
 io: Io,
-/// Private: the socket, and its one owner.
-stream: stream_owner.Owned,
+/// Private: what the bottom layer goes over.
+bottom: Bottom,
 /// Where the connection goes.
 route: Context.Route,
 /// Private: the socket's reader and writer.
@@ -130,6 +130,33 @@ pub const IoError = error{
     TlsFailed,
     ClientCertificateRejected,
     Canceled,
+};
+
+/// What a connection's bottom layer goes over.
+const Bottom = union(enum) {
+    /// A socket or pipe, and its one owner.
+    endpoint: stream_owner.Owned,
+    /// A tunnel an upper layer made, which the connection closes with itself.
+    carrier: *Carrier,
+};
+
+/// What a connection goes over instead of a socket: its bytes both ways, each
+/// operation ended at the deadline the connection gives it. One read and one
+/// write may be under way at once, as on a socket.
+pub const Carrier = struct {
+    vtable: *const VTable,
+
+    pub const Error = error{ EndOfStream, TimedOut, Canceled, Broken };
+
+    pub const VTable = struct {
+        read: *const fn (c: *Carrier, io: Io, dest: []u8, deadline: ?Io.Timestamp) Error!usize,
+        /// `header`, every slice of `data` but the last, and the last
+        /// `splat` times, whole: the bytes moved.
+        write: *const fn (c: *Carrier, io: Io, header: []const u8, data: []const []const u8, splat: usize, deadline: ?Io.Timestamp) Error!usize,
+        awaitReadable: *const fn (c: *Carrier, io: Io, timeout: Io.Duration) Io.Cancelable!Timed.Readiness,
+        alive: *const fn (c: *Carrier, io: Io) bool,
+        close: *const fn (c: *Carrier, io: Io) void,
+    };
 };
 
 /// What `open` needs besides the route.
@@ -249,7 +276,7 @@ fn openOnce(ctx: *Context, io: Io, route: Context.Route, options: OpenOptions, a
         .lookup = dialed.lookup,
         .took = span.of(started.durationTo(Io.Clock.awake.now(io))),
     } });
-    const conn = create(ctx, io, route, &dialed.stream, diagnostics) catch |err| {
+    const conn = create(ctx, io, route, .{ .endpoint = &dialed.stream }, diagnostics) catch |err| {
         dialed.stream.deinit(io);
         return err;
     };
@@ -275,9 +302,45 @@ fn timedOutBeforeOpen(diagnostics: ?*Diagnostics) OpenError {
     return error.TimedOut;
 }
 
-/// A connection over `stream`, with nothing on it yet.
-/// The stream moves into the connection only once nothing can fail.
-fn create(ctx: *Context, io: Io, route: Context.Route, stream: *stream_owner.Owned, diagnostics: ?*Diagnostics) Allocator.Error!*Connection {
+/// A connection to `route` over `carrier`, which it now owns and closes on
+/// failing: its TLS to the target started. `watched` is the endpoint under the
+/// carrier, whose deadlines the connection never arms: the carrier keeps them.
+pub fn openOver(ctx: *Context, io: Io, route: Context.Route, carrier: *Carrier, watched: stream_owner.Endpoint, options: OpenOptions) OpenError!*Connection {
+    const conn = create(ctx, io, route, .{ .carrier = .{ .carrier = carrier, .watched = watched } }, options.diagnostics) catch |err| {
+        carrier.vtable.close(carrier, io);
+        return err;
+    };
+    conn.deadline = options.deadline;
+    conn.startTls(1, route.host(), .{ .alpn = if (route.protocol == .negotiate) tls.client_protocols else tls.client_protocols_h1 }) catch |err| {
+        conn.teardown(io, false);
+        return switch (err) {
+            // No ECH is offered through a tunnel, so none is refused.
+            error.EchRejected => error.TlsFailed,
+            else => |e| e,
+        };
+    };
+    return conn;
+}
+
+/// What the connection's socket is: what `openOver` watches.
+pub fn endpoint(conn: *Connection) stream_owner.Endpoint {
+    return conn.bottom.endpoint.borrow().*;
+}
+
+/// Whether a connection opened to its proxy may speak HTTP/2 there: TLS agreed
+/// `h2`, or there is no TLS and the proxy is spoken to by prior knowledge.
+pub fn proxySpeaksH2(conn: *const Connection) bool {
+    if (!conn.session_on[0]) return true;
+    const info = conn.sessions[0].info() orelse return false;
+    return std.mem.eql(u8, info.alpn, "h2");
+}
+
+/// A connection over `over`, with nothing on it yet. An endpoint's owner moves
+/// into the connection only once nothing can fail.
+fn create(ctx: *Context, io: Io, route: Context.Route, over: union(enum) {
+    endpoint: *stream_owner.Owned,
+    carrier: struct { carrier: *Carrier, watched: stream_owner.Endpoint },
+}, diagnostics: ?*Diagnostics) Allocator.Error!*Connection {
     const conn = try ctx.gpa.create(Connection);
     errdefer ctx.gpa.destroy(conn);
     const read_buffer = try ctx.buffers.acquire(io, .record);
@@ -286,7 +349,10 @@ fn create(ctx: *Context, io: Io, route: Context.Route, stream: *stream_owner.Own
     conn.* = .{
         .ctx = ctx,
         .io = io,
-        .stream = stream.move(),
+        .bottom = switch (over) {
+            .endpoint => |owned| .{ .endpoint = owned.move() },
+            .carrier => |c| .{ .carrier = c.carrier },
+        },
         .route = route,
         .input = .init(read_buffer),
         .output = .init(write_buffer),
@@ -294,7 +360,10 @@ fn create(ctx: *Context, io: Io, route: Context.Route, stream: *stream_owner.Own
         .diagnostics = diagnostics,
     };
     // The owner is used first where it stays.
-    conn.timed = .init(conn.stream.borrow().*);
+    conn.timed = .init(switch (over) {
+        .endpoint => conn.bottom.endpoint.borrow().*,
+        .carrier => |c| c.watched,
+    });
     return conn;
 }
 
@@ -316,7 +385,8 @@ fn establish(conn: *Connection, proxy: ?Proxy, started: Io.Timestamp, again: *bo
             try conn.socksTunnel(p, started);
             conn.observeTunnel(at);
         } else {
-            if (p.kind == .https) try conn.startTls(0, p.host, .{ .alpn = tls.client_protocols_h1, .ech = conn.ctx.greaseOr() });
+            // A connection H2Tunnel opened, to the proxy itself, offers `h2`.
+            if (p.kind == .https) try conn.startTls(0, p.host, .{ .alpn = if (conn.route.protocol == .h2_prior_knowledge) tls.client_protocols_h2 else tls.client_protocols_h1, .ech = conn.ctx.greaseOr() });
             if (conn.route.secure) {
                 const at = conn.observeStart();
                 try conn.tunnel(p, again);
@@ -361,7 +431,10 @@ fn teardown(conn: *Connection, io: Io, polite: bool) void {
         conn.session_on[i] = false;
     }
     conn.timed.deinit(io, conn.ctx.keeper());
-    conn.stream.deinit(io);
+    switch (conn.bottom) {
+        .endpoint => |*owned| owned.deinit(io),
+        .carrier => |carrier| carrier.vtable.close(carrier, io),
+    }
     conn.releaseSocketBuffers(io);
     conn.ctx.gpa.destroy(conn);
 }
@@ -405,12 +478,16 @@ pub fn alive(conn: *Connection, io: Io) Io.Cancelable!bool {
     const r = &conn.input.interface;
     const secure = conn.session_on[0] or conn.session_on[1];
     if (r.seek != r.end) return secure;
-    if (conn.stream.borrow().socketStream()) |stream| if (sys.peek(stream.socket.handle)) |seen| return switch (seen) {
+    const stream_end = switch (conn.bottom) {
+        .endpoint => |*owned| owned,
+        .carrier => |carrier| return carrier.vtable.alive(carrier, io),
+    };
+    if (stream_end.borrow().socketStream()) |stream| if (sys.peek(stream.socket.handle)) |seen| return switch (seen) {
         .idle => true,
         .readable => secure,
         .closed => false,
     };
-    return switch (try Timed.awaitReadable(io, conn.stream.borrow().*, r, .fromNanoseconds(0))) {
+    return switch (try Timed.awaitReadable(io, stream_end.borrow().*, r, .fromNanoseconds(0))) {
         .timed_out, .unbounded => true,
         // Nothing read is the stream's end, or its failure.
         .ready => r.end != 0 and secure,
@@ -430,7 +507,12 @@ pub fn readable(conn: *Connection, io: Io, timeout: Io.Duration) Io.Cancelable!b
 pub fn awaitReadable(conn: *Connection, io: Io, timeout: Io.Duration) Io.Cancelable!Timed.Readiness {
     if (!conn.shared) conn.io = io;
     if (conn.reader().bufferedLen() != 0) return .ready;
-    return Timed.awaitReadable(io, conn.stream.borrow().*, &conn.input.interface, timeout);
+    return switch (conn.bottom) {
+        .endpoint => |*owned| Timed.awaitReadable(io, owned.borrow().*, &conn.input.interface, timeout),
+        // What a read left in the bottom reader may be all there is to come:
+        // a record read whole, and not yet taken by the session above.
+        .carrier => |carrier| if (conn.input.interface.bufferedLen() != 0) .ready else carrier.vtable.awaitReadable(carrier, io, timeout),
+    };
 }
 
 /// The exchange is over, and what is left of its body must end by `until`
@@ -640,6 +722,27 @@ fn perform(conn: *Connection, op: Io.Operation) error{Failed}!Io.Operation.Resul
     };
 }
 
+/// The deadline the next read or write over a carrier ends at, armed as a
+/// socket operation's is.
+fn limitAt(conn: *Connection, reading: bool) ?Io.Timestamp {
+    const limit = conn.operationLimit(conn.io, reading) orelse return null;
+    conn.armed.store(limit.kind, .monotonic);
+    return limit.at;
+}
+
+/// A carrier's answer, a failure recorded as a socket operation's is.
+fn carried(conn: *Connection, result: Carrier.Error!usize) error{ EndOfStream, Failed }!usize {
+    return result catch |err| switch (err) {
+        error.EndOfStream => error.EndOfStream,
+        error.TimedOut => {
+            conn.noteTimedOut(conn.armed.load(.monotonic));
+            return error.Failed;
+        },
+        error.Canceled => conn.fail(.canceled),
+        error.Broken => conn.fail(.broken),
+    };
+}
+
 /// `n` bytes moved, for the low-speed window.
 fn moved(conn: *Connection, n: usize, reading: bool) void {
     if (conn.ctx.timeouts.low_speed != null and conn.paced(reading)) conn.speed.bytes = conn.speed.bytes.add(.fromRaw(n)) catch .fromRaw(std.math.maxInt(u64));
@@ -720,10 +823,18 @@ const SocketReader = struct {
         const conn = connection(r);
         var iovecs: [8][]u8 = undefined;
         const dest_n, const data_size = try r.writableVector(&iovecs, data);
-        const result = conn.perform(conn.stream.borrow().readOp(iovecs[0..dest_n])) catch return error.ReadFailed;
-        const n = stream_owner.Endpoint.readCount(result) catch {
-            conn.note(.broken);
-            return error.ReadFailed;
+        const n = switch (conn.bottom) {
+            .endpoint => |*owned| counted: {
+                const result = conn.perform(owned.borrow().readOp(iovecs[0..dest_n])) catch return error.ReadFailed;
+                break :counted stream_owner.Endpoint.readCount(result) catch {
+                    conn.note(.broken);
+                    return error.ReadFailed;
+                };
+            },
+            .carrier => |carrier| conn.carried(carrier.vtable.read(carrier, conn.io, iovecs[0], conn.limitAt(true))) catch |err| switch (err) {
+                error.EndOfStream => return error.EndOfStream,
+                error.Failed => return error.ReadFailed,
+            },
         };
         if (n == 0) return error.EndOfStream;
         conn.moved(n, true);
@@ -764,10 +875,15 @@ const SocketWriter = struct {
     fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
         const sw: *SocketWriter = @alignCast(@fieldParentPtr("interface", w)); // safe: this vtable is installed only on a SocketWriter's interface
         const conn: *Connection = @alignCast(@fieldParentPtr("output", sw)); // safe: a SocketWriter lives only in a Connection's `output`
-        const result = conn.perform(conn.stream.borrow().writeOp(w.buffered(), data, splat)) catch return error.WriteFailed;
-        const n = stream_owner.Endpoint.writeCount(result) catch {
-            conn.note(.broken);
-            return error.WriteFailed;
+        const n = switch (conn.bottom) {
+            .endpoint => |*owned| counted: {
+                const result = conn.perform(owned.borrow().writeOp(w.buffered(), data, splat)) catch return error.WriteFailed;
+                break :counted stream_owner.Endpoint.writeCount(result) catch {
+                    conn.note(.broken);
+                    return error.WriteFailed;
+                };
+            },
+            .carrier => |carrier| conn.carried(carrier.vtable.write(carrier, conn.io, w.buffered(), data, splat, conn.limitAt(false))) catch return error.WriteFailed,
         };
         conn.moved(n, false);
         return w.consume(n);
@@ -941,7 +1057,7 @@ fn tunnel(conn: *Connection, proxy: Proxy, again: *bool) OpenError!void {
 }
 
 /// `host:port` as an authority has it, IPv6 bracketed.
-fn writeAuthority(w: *Io.Writer, host: []const u8, port: u16) Io.Writer.Error!void {
+pub fn writeAuthority(w: *Io.Writer, host: []const u8, port: u16) Io.Writer.Error!void {
     if (std.mem.findScalar(u8, host, ':') != null) try w.print("[{s}]:{d}", .{ host, port }) else try w.print("{s}:{d}", .{ host, port });
 }
 

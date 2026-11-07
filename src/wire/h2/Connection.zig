@@ -683,10 +683,12 @@ pub fn sendable(c: *Connection, id: u31) usize {
 
 /// Write data on `id`: as much of `bytes` as the windows allow now, in
 /// one frame; the bytes written. With `end_stream`, the stream ends once
-/// all of `bytes` has gone.
+/// all of `bytes` has gone. Nothing to say writes no frame: a peer counts
+/// empty frames against its flood limit (`Limits.max_empty`).
 pub fn writeData(c: *Connection, w: *Io.Writer, id: u31, bytes: []const u8, end_stream: bool) WriteError!usize {
     const s = c.stream(id) orelse return error.StreamClosed;
     if (!sends(s.state)) return error.StreamClosed;
+    if (bytes.len == 0 and !end_stream) return 0;
     const n = @min(bytes.len, c.sendable(id));
     if (n == 0 and bytes.len != 0) return 0;
     const last = end_stream and n == bytes.len;
@@ -715,6 +717,22 @@ pub fn release(c: *Connection, id: u31) void {
 }
 
 const testing = std.testing;
+
+test "no bytes and no end write no frame, and an empty end still does" {
+    var memory: TestMemory = .{};
+    var client: Connection = .init(.client, .{}, .{}, memory.memory());
+    var bytes: [256]u8 = undefined;
+    var w: Io.Writer = .fixed(&bytes);
+    try client.start(&w);
+    const id = try client.open();
+    var scratch: [256]u8 = undefined;
+    try client.writeHeaders(&w, id, &.{.{ .name = ":method", .value = "GET" }}, false, &scratch);
+    const before = w.end;
+    try std.testing.expectEqual(@as(usize, 0), try client.writeData(&w, id, "", false));
+    try std.testing.expectEqual(before, w.end);
+    try std.testing.expectEqual(@as(usize, 0), try client.writeData(&w, id, "", true));
+    try std.testing.expectEqual(before + h2.head_len, w.end);
+}
 
 test "an upgraded connection's stream 1 is the request, ended on the client's side" {
     var cm: TestMemory = .{};

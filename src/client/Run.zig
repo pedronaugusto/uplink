@@ -27,6 +27,7 @@ const hpack = wire.hpack;
 const h2_message = wire.h2.message;
 const Connection = @import("../transport/Connection.zig");
 const H2 = @import("../transport/H2.zig");
+const H2Tunnel = @import("../transport/H2Tunnel.zig");
 const Pool = @import("../pool/Pool.zig");
 const Context = @import("../transport/Context.zig");
 const Diagnostics = @import("../transport/Diagnostics.zig");
@@ -279,7 +280,9 @@ pub fn acquire(run: *Run, io: Io, r: Context.Route) Error!Lease {
                 return .{ .kind = .{ .h1 = conn }, .reused = true };
             },
             .open => {
-                const conn = Connection.open(&c.context, io, r, .{ .diagnostics = d, .deadline = run.deadline }) catch |err| {
+                const options: Connection.OpenOptions = .{ .diagnostics = d, .deadline = run.deadline };
+                const opened = if (H2Tunnel.serves(r)) H2Tunnel.open(&c.context, io, r, options) else Connection.open(&c.context, io, r, options);
+                const conn = opened catch |err| {
                     c.pool.closed(io, &r);
                     return switch (err) {
                         error.InvalidHostName => error.InvalidUrl,

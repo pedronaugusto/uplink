@@ -34,6 +34,12 @@ credential: ?Credential = null,
 connect_headers: ?[]const std.http.Header = null,
 /// TLS to an `https` proxy.
 tls: Tls = .{},
+/// Ask for a tunnel over HTTP/2 (`CONNECT` on a stream, RFC 9113 §8.5): an
+/// `https` proxy must agree `h2` by ALPN, or the connection fails with
+/// `ProxyProtocolError`; an `http` one is spoken to by prior knowledge. Each
+/// tunnel holds a proxy connection of its own. An `http` target still goes in
+/// HTTP/1.1's absolute form, and SOCKS proxies take no notice.
+http2: bool = false,
 
 pub const Kind = enum {
     http,
