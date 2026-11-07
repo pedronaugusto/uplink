@@ -268,9 +268,9 @@ pub const max_records = 16;
 /// The server a query starts at on its turn: the turns go round the
 /// servers, whatever the count has reached.
 fn turnOf(turn: sync.Events, servers: usize) usize {
-    // aegis: no-danger(A004): the count only picks where a query starts; nothing reads it as a count
-    const round = turn.raw() % servers;
-    return aegis.int.cast(usize, round) catch unreachable; // unreachable: below the number of servers, a usize
+    // No servers is no turn: `exchange` answers that before it asks.
+    const round = turn.rem(servers) catch return 0;
+    return aegis.int.cast(usize, round.raw()) catch unreachable; // unreachable: below the number of servers, a usize
 }
 
 pub const Stub = struct {
