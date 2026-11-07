@@ -37,6 +37,7 @@ pub fn init(gpa: Allocator, options: Options) Client {
             .dns_cache = options.dns_cache,
             .observer = options.observer,
             .max_zstd_window = options.max_zstd_window,
+            .max_brotli_window = options.max_brotli_window,
             .max_free_buffers = @as(u32, options.pool.max_idle) * 2 + 4,
         }),
         .pool = .init(gpa, options.pool),

@@ -4,13 +4,14 @@
 //!
 //! What a coding promises is checked: gzip's CRC-32 and length and zlib's
 //! Adler-32 at the end of each stream, zstd's content checksum where a
-//! frame carries one, a gzip body of several members read whole, and a
-//! stream cut short refused rather than ended. HTTP's `deflate` is zlib,
+//! frame carries one (Brotli carries none), a gzip body of several members
+//! read whole, and a stream cut short refused rather than ended. HTTP's `deflate` is zlib,
 //! and a raw DEFLATE stream, which some servers send under that name, is
 //! read too.
 //!
 //! A gzip or deflate layer lives in one large buffer of the pool, its
-//! history and then its decoder's state; a zstd layer in a `ZstdBuffer`.
+//! history and then its decoder's state; a zstd or Brotli layer in a
+//! buffer of `Windows`.
 //! The decoder itself is the list of those buffers, so whoever holds a
 //! body holds a few words more. Once started it must not move: each
 //! layer reads from the one before it.
@@ -25,7 +26,7 @@ const wire = @import("uplink.wire");
 const ContentCoding = wire.coding.ContentCoding;
 const Codings = wire.coding.Codings;
 const BufferPool = @import("../transport/BufferPool.zig");
-const ZstdBuffer = @import("ZstdBuffer.zig");
+const Windows = @import("windows.zig").Windows;
 
 const Decoder = @This();
 
@@ -35,7 +36,7 @@ len: u8 = 0,
 
 const Layer = struct {
     coding: ContentCoding,
-    /// A pool buffer, or a zstd one: both 64-aligned.
+    /// A pool buffer, or a window one: both 64-aligned.
     buffer: []align(64) u8,
 };
 
@@ -49,7 +50,7 @@ pub const Error = error{
     ChecksumMismatch,
     /// A stream that names a dictionary.
     DictionaryMismatch,
-    /// A zstd frame whose window passes the cap.
+    /// A zstd frame or Brotli stream whose window passes the cap.
     WindowTooLarge,
     /// The body ended inside a stream.
     Truncated,
@@ -69,25 +70,30 @@ comptime {
     std.debug.assert(flateSplit(BufferPool.Class.large.len()).history >= (32 << 10) + 4096);
 }
 
-/// Whether every one of `codings` is one warp decodes: gzip, deflate or
-/// zstd. Any other is handed over as it came.
+/// Whether every one of `codings` is one warp decodes: gzip, deflate, zstd
+/// or Brotli. Any other is handed over as it came.
 pub fn decodes(codings: []const ContentCoding) bool {
     for (codings) |c| switch (c) {
-        .gzip, .deflate, .zstd => {},
-        .identity, .br => return false,
+        .gzip, .deflate, .zstd, .br => {},
+        .identity => return false,
     };
     return true;
 }
 
 /// A decoder for `codings`, each of which `decodes`, with its buffers
-/// taken: from `buffers` for gzip and deflate, from `zstd` for zstd.
-pub fn init(io: Io, gpa: Allocator, buffers: *BufferPool, zstd: *ZstdBuffer, codings: []const ContentCoding) Allocator.Error!Decoder {
+/// taken: from `buffers` for gzip and deflate, from `windows` for zstd and
+/// Brotli.
+pub fn init(io: Io, gpa: Allocator, buffers: *BufferPool, windows: *Windows, codings: []const ContentCoding) Allocator.Error!Decoder {
     std.debug.assert(decodes(codings));
     std.debug.assert(codings.len <= Codings.max);
     var d: Decoder = .{};
-    errdefer d.deinit(io, gpa, buffers, zstd);
+    errdefer d.deinit(io, gpa, buffers, windows);
     for (codings) |c| {
-        const buffer = if (c == .zstd) try zstd.acquire(gpa) else try buffers.acquire(io, .large);
+        const buffer = switch (c) {
+            .zstd => try windows.zstd.acquire(gpa),
+            .br => try windows.brotli.acquire(gpa),
+            else => try buffers.acquire(io, .large),
+        };
         d.layers[d.len] = .{ .coding = c, .buffer = buffer };
         d.len += 1;
     }
@@ -96,8 +102,8 @@ pub fn init(io: Io, gpa: Allocator, buffers: *BufferPool, zstd: *ZstdBuffer, cod
 
 /// Start reading: the last-applied coding's layer over `source`, each
 /// layer before it over the one after, and the decoded body from the
-/// returned reader. `zstd` is the one the decoder's buffers came from.
-pub fn start(d: *Decoder, source: *Io.Reader, zstd: *const ZstdBuffer) *Io.Reader {
+/// returned reader. `windows` is what the decoder's buffers came from.
+pub fn start(d: *Decoder, source: *Io.Reader, windows: *const Windows) *Io.Reader {
     var in = source;
     var i = d.len;
     while (i > 0) {
@@ -105,9 +111,14 @@ pub fn start(d: *Decoder, source: *Io.Reader, zstd: *const ZstdBuffer) *Io.Reade
         const l = &d.layers[i];
         in = switch (l.coding) {
             .zstd => zstd: {
-                const room, const state = zstd.split(l.buffer);
+                const room, const state = windows.zstd.split(l.buffer);
                 state.* = .init(in, room, .{});
                 break :zstd &state.interface;
+            },
+            .br => brotli: {
+                const room, const state = windows.brotli.split(l.buffer);
+                state.* = .init(in, room, .{});
+                break :brotli &state.interface;
             },
             else => flate: {
                 const state = flateOf(l);
@@ -134,13 +145,14 @@ fn accept(coding: ContentCoding) warp.Accept {
 
 /// Why the last read failed, when a layer refused its stream rather than
 /// the body under it failing: the layer nearest the body first.
-pub fn failure(d: *const Decoder, zstd: *const ZstdBuffer) ?Error {
+pub fn failure(d: *const Decoder, windows: *const Windows) ?Error {
     var i = d.len;
     while (i > 0) {
         i -= 1;
         const l = &d.layers[i];
         const err: ?Error = switch (l.coding) {
-            .zstd => if (zstd.split(l.buffer)[1].err()) |e| zstdError(e) else null,
+            .zstd => if (windows.zstd.split(l.buffer)[1].err()) |e| zstdError(e) else null,
+            .br => if (windows.brotli.split(l.buffer)[1].err()) |e| brotliError(e) else null,
             else => if (flateOf(l).err()) |e| flateError(e) else null,
         };
         if (err) |e| return e;
@@ -160,6 +172,14 @@ fn zstdError(e: warp.zstd.Decompress.Error) Error {
     };
 }
 
+fn brotliError(e: warp.brotli.Decompress.Error) Error {
+    return switch (e) {
+        error.InvalidStream => error.InvalidStream,
+        error.WindowTooLarge => error.WindowTooLarge,
+        error.Truncated => error.Truncated,
+    };
+}
+
 fn flateError(e: Flate.ReadError) Error {
     return switch (e) {
         error.InvalidStream => error.InvalidStream,
@@ -170,9 +190,10 @@ fn flateError(e: Flate.ReadError) Error {
 }
 
 /// Give the buffers back to where `init` took them from.
-pub fn deinit(d: *Decoder, io: Io, gpa: Allocator, buffers: *BufferPool, zstd: *ZstdBuffer) void {
+pub fn deinit(d: *Decoder, io: Io, gpa: Allocator, buffers: *BufferPool, windows: *Windows) void {
     for (d.layers[0..d.len]) |l| switch (l.coding) {
-        .zstd => zstd.release(gpa, l.buffer),
+        .zstd => windows.zstd.release(gpa, l.buffer),
+        .br => windows.brotli.release(gpa, l.buffer),
         else => buffers.release(io, l.buffer),
     };
     d.len = 0;
@@ -202,25 +223,35 @@ fn zstdFrame(gpa: Allocator, text: []const u8) ![]u8 {
     return gpa.realloc(out, n);
 }
 
+/// `text` as one Brotli stream, its window 2^`window_bits`.
+fn brotliStream(gpa: Allocator, text: []const u8, window_bits: u5) ![]u8 {
+    var compressor: warp.brotli.Compressor = .init(gpa, .{ .quality = 5, .window_bits = window_bits });
+    defer compressor.deinit();
+    const out = try gpa.alloc(u8, warp.brotli.Compressor.bound(text.len));
+    errdefer gpa.free(out);
+    const n = try compressor.compress(text, out);
+    return gpa.realloc(out, n);
+}
+
 /// What decoding `coded` under `codings` gives, read whole.
 fn decoded(gpa: Allocator, codings: []const ContentCoding, coded: []const u8) (Error || error{ OutOfMemory, StreamTooLong })![]u8 {
     const io = test_io.io();
     var buffers: BufferPool = .init(gpa, 2);
     defer buffers.deinit(io);
-    var zstd: ZstdBuffer = .init(.fromRaw(1 << 20));
-    defer zstd.deinit(gpa);
-    var d = try init(io, gpa, &buffers, &zstd, codings);
-    defer d.deinit(io, gpa, &buffers, &zstd);
+    var windows: Windows = .init(.fromRaw(1 << 20), .fromRaw(1 << 20));
+    defer windows.deinit(gpa);
+    var d = try init(io, gpa, &buffers, &windows, codings);
+    defer d.deinit(io, gpa, &buffers, &windows);
     var source: Io.Reader = .fixed(coded);
-    const r = d.start(&source, &zstd);
+    const r = d.start(&source, &windows);
     return r.allocRemaining(gpa, .limited(1 << 20)) catch |err| switch (err) {
-        error.ReadFailed => d.failure(&zstd).?,
+        error.ReadFailed => d.failure(&windows).?,
         error.OutOfMemory => error.OutOfMemory,
         error.StreamTooLong => error.StreamTooLong,
     };
 }
 
-test "gzip, deflate as zlib and raw, and zstd are decoded, and a chain of them undone last first" {
+test "gzip, deflate as zlib and raw, zstd and Brotli are decoded, and a chain of them undone last first" {
     const gpa = testing.allocator;
     const text = "a body worth compressing: repeated repeated repeated repeated";
     for ([_]struct { warp.Container, ContentCoding }{ .{ .gzip, .gzip }, .{ .zlib, .deflate }, .{ .raw, .deflate } }) |case| {
@@ -235,6 +266,11 @@ test "gzip, deflate as zlib and raw, and zstd are decoded, and a chain of them u
     const body = try decoded(gpa, &.{.zstd}, z);
     defer gpa.free(body);
     try testing.expectEqualStrings(text, body);
+    const b = try brotliStream(gpa, text, 18);
+    defer gpa.free(b);
+    const brotli_body = try decoded(gpa, &.{.br}, b);
+    defer gpa.free(brotli_body);
+    try testing.expectEqualStrings(text, brotli_body);
     // gzip applied first, then zstd: zstd comes off first.
     const inner = try compressed(gpa, .gzip, text);
     defer gpa.free(inner);
@@ -284,8 +320,30 @@ test "a checksum that is not the data's, a stream cut short and a window past th
     try testing.expectError(error.WindowTooLarge, decoded(gpa, &.{.zstd}, wide));
 }
 
-test "only gzip, deflate and zstd are decoded" {
-    try testing.expect(decodes(&.{ .gzip, .deflate, .zstd }));
-    try testing.expect(!decodes(&.{ .gzip, .br }));
+test "a Brotli stream cut short, one that breaks the format and a window past the cap are refused, and a chain over it undone" {
+    const gpa = testing.allocator;
+    const text = "a body worth compressing: repeated repeated repeated repeated";
+    const b = try brotliStream(gpa, text, 18);
+    defer gpa.free(b);
+    try testing.expectError(error.Truncated, decoded(gpa, &.{.br}, b[0 .. b.len - 1]));
+    // A stream asking for 2^22 of history, past the test's cap of 1 MiB.
+    const wide = try brotliStream(gpa, text, 22);
+    defer gpa.free(wide);
+    try testing.expectError(error.WindowTooLarge, decoded(gpa, &.{.br}, wide));
+    // WBITS 16, then a metadata block's header with its reserved bit set
+    // (RFC 7932 §9.2 says it must be zero).
+    try testing.expectError(error.InvalidStream, decoded(gpa, &.{.br}, "\x1c\xff\xff"));
+    const inner = try compressed(gpa, .gzip, text);
+    defer gpa.free(inner);
+    const outer = try brotliStream(gpa, inner, 18);
+    defer gpa.free(outer);
+    const chained = try decoded(gpa, &.{ .gzip, .br }, outer);
+    defer gpa.free(chained);
+    try testing.expectEqualStrings(text, chained);
+}
+
+test "only gzip, deflate, zstd and Brotli are decoded" {
+    try testing.expect(decodes(&.{ .gzip, .deflate, .zstd, .br }));
+    try testing.expect(!decodes(&.{ .gzip, .identity }));
     try testing.expect(decodes(&.{}));
 }

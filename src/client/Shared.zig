@@ -38,7 +38,7 @@ pub const Options = struct {
     resolver: ?Resolver = null,
     /// Keep the resolver's answers for a while; null keeps none.
     dns_cache: ?Resolver.Cache.Options = .{},
-    /// Send `Accept-Encoding: gzip, deflate, zstd` unless a request names
+    /// Send `Accept-Encoding: gzip, deflate, zstd, br` unless a request names
     /// its own, and decode the bodies that come back under them. A request
     /// that names its own gets its body as it came: the codings it asked
     /// for are its to undo. A request with a `Range`, or a `HEAD`, is sent
@@ -49,6 +49,10 @@ pub const Options = struct {
     /// as it is read. A client keeps one window of this size, plus a
     /// block, once it has decoded zstd.
     max_zstd_window: aegis.units.Bytes(u32) = .literal("8MiB"),
+    /// The largest Brotli window decoded, RFC 7932's largest, so any stream a
+    /// server may send: a client keeps one window of this size once it has
+    /// decoded Brotli. A smaller one refuses a body asking for more as it is read.
+    max_brotli_window: aegis.units.Bytes(u32) = .literal("16MiB"),
     redirects: policy.Redirects = .default,
     retries: policy.Retries = .{},
     /// Where cookies are kept and sent from; null keeps none.

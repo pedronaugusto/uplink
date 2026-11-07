@@ -4,13 +4,18 @@
 
 /// A body's codings undone, with every checksum verified.
 pub const Decoder = @import("coding/Decoder.zig");
+const windows = @import("coding/windows.zig");
 /// The memory a zstd body is decoded in, and the cap on its window.
-pub const ZstdBuffer = @import("coding/ZstdBuffer.zig");
+pub const ZstdBuffer = windows.ZstdBuffer;
+/// The memory a Brotli body is decoded in, and the cap on its window.
+pub const BrotliBuffer = windows.BrotliBuffer;
+/// Both, as a client or a server holds them.
+pub const Windows = windows.Windows;
 /// A body put under a coding as it is written.
 pub const Encoder = @import("coding/Encoder.zig");
 
 test {
     _ = Decoder;
-    _ = ZstdBuffer;
+    _ = windows;
     _ = Encoder;
 }

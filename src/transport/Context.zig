@@ -17,7 +17,7 @@ const url_mod = wire.url;
 const BufferPool = @import("BufferPool.zig");
 const span = @import("../span.zig");
 const Duration = span.Duration;
-const ZstdBuffer = @import("../coding/ZstdBuffer.zig");
+const Windows = @import("../coding/windows.zig").Windows;
 const Timed = @import("../net/Timed.zig");
 const Observer = @import("Observer.zig");
 const Proxy = @import("Proxy.zig");
@@ -47,8 +47,9 @@ resolver: Resolver,
 /// Private: the cache `resolver` goes through, when it does.
 dns_cache: ?Resolver.Cache,
 observer: ?*Observer,
-/// The buffer zstd bodies are decoded in, and the cap on their window.
-zstd: ZstdBuffer,
+/// The buffers zstd and Brotli bodies are decoded in, and the caps on their
+/// windows.
+windows: Windows,
 counters: Counters = .{},
 
 /// What a context is made from.
@@ -62,6 +63,8 @@ pub const Options = struct {
     observer: ?*Observer = null,
     /// The largest window a zstd body may ask for.
     max_zstd_window: aegis.units.Bytes(u32) = .literal("8MiB"),
+    /// The largest window a Brotli body may ask for: RFC 7932's largest.
+    max_brotli_window: aegis.units.Bytes(u32) = .literal("16MiB"),
     /// The most free buffers of each size kept.
     max_free_buffers: u32,
 };
@@ -86,7 +89,7 @@ pub fn init(gpa: Allocator, options: Options) Context {
         .resolver = options.resolver orelse .system,
         .dns_cache = if (options.dns_cache) |o| .init(gpa, options.resolver orelse .system, o) else null,
         .observer = options.observer,
-        .zstd = .init(options.max_zstd_window),
+        .windows = .init(options.max_zstd_window, options.max_brotli_window),
     };
 }
 
@@ -113,7 +116,7 @@ pub fn deinit(ctx: *Context, io: Io) void {
     ctx.system_trust.deinit(io);
     ctx.sessions.deinit(ctx.gpa, io);
     if (ctx.dns_cache) |*c| c.deinit(io);
-    ctx.zstd.deinit(ctx.gpa);
+    ctx.windows.deinit(ctx.gpa);
     ctx.buffers.deinit(io);
     ctx.* = undefined;
 }

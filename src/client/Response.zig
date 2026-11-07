@@ -145,7 +145,7 @@ pub const ReadError = error{
     /// Chunk framing that does not parse.
     HttpProtocolError,
     /// A coded body that does not decode: not a stream of its coding, a
-    /// checksum that is not the data's, a zstd window past the client's
+    /// checksum that is not the data's, a zstd or Brotli window past the client's
     /// cap, or a stream cut short. `decodingFailure` says which.
     BadContentEncoding,
     /// The connection ended before the body did.
@@ -170,7 +170,7 @@ pub const CollectError = error{
 /// The body, decoded per `Content-Encoding` and any coding before
 /// `chunked` when the client offered its codings (`Options.decompress`, and
 /// the request named no `Accept-Encoding` of its own) and every one is
-/// gzip, deflate or zstd, their checksums verified; a body under any other coding is
+/// gzip, deflate, zstd or Brotli, their checksums verified; a body under any other coding is
 /// handed over as it came, for the caller to decode. Reads keep the client's timeouts. `io`
 /// is the one the reads run on until the response is released.
 pub fn reader(r: *Response, io: Io) *Io.Reader {
@@ -205,7 +205,7 @@ fn open(r: *Response, io: Io, buffer: ?[]u8) *Io.Reader {
             break :tee &t.interface;
         } else &r.body.interface;
         if (r.decoder) |*d| {
-            r.decoded = d.start(source, &r.ctx.zstd);
+            r.decoded = d.start(source, &r.ctx.windows);
         } else if (buffer) |b| {
             source.buffer = b;
         }
@@ -234,7 +234,7 @@ fn storedReader(st: *Stored, io: Io) *Io.Reader {
 /// `BadContentEncoding`.
 pub fn decodingFailure(r: *const Response) ?Decoder.Error {
     const d = &(r.decoder orelse return null);
-    return d.failure(&r.ctx.zstd);
+    return d.failure(&r.ctx.windows);
 }
 
 /// After the body's end: the fields of a chunked body's trailer section,
@@ -358,7 +358,7 @@ pub fn deinit(r: *Response, io: Io) void {
         h.finish(io, st);
         releaseShared(io, r.ctx, r.pool, h);
     }
-    if (r.decoder) |*d| d.deinit(io, r.ctx.gpa, &r.ctx.buffers, &r.ctx.zstd);
+    if (r.decoder) |*d| d.deinit(io, r.ctx.gpa, &r.ctx.buffers, &r.ctx.windows);
     if (r.stored) |*st| st.cache.store.release(io, &st.entry);
     if (r.body.trailer.len != 0) r.ctx.buffers.release(io, r.body.trailer);
     if (r.url_buffer.len != 0) r.ctx.buffers.release(io, r.url_buffer);
@@ -556,14 +556,14 @@ pub fn receive(io: Io, ctx: *Context, pool: *Pool, conn: *Connection, options: R
     }
 }
 
-/// Decode a body whose codings are all gzip, deflate or zstd; a body
+/// Decode a body whose codings are all gzip, deflate, zstd or Brotli; a body
 /// under any other, or under codings uplink cannot read, is handed over as
 /// it came, `Content-Encoding` and all.
 fn planDecoding(r: *Response, io: Io) Allocator.Error!void {
     if (r.body.state.current() == .done) return;
     const codings = coding.Codings.of(&r.headers) catch return;
     if (codings.len == 0 or !Decoder.decodes(codings.slice())) return;
-    r.decoder = try .init(io, r.ctx.gpa, &r.ctx.buffers, &r.ctx.zstd, codings.slice());
+    r.decoder = try .init(io, r.ctx.gpa, &r.ctx.buffers, &r.ctx.windows, codings.slice());
 }
 
 /// A response head, parsed in its pooled buffer.

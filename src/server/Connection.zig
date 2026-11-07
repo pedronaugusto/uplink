@@ -194,9 +194,9 @@ fn serveOne(c: *Connection) bool {
             error.TooManyCodings => "too many codings",
         });
         if (codings.len != 0 and Decoder.decodes(codings.slice()))
-            request.decoder = Decoder.init(io, s.gpa, &s.buffers, &s.zstd, codings.slice()) catch return c.refuse(.service_unavailable, "out of memory");
+            request.decoder = Decoder.init(io, s.gpa, &s.buffers, &s.windows, codings.slice()) catch return c.refuse(.service_unavailable, "out of memory");
     }
-    defer if (request.decoder) |*d| d.deinit(io, s.gpa, &s.buffers, &s.zstd);
+    defer if (request.decoder) |*d| d.deinit(io, s.gpa, &s.buffers, &s.windows);
 
     var response: Response = .init(&c.socket, rh.method.eql(.HEAD), rh.version == .http1_0, rh.headers.getKnown(.@"accept-encoding"));
     defer response.release(io);

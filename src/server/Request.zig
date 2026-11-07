@@ -182,7 +182,7 @@ fn open(r: *Request, io: Io, decode: bool) *Io.Reader {
             } else r.socket.sendContinue();
         }
         if (decode) if (r.decoder) |*d| {
-            r.decoded = d.start(raw, &r.socket.context.zstd);
+            r.decoded = d.start(raw, &r.socket.context.windows);
         };
     }
     std.debug.assert(r.raw == !decode);
@@ -242,7 +242,7 @@ pub fn bodyFault(r: *const Request) ?std.http.Status {
 /// `BadContentEncoding`.
 pub fn decodingFailure(r: *const Request) ?Decoder.Error {
     const d = &(r.decoder orelse return null);
-    return d.failure(&r.socket.context.zstd);
+    return d.failure(&r.socket.context.windows);
 }
 
 /// After the body's end: the fields of a chunked body's trailer section,

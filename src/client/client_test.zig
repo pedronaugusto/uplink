@@ -171,7 +171,7 @@ test "gzip and deflate bodies are decoded, and other codings handed over as they
         try testing.expectEqual(@as(u64, 1), client.stats().connections_opened);
         const seen = try server.received(gpa);
         defer gpa.free(seen);
-        try testing.expect(std.mem.find(u8, seen, "Accept-Encoding: gzip, deflate, zstd\r\n") != null);
+        try testing.expect(std.mem.find(u8, seen, "Accept-Encoding: gzip, deflate, zstd, br\r\n") != null);
         var raw: Client = .init(gpa, .{ .decompress = false });
         defer raw.deinit(io);
         const undecoded = try get(&raw, io, server.url(&buf, "/"));
@@ -184,9 +184,20 @@ test "gzip and deflate bodies are decoded, and other codings handed over as they
         defer gpa.free(kept);
         try testing.expectEqualSlices(u8, coded, kept);
     }
-    const br = try bodyOf("HTTP/1.1 200 OK\r\nContent-Encoding: br\r\nContent-Length: 4\r\n\r\n\x0b\x01\x80\x03", .{});
+    // `a` in one uncompressed meta-block, as the brotli tool writes it.
+    const br = try bodyOf("HTTP/1.1 200 OK\r\nContent-Encoding: br\r\nContent-Length: 5\r\n\r\n\x0b\x00\x80a\x03", .{});
     defer gpa.free(br);
-    try testing.expectEqualSlices(u8, "\x0b\x01\x80\x03", br);
+    try testing.expectEqualStrings("a", br);
+    // A coding uplink does not read is handed over as it came.
+    const other = try bodyOf("HTTP/1.1 200 OK\r\nContent-Encoding: compress\r\nContent-Length: 4\r\n\r\n\x1f\x9d\x90\x61", .{});
+    defer gpa.free(other);
+    try testing.expectEqualSlices(u8, "\x1f\x9d\x90\x61", other);
+}
+
+test "a Brotli window past the client's cap is refused as it is read" {
+    // WBITS 22 before an empty last meta-block: a window of 4 MiB asked for.
+    const head = "HTTP/1.1 200 OK\r\nContent-Encoding: br\r\nContent-Length: 1\r\n\r\n";
+    try testing.expectError(error.BadContentEncoding, bodyOf(head ++ "\x0b", .{ .max_brotli_window = .fromRaw(1 << 20) }));
 }
 
 /// `text` compressed by the zstd tool at level 19.
@@ -318,7 +329,7 @@ test "a range or a HEAD is asked for without a coding, whose bytes and length it
     var want_buf: [512]u8 = undefined;
     const want = try std.mem.print(&want_buf, "GET /object HTTP/1.1\r\nHost: 127.0.0.1:{0d}\r\nRange: bytes=10-\r\n\r\n" ++
         "HEAD /object HTTP/1.1\r\nHost: 127.0.0.1:{0d}\r\n\r\n" ++
-        "GET /object HTTP/1.1\r\nHost: 127.0.0.1:{0d}\r\nAccept-Encoding: gzip, deflate, zstd\r\n\r\n", .{server.port});
+        "GET /object HTTP/1.1\r\nHost: 127.0.0.1:{0d}\r\nAccept-Encoding: gzip, deflate, zstd, br\r\n\r\n", .{server.port});
     try testing.expectEqualStrings(want, seen);
 }
 

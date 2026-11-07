@@ -702,7 +702,7 @@ fn writeFields(run: *Run, io: Io, w: *Io.Writer, r: Context.Route, absolute_form
         _ = try slot.auth.writeField(io, w, slot.proxy.credential, run.method.name, path);
     }
     if (c.options.user_agent) |ua| if (!named(run.request.headers, "user-agent")) try h1.writeField(w, .{ .name = "User-Agent", .value = ua });
-    if (run.decodes()) try w.writeAll("Accept-Encoding: gzip, deflate, zstd\r\n");
+    if (run.decodes()) try w.writeAll("Accept-Encoding: " ++ accepted_codings ++ "\r\n");
     try run.writeAuthorization(io, w);
     // The jar's cookies, unless the caller's own `Cookie` is still sent.
     if (c.options.cookies) |jar| if (run.left_origin or !named(run.request.headers, "cookie")) {
@@ -761,6 +761,9 @@ fn named(headers: []const std.http.Header, name: []const u8) bool {
 /// under them. A request that names its own `Accept-Encoding` reads the
 /// body as it came: the codings are the caller's to undo, as a proxy
 /// forwards them.
+/// What the client offers when it decodes for the caller: what `Decoder` reads.
+const accepted_codings = "gzip, deflate, zstd, br";
+
 fn decodes(run: *const Run) bool {
     return run.shared.options.decompress and run.offersCodings();
 }
@@ -1144,7 +1147,7 @@ fn requestFields(run: *Run, out: []fields.Field) fields.Headers {
 fn fieldValue(run: *Run, name: []const u8) ?[]const u8 {
     for (run.request.headers) |h| if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
     if (std.ascii.eqlIgnoreCase(name, "user-agent")) return run.shared.options.user_agent;
-    if (std.ascii.eqlIgnoreCase(name, "accept-encoding") and run.decodes()) return "gzip, deflate, zstd";
+    if (std.ascii.eqlIgnoreCase(name, "accept-encoding") and run.decodes()) return accepted_codings;
     return null;
 }
 

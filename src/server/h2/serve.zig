@@ -324,10 +324,10 @@ fn answer(session: *Session, handler: *Handler, st: *Stream) void {
         const headers: wire.fields.Headers = .init(head.fields);
         const codings = wire.coding.Codings.of(&headers) catch |err| break :codings err;
         if (codings.len != 0 and Decoder.decodes(codings.slice()))
-            request.decoder = Decoder.init(io, context.gpa, &context.buffers, &context.zstd, codings.slice()) catch |err| return ended(st, io, err);
+            request.decoder = Decoder.init(io, context.gpa, &context.buffers, &context.windows, codings.slice()) catch |err| return ended(st, io, err);
         break :codings null;
     } else null;
-    defer if (request.decoder) |*d| d.deinit(io, context.gpa, &context.buffers, &context.zstd);
+    defer if (request.decoder) |*d| d.deinit(io, context.gpa, &context.buffers, &context.windows);
     var response: Response = .init(session.socket, head.method.eql(.HEAD), false, request.headers.getKnown(.@"accept-encoding"));
     response.stream = st;
     defer response.release(io);

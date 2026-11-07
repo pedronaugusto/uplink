@@ -1,0 +1,150 @@
+//! The memory a zstd or Brotli body is decoded in, and the cap on its window.
+//!
+//! Both codings name their window in the stream, a zstd frame up to
+//! gigabytes and a Brotli stream up to 16 MiB, and a decoder must keep that
+//! much history; so the window a body may ask for is capped, and the buffer
+//! it is decoded in is sized for the cap: the reader's own 4 KiB, the window,
+//! what the coding decodes beside it, then the decoder's state. A stream whose
+//! window passes the cap is refused as it is read. One buffer of each is kept
+//! for the next such body, taken and given back with one atomic swap, whose
+//! winner owns it; there is no state beside it for a lock to guard.
+
+const std = @import("std");
+const place = @import("../place.zig");
+const aegis = @import("aegis");
+const warp = @import("warp");
+const Allocator = std.mem.Allocator;
+
+/// The room a decoder reads into before its window: each `State.init` keeps
+/// it for the reader's own buffering.
+const reader_room = 4096;
+
+/// The most a zstd block decodes to (RFC 8878 §3.1.1.2.4), which a decoder
+/// keeps room for beside the window.
+const zstd_block_max = 128 << 10;
+
+/// The buffers a zstd body is decoded in.
+pub const ZstdBuffer = Windowed(warp.zstd.Decompress.Reader, zstd_block_max);
+/// The buffers a Brotli body is decoded in: its decoder needs nothing beside
+/// the window.
+pub const BrotliBuffer = Windowed(warp.brotli.Decompress.Reader, 0);
+
+/// What a client or a server decodes bodies in.
+pub const Windows = struct {
+    zstd: ZstdBuffer,
+    brotli: BrotliBuffer,
+
+    pub fn init(max_zstd: aegis.units.Bytes(u32), max_brotli: aegis.units.Bytes(u32)) Windows {
+        return .{ .zstd = .init(max_zstd), .brotli = .init(max_brotli) };
+    }
+
+    /// Free the kept buffers.
+    pub fn deinit(w: *Windows, gpa: Allocator) void {
+        w.zstd.deinit(gpa);
+        w.brotli.deinit(gpa);
+        w.* = undefined;
+    }
+};
+
+/// Buffers holding a `State_`, for a window and `beside` bytes more.
+fn Windowed(comptime State_: type, comptime beside: usize) type {
+    return struct {
+        const Self = @This();
+
+        /// Private: the buffer kept for the next body.
+        kept: aegis.Guarded(?[*]align(64) u8) = .init(null),
+        /// The largest window a body may ask for.
+        max_window: aegis.units.Bytes(u32),
+        /// Private: the length of every buffer, the decoder's state included.
+        len: usize,
+
+        /// A buffer, with the alignment it was allocated with.
+        pub const Buffer = []align(64) u8;
+
+        /// The decoder a buffer holds, after its reading room.
+        pub const State = State_;
+
+        /// Buffers for streams whose window is at most `max_window`.
+        pub fn init(max_window: aegis.units.Bytes(u32)) Self {
+            return .{ .max_window = max_window, .len = bufferLen(max_window) };
+        }
+
+        /// The length of a buffer for `max_window`: the reading room, the
+        /// window and what goes beside it, aligned, then the state. A length no
+        /// address space holds is the largest there is, which no allocation gives.
+        fn bufferLen(max_window: aegis.units.Bytes(u32)) usize {
+            const read = readLen(max_window);
+            const at = std.mem.alignForward(usize, read, @alignOf(State));
+            const whole = aegis.int.Checked(usize).init(at).add(@sizeOf(State)) catch return std.math.maxInt(usize);
+            return whole.raw();
+        }
+
+        /// The part of a buffer the decoder reads and decodes into.
+        fn readLen(max_window: aegis.units.Bytes(u32)) usize {
+            const room = aegis.int.Checked(usize).init(max_window.raw()).add(reader_room + beside) catch return std.math.maxInt(usize);
+            return room.raw();
+        }
+
+        /// The reading part of `buffer`, and its state after it.
+        pub fn split(z: *const Self, buffer: Buffer) struct { []u8, *State } {
+            aegis.assert.invariant(buffer.len == z.len, "buffer.len == z.len");
+            const read = readLen(z.max_window);
+            const at = std.mem.alignForward(usize, read, @alignOf(State));
+            return .{ buffer[0..read], place.one(State, buffer, at) };
+        }
+
+        /// A buffer: the one kept, or a new one.
+        pub fn acquire(z: *Self, gpa: Allocator) Allocator.Error!Buffer {
+            {
+                var held = z.kept.acquire();
+                defer held.deinit();
+                if (held.value().*) |b| {
+                    held.value().* = null;
+                    return b[0..z.len];
+                }
+            }
+            return gpa.alignedAlloc(u8, .@"64", z.len);
+        }
+
+        /// Give a buffer back: kept when none is, freed otherwise.
+        pub fn release(z: *Self, gpa: Allocator, buffer: Buffer) void {
+            aegis.assert.invariant(buffer.len == z.len, "buffer.len == z.len");
+            {
+                var held = z.kept.acquire();
+                defer held.deinit();
+                if (held.value().* == null) {
+                    held.value().* = buffer.ptr;
+                    return;
+                }
+            }
+            gpa.free(buffer);
+        }
+
+        /// Free the kept buffer.
+        pub fn deinit(z: *Self, gpa: Allocator) void {
+            if (z.kept.teardown().*) |b| gpa.free(b[0..z.len]);
+            z.* = undefined;
+        }
+    };
+}
+
+fn keepsOneBuffer(comptime B: type) !void {
+    const gpa = std.testing.allocator;
+    var z: B = .init(.fromRaw(64 << 10));
+    defer z.deinit(gpa);
+    const a = try z.acquire(gpa);
+    const b = try z.acquire(gpa);
+    z.release(gpa, a);
+    z.release(gpa, b);
+    const c = try z.acquire(gpa);
+    try std.testing.expectEqual(a.ptr, c.ptr);
+    const read, const state = z.split(c);
+    try std.testing.expect(@intFromPtr(state) >= @intFromPtr(read.ptr) + read.len);
+    try std.testing.expect(@intFromPtr(state) + @sizeOf(B.State) <= @intFromPtr(c.ptr) + c.len);
+    z.release(gpa, c);
+}
+
+test "a buffer given back is the next one taken, and a second given back is freed" {
+    try keepsOneBuffer(ZstdBuffer);
+    try keepsOneBuffer(BrotliBuffer);
+}

@@ -19,7 +19,7 @@ const Duration = span.Duration;
 const BufferPool = @import("../transport/BufferPool.zig");
 const Head = @import("../transport/Head.zig");
 const Timed = @import("../net/Timed.zig");
-const ZstdBuffer = @import("../coding/ZstdBuffer.zig");
+const Windows = @import("../coding/windows.zig").Windows;
 const Encoder = @import("../coding/Encoder.zig");
 
 const Context = @This();
@@ -30,8 +30,8 @@ options: Options,
 buffers: BufferPool,
 /// The deadlines of every connection's operations.
 deadlines: reactor.net.Deadlines,
-/// The buffer a zstd request body is decoded in.
-zstd: ZstdBuffer,
+/// The buffers a zstd or Brotli request body is decoded in.
+windows: Windows,
 /// The encoders compressed responses are written through, when
 /// compression is on.
 encoders: ?Encoder.Pool,
@@ -81,12 +81,14 @@ pub const Options = struct {
     /// default, as plain HTTP/2 is for clients that know the server, such
     /// as a proxy in front of it.
     h2c: H2c = .off,
-    /// Decode a request body under gzip, deflate or zstd, as the client
+    /// Decode a request body under gzip, deflate, zstd or Brotli, as the client
     /// decodes a response's, its checksums verified; a body under any other
     /// coding is handed over as it came.
     decompress: bool = true,
     /// The largest zstd window a request body may ask for.
     max_zstd_window: aegis.units.Bytes(u32) = .literal("8MiB"),
+    /// The largest window a Brotli request body may ask for: RFC 7932's largest.
+    max_brotli_window: aegis.units.Bytes(u32) = .literal("16MiB"),
     /// Every accepted socket's options (reactor's `setOptions`): Nagle's
     /// algorithm off unless asked otherwise. A refusal closes that
     /// connection and is the observer's `option_refused`. Buffers that
@@ -245,7 +247,7 @@ pub fn init(gpa: Allocator, options: Options) Context {
         .options = options,
         .buffers = .init(gpa, options.max_free_buffers),
         .deadlines = .init(span.toIo(options.timeouts.shortest())),
-        .zstd = .init(options.max_zstd_window),
+        .windows = .init(options.max_zstd_window, options.max_brotli_window),
         .encoders = if (options.compression) |c| .init(gpa, c.settings, options.max_free_buffers) else null,
         .tickets = if (own) |r| cloak.tls.TicketKeys.init(gpa, .{ .lifetime = span.toIo(r.lifetime), .rotation = span.toIo(r.rotation) }) catch unreachable else null, // unreachable: both spans were checked above
         .key_log = if (options.tls) |t| if (t.key_log) |w| .init(w) else null else null,
@@ -284,7 +286,7 @@ pub fn ticketKeys(c: *Context, io: Io) error{ OutOfMemory, EntropyUnavailable, C
 /// Release what the connections shared; every one must have ended.
 pub fn deinit(c: *Context, io: Io) void {
     c.deadlines.deinit(io);
-    c.zstd.deinit(c.gpa);
+    c.windows.deinit(c.gpa);
     if (c.encoders) |*e| e.deinit(io);
     if (c.tickets) |*t| t.deinit();
     c.buffers.deinit(io);
