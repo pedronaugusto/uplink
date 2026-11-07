@@ -18,6 +18,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- `client.Response.storeInto` takes the observer a store that fails at `deinit` is told to (`cache_failed`), as every other store failure is.
 - The certificate decoders and the key log sink are cloak's context-less interfaces, each a field of uplink's own type that a connection is given a pointer to: `tls.decoder` is `tls.Decoder` (`.init(algorithm, gpa)`, offered as `&decoder.codec`), `tls.keyLog` is `tls.KeyLogWriter`, and `ClientOptions.CertificateCompression.codecs` takes `[]const *tls.Codec`. Pins cloak main e7c45f4, which links on x86_64 Windows (0.23.1 did not).
 - The unread body a finished exchange drains has one budget, `transport.Body.Drain` (`bytes`, 64 KiB, and `time`, 100 ms, from the drain's start), on both ends: `Pool.Options.drain` and `server.Options.drain` replace `drain_limit`. A body that does not end within it closes its connection instead of keeping it.
 - `Cache.Body.file` names where the body begins in its file (`offset`): a store keeping a variant's head and body in one file serves the body from there.
@@ -36,12 +37,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `server.Files`' `ETag` is the modification time's typed bits, big-endian, in hex (24 digits, leading zeros kept), where it was the time's integer bits: every etag changes once, which costs a client one revalidation.
 - aegis 0.3's names: `assert.invariant` where `assert.pre` and `assert.post` were, `aegis.Secret` where `aegis.secret.Secret` was, and every condition wait the guard's (`held.wait(&condition, io, timeout)`). Pins aegis breaking-0.3 (7bdb587), and reactor, cloak, warp, xenoglyph, airlock (reflink-lock) and shakedown on it. A dialed or accepted pipe or socket comes out of the owner reactor now hands it in (`take`) into the connection's own, and warp 0.5's codec inits, which refuse short memory and options where they asserted, are given what they ask for, so those refusals cannot occur.
 - Pins cloak 0.23.1 (was 0.23.0): its x25519 routines link on Windows.
 - On preflight 0.18.1, under the aegis pack: the counters, gauges and flags are aegis's atomic cells over domains of their own; an exchange waiting for its route, the accept loop's end and `shutdown`'s drain wait on an aegis `Condition` under the lock of the state they wait for, where each had an `Io.Event`; the ticket key a server draws is an aegis `Secret`; the zstd buffer kept for the next body is guarded. A socket's deadline mode, a response's life, a server socket's phase and a multipart body's parts are aegis state machines, and the response's framing is chosen in one place for HTTP/1 and HTTP/2. Pool buffers carry their alignment in their type (`BufferPool.Buffer`), so what is placed in one, a head's fields, a trailer's, a decoder's state, an encoder, a free list's link, is checked at compile time to be aligned and in every safe build to fit; the conformance and CI programs read their files through `aegis.own.readFile`.
 
 ### Fixed
 
+- A cached response whose store fails to commit at `deinit` is told to the observer as `cache_failed`; the response itself still succeeds, as before.
 - A response released with its body unread no longer waits on a body that trickles: the drain was bounded in bytes, and in time only per read, so an event stream's keep-alives or any slow peer held `Response.deinit` for as long as `drain_limit` took to arrive at their pace (minutes) before pooling the connection. The drain now ends at its time, and the connection is closed. A server draining a request's unread body had the same flaw and the same fix.
 - A 101 the caller does not take over (`Response.upgrade`) gives its connection back to no later request: the connection speaks another protocol after it, and was kept as an HTTP/1.1 one.
 - A server's answer to a `HEAD`, or a 304, with a declared length and no body written says that length and keeps its connection, where `end` took it for a short body and closed the connection.

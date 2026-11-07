@@ -25,6 +25,7 @@ const Connection = @import("../transport/Connection.zig");
 const H2 = @import("../transport/H2.zig");
 const Context = @import("../transport/Context.zig");
 const Diagnostics = @import("../transport/Diagnostics.zig");
+const Observer = @import("../transport/Observer.zig");
 const Pool = @import("../pool/Pool.zig");
 const Body = @import("../transport/Body.zig");
 const span = @import("../span.zig");
@@ -112,6 +113,8 @@ const Stored = struct {
 const Tee = struct {
     cache: *Cache,
     writing: Cache.Writing,
+    /// Told of a store that fails at `deinit`, as of every other.
+    observer: ?*Observer,
     source: *Io.Reader = undefined,
     io: Io = undefined,
     /// The store took no more, or failed: aborted at `deinit`.
@@ -332,8 +335,10 @@ pub fn deinit(r: *Response, io: Io) void {
         // tee, and the store took all of it; before a drain reads the rest
         // past it.
         if (r.body.state.current() == .done and !t.dropped) {
-            // glint-ignore: Z026 -- a store that fails costs the cache, never the response; the observer heard of a failed begin
-            t.cache.store.commit(io, t.writing) catch {};
+            // A store that fails costs the cache, never the response: the observer hears of it.
+            t.cache.store.commit(io, t.writing) catch |err| {
+                if (t.observer) |o| o.emit(.{ .cache_failed = .{ .error_name = @errorName(err) } });
+            };
         } else t.cache.store.abort(io, t.writing);
         // The body's buffer back from the tee, for the drain below.
         if (r.started) {
@@ -404,12 +409,13 @@ pub const StoredOptions = struct {
 };
 
 /// Write the body, as it is read, to `cache`'s store as `writing`: kept
-/// at `deinit` when it ended whole. Before the first `reader`.
-pub fn storeInto(r: *Response, cache: *Cache, writing: Cache.Writing) void {
+/// at `deinit` when it ended whole, and a store that fails then told to
+/// `observer` (`cache_failed`). Before the first `reader`.
+pub fn storeInto(r: *Response, cache: *Cache, writing: Cache.Writing, observer: ?*Observer) void {
     std.debug.assert(!r.started);
     std.debug.assert(r.tee == null);
     std.debug.assert(r.stored == null);
-    r.tee = .{ .cache = cache, .writing = writing };
+    r.tee = .{ .cache = cache, .writing = writing, .observer = observer };
 }
 
 /// Release an interim response's head and nothing else: the connection

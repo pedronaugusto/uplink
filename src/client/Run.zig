@@ -1311,7 +1311,7 @@ fn throughCache(run: *Run, io: Io, response: Response) Error!Response {
         run.cacheFailed(err);
         return r;
     };
-    if (writing) |w| r.storeInto(cache, w);
+    if (writing) |w| r.storeInto(cache, w, run.shared.context.observer);
     run.cacheSaid(.miss);
     return r;
 }
