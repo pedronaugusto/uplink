@@ -431,6 +431,25 @@ test "responses go compressed when the client accepts a coding, and as they are 
     try testing.expect(std.mem.find(u8, plain, "Content-Encoding") == null);
 }
 
+test "a server offering Brotli writes it and a client reads it back, whole and streamed, on a kept encoder" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const running = try Running.start(gpa, .{ .compression = .{ .codings = &.{.br} } }, .of(page));
+    defer running.stop();
+    var client: Client = .init(gpa, .{});
+    defer client.deinit(io);
+    var buf: [64]u8 = undefined;
+    // Each path twice: the second body of each is on the encoder the first gave back.
+    for ([_][]const u8{ "/", "/big", "/", "/big" }) |path| {
+        var response = try client.send(io, .{ .url = running.url(&buf, path) });
+        defer response.deinit(io);
+        try testing.expectEqualStrings("br", response.headers.get("content-encoding").?);
+        const body = try response.collect(gpa, io, .limited(1 << 20));
+        defer gpa.free(body);
+        try testing.expect(std.mem.startsWith(u8, body, "<p>paragraph 0 of a page"));
+    }
+}
+
 const cloak = @import("cloak");
 const Diagnostics = @import("../transport/Diagnostics.zig");
 const openssl = @import("../testing/openssl.zig");

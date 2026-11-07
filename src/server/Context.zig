@@ -232,7 +232,7 @@ pub const Entry = struct {
 pub fn init(gpa: Allocator, options: Options) Context {
     aegis.assert.invariant(options.limits.max_head.compare(.literal("64KiB")) != .gt, "a request head is at most 64 KiB");
     aegis.assert.invariant(options.limits.max_fields <= Head.field_limit, "a request head has at most 256 fields");
-    if (options.compression) |c| aegis.assert.invariant(c.codings.len <= 3, "each coding is offered once");
+    if (options.compression) |c| aegis.assert.invariant(c.codings.len <= std.enums.values(Encoder.Coding).len, "each coding is offered once");
     const own: ?tls.ServerOptions.Rotation = if (options.tls) |t| switch (t.tickets) {
         .own => |r| r,
         .none, .keys => null,

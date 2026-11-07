@@ -543,7 +543,7 @@ fn coding(r: *const Response, length: ?u64) ?Encoder.Coding {
     if (r.head_only or bodiless(r.status) or r.status == .partial_content) return null;
     if (r.has_content_encoding or !r.compressible) return null;
     if (length) |n| if (aegis.units.Bytes(u64).fromRaw(n).compare(c.min_size.convert(u64)) == .lt) return null;
-    var offered: [3]wire.coding.ContentCoding = undefined;
+    var offered: [std.enums.values(Encoder.Coding).len]wire.coding.ContentCoding = undefined;
     for (c.codings, 0..) |each, i| offered[i] = each.content();
     const chosen = wire.coding.negotiate(r.accept_encoding, offered[0..c.codings.len]) orelse return null;
     for (c.codings) |each| if (each.content() == chosen) return each;
