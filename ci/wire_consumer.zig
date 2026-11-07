@@ -22,8 +22,7 @@ pub fn main(init: std.process.Init) !void {
     const cold = args.len > 6 and std.mem.eql(u8, args[6], "cold");
     const cwd = std.Io.Dir.cwd();
     // A cold build starts from nothing, whatever an earlier run fetched.
-    // glint-ignore: Z026 -- a directory that is not there needs no deleting, and one that cannot be removed fails the build below
-    if (cold) cwd.deleteTree(io, args[2]) catch {};
+    if (cold) try cwd.deleteTree(io, args[2]);
     var dir = try cwd.createDirPathOpen(io, args[2], .{});
     defer dir.close(io);
     try dir.createDirPath(io, "src");

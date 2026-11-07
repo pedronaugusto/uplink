@@ -753,8 +753,7 @@ test "shutdown lets an answer under way finish, telling its client the connectio
     var stopping = io.concurrent(Stop.run, .{running}) catch return error.SkipZigTest;
     const got, _ = try readToEnd(stream, gpa);
     defer gpa.free(got);
-    // glint-ignore: Z026 -- the shutdown's task returns nothing the test checks
-    stopping.await(io) catch {};
+    try stopping.await(io);
     running.free();
     try testing.expect(std.mem.find(u8, got, "Connection: close\r\n") != null);
     try testing.expect(std.mem.endsWith(u8, got, "late but whole"));
@@ -978,8 +977,7 @@ test "past max_connections a connection waits for one to end" {
     try io.sleep(.fromMilliseconds(100), .awake);
     try testing.expectEqual(@as(u64, 1), running.server.stats(io).accepted);
     first.close(io);
-    // glint-ignore: Z026 -- the task returns nothing the test checks
-    second.await(io) catch {};
+    try second.await(io);
     defer gpa.free(second_out);
     try testing.expect(std.mem.endsWith(u8, second_out, "hello"));
     try testing.expectEqual(@as(u64, 2), running.server.stats(io).accepted);
