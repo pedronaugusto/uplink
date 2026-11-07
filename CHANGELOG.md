@@ -45,6 +45,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - A cached response whose store fails to commit at `deinit` is told to the observer as `cache_failed`; the response itself still succeeds, as before.
+- Over HTTP/2, a handler's failure whose 500 cannot be written resets the stream with `INTERNAL_ERROR` (RFC 9113 §8.1), where the stream was left open with no answer; and a cancel that ends an answer (the handler's, or a write's) resets it with `CANCEL` and stays asked for at the task's next cancelation point, where it was dropped. No test: the 500's write fails only under a contended lock or a full outbox, which no fault point reaches deterministically.
 - A response released with its body unread no longer waits on a body that trickles: the drain was bounded in bytes, and in time only per read, so an event stream's keep-alives or any slow peer held `Response.deinit` for as long as `drain_limit` took to arrive at their pace (minutes) before pooling the connection. The drain now ends at its time, and the connection is closed. A server draining a request's unread body had the same flaw and the same fix.
 - A 101 the caller does not take over (`Response.upgrade`) gives its connection back to no later request: the connection speaks another protocol after it, and was kept as an HTTP/1.1 one.
 - A server's answer to a `HEAD`, or a 304, with a declared length and no body written says that length and keeps its connection, where `end` took it for a short body and closed the connection.

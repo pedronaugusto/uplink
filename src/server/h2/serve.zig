@@ -280,6 +280,15 @@ fn startStream(session: *Session, shared: *Session.Shared, id: u31, fields: []co
 }
 
 /// Answer the request on `st` with the handler, then forget the stream.
+/// A stream whose answer cannot be written is reset (RFC 9113 §8.1): CANCEL for a cancel, which stays asked for at
+/// the task's next cancelation point, and INTERNAL_ERROR for any other failure.
+fn ended(st: *Stream, io: Io, err: anyerror) void {
+    if (err == error.Canceled) {
+        st.reset(io, .cancel);
+        io.recancel();
+    } else st.reset(io, .internal_error);
+}
+
 fn answer(session: *Session, handler: *Handler, st: *Stream) void {
     const context = session.context;
     const io = session.socket.io;
@@ -315,7 +324,7 @@ fn answer(session: *Session, handler: *Handler, st: *Stream) void {
         const headers: wire.fields.Headers = .init(head.fields);
         const codings = wire.coding.Codings.of(&headers) catch |err| break :codings err;
         if (codings.len != 0 and Decoder.decodes(codings.slice()))
-            request.decoder = Decoder.init(io, context.gpa, &context.buffers, &context.zstd, codings.slice()) catch return st.reset(io, .internal_error);
+            request.decoder = Decoder.init(io, context.gpa, &context.buffers, &context.zstd, codings.slice()) catch |err| return ended(st, io, err);
         break :codings null;
     } else null;
     defer if (request.decoder) |*d| d.deinit(io, context.gpa, &context.buffers, &context.zstd);
@@ -326,23 +335,23 @@ fn answer(session: *Session, handler: *Handler, st: *Stream) void {
     if (unreadable) |err| {
         if (context.options.observer) |o| o.emit(.{ .refused = .{ .status = @backingInt(std.http.Status.unsupported_media_type), .reason = codingRefusal(err) } });
         response.status = .unsupported_media_type;
-        response.end(io) catch return st.reset(io, .internal_error);
+        response.end(io) catch |e| return ended(st, io, e);
         return st.refuseRest(io);
     }
     const arrived = Io.Clock.awake.now(io);
     handler.handle(io, &request, &response) catch |err| {
         if (context.options.observer) |o| o.emit(.{ .failed = .{ .method = head.method.name, .path = target.path, .error_name = @errorName(err), .head_sent = response.headSent() } });
-        if (response.headSent()) return st.reset(io, .internal_error);
+        if (response.headSent()) return ended(st, io, err);
         // A canceled task answers nothing more: the stream is reset.
-        if (err == error.Canceled) return st.reset(io, .cancel);
+        if (err == error.Canceled) return ended(st, io, err);
         response.reset(io);
         response.stream = st;
         response.status = request.bodyFault() orelse .internal_server_error;
-        // glint-ignore: Z026 -- a 500 that cannot be written leaves the stream reset below
-        response.send(io, "") catch {};
+        // A 500 that cannot be written ends the stream too: it does not stay open with no answer.
+        response.send(io, "") catch |e| return ended(st, io, e);
         return;
     };
-    response.end(io) catch return st.reset(io, .internal_error);
+    response.end(io) catch |err| return ended(st, io, err);
     if (context.options.observer) |o| o.emit(.{ .answered = .{ .method = head.method.name, .path = target.path, .status = @backingInt(response.status), .took = span.of(arrived.durationTo(Io.Clock.awake.now(io))) } });
     // A request body the handler left: the client is told to stop sending.
     st.refuseRest(io);
