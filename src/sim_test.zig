@@ -468,10 +468,10 @@ const PartialAsWhole = error.PartialAsWhole;
 /// request and said so.
 const ErrorStatus = error.ErrorStatus;
 
-/// One request for `greeting` from `client` on `io`: a typed error, or the
-/// whole body, never less of it presented as whole.
-fn askWhole(client: *Client, io: Io) anyerror!void {
-    var response = try client.send(io, .{ .url = plain_url });
+/// One request for `greeting` from `client` on `io`, over TLS when `pki` is
+/// set: a typed error, or the whole body, never less of it presented as whole.
+fn askWhole(client: *Client, io: Io, pki: ?*const Pki) anyerror!void {
+    var response = try client.send(io, .{ .url = Pki.url(pki) });
     defer response.deinit(io);
     const body = try response.collect(testing.allocator, io, .limited(1 << 10));
     defer testing.allocator.free(body);
@@ -528,18 +528,32 @@ fn sweepWith(base: Io, ctx: anytype, options: shakedown.EveryFaultOptions) !Swep
     return .{ .steps = done.steps, .runs = done.runs };
 }
 
-/// The test's server, on a node whose `Io` no fault reaches.
+/// The test's server, on a node whose `Io` no fault reaches. Over TLS it
+/// draws its random from one seed, on a `FaultIo` that faults nothing: its
+/// key share and its signature (an ECDSA signature's length is its draw's)
+/// are the same each time it starts, so a server started in each run of a
+/// sweep sends the same records.
 const SteadyServer = struct {
+    seeded: ?*shakedown.FaultIo = null,
     seam: reactor_testing.Seam = undefined,
     listener: Io.net.Server = undefined,
     server: Server = undefined,
     serving: Io.Future(void) = undefined,
 
-    fn start(s: *SteadyServer, node: *Sim.Node, address: Io.net.IpAddress) !void {
-        s.seam.init(node.io());
+    fn start(s: *SteadyServer, node: *Sim.Node, address: Io.net.IpAddress, pki: ?*const Pki) !void {
+        var base = node.io();
+        if (pki != null) {
+            s.seeded = try shakedown.FaultIo.init(testing.allocator, base, .{ .random_seed = 1 });
+            base = s.seeded.?.io();
+        }
+        errdefer if (s.seeded) |f| f.deinit();
+        s.seam.init(base);
         const io = s.seam.io();
         s.listener = try address.listen(io, .{});
-        s.server = .init(testing.allocator, .{}, .of(hello));
+        errdefer s.listener.deinit(io);
+        var options: Server.Options = .{};
+        if (pki) |p| options.tls = .{ .credentials = &p.credentials };
+        s.server = .init(testing.allocator, options, .of(hello));
         s.serving = try io.concurrent(Exchange.serve, .{ &s.server, io, &s.listener });
     }
 
@@ -549,15 +563,22 @@ const SteadyServer = struct {
         s.serving.await(io);
         s.server.deinit(io);
         s.listener.deinit(io);
+        if (s.seeded) |f| f.deinit();
     }
 };
 
 /// The client's node faulted, the server steady. The property: the call
 /// returns a typed error or a whole response, never a partial one presented
-/// as whole, and the next request on the same client succeeds.
+/// as whole, and the next request on the same client succeeds. Over TLS the
+/// server starts in each run (`SteadyServer`), so every run's handshake reads
+/// the same records, and the handshake's calls are swept with the rest.
 const ClientSweep = struct {
     /// The client node's own `Io`, which no fault reaches.
     steady: Io,
+    /// TLS, with the server started in each run on `server_node`.
+    pki: ?*const Pki = null,
+    server_node: ?*Sim.Node = null,
+    address: Io.net.IpAddress = undefined,
     fio: *shakedown.FaultIo = undefined,
     seam: reactor_testing.Seam = undefined,
     first: anyerror!void = {},
@@ -572,11 +593,17 @@ const ClientSweep = struct {
 
     pub fn run(c: *ClientSweep, _: Io) anyerror!void {
         const io = c.seam.io();
-        var client: Client = .init(try c.fio.allocator(testing.allocator), .{});
+        var server: SteadyServer = .{};
+        if (c.pki != null) try server.start(c.server_node.?, c.address, c.pki);
+        // After the client's close, which runs first.
+        defer if (c.pki != null) server.stop();
+        var options: Client.Options = .{};
+        if (c.pki) |p| options.tls = .{ .trust = p.trust };
+        var client: Client = .init(try c.fio.allocator(testing.allocator), options);
         defer client.deinit(io);
-        c.first = askWhole(&client, io);
+        c.first = askWhole(&client, io, c.pki);
         c.boundary = c.fio.steps().peek();
-        c.next = askWhole(&client, io);
+        c.next = askWhole(&client, io, c.pki);
     }
 
     pub fn check(c: *ClientSweep, _: Io, result: anyerror!void, injected: ?shakedown.Injected) !void {
@@ -594,12 +621,19 @@ const ClientSweep = struct {
 
     fn sweep(node: *Sim.Node, server_node: *Sim.Node, address: Io.net.IpAddress, options: shakedown.EveryFaultOptions) !void {
         var server: SteadyServer = .{};
-        try server.start(server_node, address);
+        try server.start(server_node, address, null);
         defer server.stop();
         var c: ClientSweep = .{ .steady = node.io() };
         const swept = try sweepWith(node.io(), &c, options);
         // Two requests on one connection, and its close: some twenty calls, faulted a run each.
         try testing.expect(swept.steps >= 20 and swept.runs > 5);
+    }
+
+    fn sweepTls(node: *Sim.Node, server_node: *Sim.Node, address: Io.net.IpAddress, pki: *const Pki, options: shakedown.EveryFaultOptions) !void {
+        var c: ClientSweep = .{ .steady = node.io(), .pki = pki, .server_node = server_node, .address = address };
+        const swept = try sweepWith(node.io(), &c, options);
+        // The handshake's calls beside the two requests': some eighty, past plain TCP's twenty.
+        try testing.expect(swept.steps >= 60 and swept.runs > 5);
     }
 };
 
@@ -638,7 +672,7 @@ const ServerSweep = struct {
         const result = result: {
             var client: Client = .init(testing.allocator, .{ .timeouts = .{ .connect = .literal("5s"), .activity = .literal("5s") } });
             defer client.deinit(io);
-            break :result askWhole(&client, io);
+            break :result askWhole(&client, io, null);
         };
         var waited: u32 = 0;
         while (server.stats(s.steady.io()).open != 0 and waited < 600) : (waited += 1) try io.sleep(.fromMilliseconds(100), .awake);
@@ -697,7 +731,11 @@ const ServerSweep = struct {
 /// spurious wakes, which are drawn from a source that goes on from run to run
 /// (the seeded exchanges above meet them).
 fn sweepSim() !*Sim {
-    return Sim.init(testing.allocator, .{ .watchdog = null, .seed = 11, .schedule = .fifo, .spurious_wake_per_million = 0 });
+    return sweepSimOver(null);
+}
+
+fn sweepSimOver(pki: ?*const Pki) !*Sim {
+    return Sim.init(testing.allocator, Pki.simOptions(pki, .{ .watchdog = null, .seed = 11, .schedule = .fifo, .spurious_wake_per_million = 0 }));
 }
 
 test "every single fault on the client's side of one request: a typed error or a whole response, then the next request succeeds" {
@@ -730,4 +768,26 @@ test "every cancel on the server's side of one request: the connection ends, not
     defer sim.deinit();
     const nodes = try twoNodes(sim, .{});
     try finished(sim.run(ServerSweep.sweep, .{ nodes.server, nodes.client, nodes.address, cancel_sweep }));
+}
+
+test "every single fault on the client's side of one request over TLS, the handshake's calls too: a typed error or a whole response, then the next request succeeds" {
+    if (test_io.evented) return error.SkipZigTest;
+    var pki: Pki = undefined;
+    try pki.init();
+    defer pki.deinit();
+    const sim = try sweepSimOver(&pki);
+    defer sim.deinit();
+    const nodes = try twoNodes(sim, .{});
+    try finished(sim.run(ClientSweep.sweepTls, .{ nodes.client, nodes.server, nodes.address, &pki, full_sweep }));
+}
+
+test "every cancel on the client's side of one request over TLS, the handshake's calls too, is the call's answer, and the next request succeeds" {
+    if (test_io.evented) return error.SkipZigTest;
+    var pki: Pki = undefined;
+    try pki.init();
+    defer pki.deinit();
+    const sim = try sweepSimOver(&pki);
+    defer sim.deinit();
+    const nodes = try twoNodes(sim, .{});
+    try finished(sim.run(ClientSweep.sweepTls, .{ nodes.client, nodes.server, nodes.address, &pki, cancel_sweep }));
 }

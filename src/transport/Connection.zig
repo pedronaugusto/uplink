@@ -1037,7 +1037,9 @@ fn handshakeFailed(conn: *Connection, err: cloak.tls.Session.OpenError, report: 
         if (conn.failed() != .timed_out) conn.noteTimedOut(conn.armed.load(.monotonic));
         return error.TimedOut;
     }
-    if (conn.failed() == .canceled) return error.Canceled;
+    // A cancel on a socket operation, or on one the session made itself (an
+    // entropy draw, a signature, a key-log line): the caller's, not TLS's.
+    if (conn.failed() == .canceled or err == error.Canceled) return error.Canceled;
     const alert = report.alert_received orelse report.alert_sent;
     if (conn.diagnostics) |d| {
         d.tls_error = err;
