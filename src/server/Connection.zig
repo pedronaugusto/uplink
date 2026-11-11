@@ -242,7 +242,15 @@ fn finishBody(c: *Connection, request: *Request) bool {
     if (request.expects_continue and !request.continued) return false;
     const budget = c.socket.context.options.drain;
     c.socket.startDrain(c.socket.io, budget.time);
-    return request.body.drain(budget.bytes);
+    const before = c.socket.failed();
+    const ended = request.body.drain(budget.bytes);
+    // A cancel the drain met stays asked for at the task's next cancelation
+    // point; the connection is not kept.
+    if (before != .canceled and c.socket.failed() == .canceled) {
+        c.socket.io.recancel();
+        return false;
+    }
+    return ended;
 }
 
 /// The most bytes of settings an upgrade's `HTTP2-Settings` may carry:

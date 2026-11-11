@@ -49,6 +49,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A cancel that lands while a finished exchange drains what is left of its body stays asked for at the task's next cancelation point. The drain read it as "the body did not end" and dropped it, so a client task went on after `Response.deinit` as if never canceled, and a server task likewise after a request body left unread.
 - An HTTP/2 tunnel's flush with nothing to send wrote an empty DATA frame, client and server: enough of them tripped a peer's flood limit (`enhance_your_calm`). `wire.h2`'s `writeData` writes no frame for no bytes and no end.
 - A cached response whose store fails to commit at `deinit` is told to the observer as `cache_failed`; the response itself still succeeds, as before.
 - Over HTTP/2, a handler's failure whose 500 cannot be written resets the stream with `INTERNAL_ERROR` (RFC 9113 §8.1), where the stream was left open with no answer; and a cancel that ends an answer (the handler's, or a write's) resets it with `CANCEL` and stays asked for at the task's next cancelation point, where it was dropped. No test: the 500's write fails only under a contended lock or a full outbox, which no fault point reaches deterministically.

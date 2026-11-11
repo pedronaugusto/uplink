@@ -438,7 +438,11 @@ fn drain(r: *Response, io: Io) void {
     }
     r.body.trailer_io = io;
     r.conn.?.drainBy(Io.Clock.awake.now(io).addDuration(span.toIo(budget.time)));
+    const before = r.conn.?.failed();
     _ = r.body.drain(budget.bytes);
+    // A cancel the drain met stays asked for at the task's next cancelation
+    // point: `deinit` has no error to return it by.
+    if (before != .canceled and r.conn.?.failed() == .canceled) io.recancel();
 }
 
 /// Give a connection back after its exchange: kept when `reusable`, closed

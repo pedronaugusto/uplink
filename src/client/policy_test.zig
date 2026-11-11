@@ -510,6 +510,30 @@ test "a body that does not end within the drain's time closes its connection, an
     try testing.expectEqual(@as(u64, 2), client.stats().connections_opened);
 }
 
+/// Sends, then drops the response unread, its drain reading the trickling body until a cancel lands.
+fn dropDraining(client: *Client, io: Io, url: []const u8) !void {
+    var response = try client.send(io, .{ .url = url });
+    response.deinit(io);
+    // deinit returns nothing: a cancel its drain met is still asked for here.
+    try io.sleep(.fromSeconds(5), .awake);
+}
+
+test "a cancel that lands while a finished response drains its body is still asked for after deinit" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const server = try Server.start(gpa, io, Server.fixedAnswer(.{ .bytes = trickling, .piece = 6, .pause = .fromMilliseconds(20) }));
+    defer server.stop();
+    var buf: [64]u8 = undefined;
+    // A drain long enough that the cancel lands inside it.
+    var client: Client = .init(gpa, .{ .pool = .{ .drain = .{ .time = .literal("10s") } } });
+    defer client.deinit(io);
+    var task = try io.concurrent(dropDraining, .{ &client, io, server.url(&buf, "/") });
+    try io.sleep(.fromMilliseconds(300), .awake);
+    const start = Io.Clock.awake.now(io);
+    try testing.expectError(error.Canceled, task.cancel(io));
+    try testing.expect(start.durationTo(Io.Clock.awake.now(io)).toMilliseconds() < 2000);
+}
+
 test "a request's deadline bounds its head and its body's reads" {
     const gpa = testing.allocator;
     const io = test_io.io();
