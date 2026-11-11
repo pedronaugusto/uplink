@@ -32,7 +32,6 @@ const fields = wire.fields;
 const socks = wire.socks;
 const dial = @import("../net/dial.zig");
 const Resolver = @import("../net/Resolver.zig");
-const sys = @import("../net/sys.zig");
 const stream_owner = @import("../net/stream.zig");
 const Context = @import("Context.zig");
 const BufferPool = @import("BufferPool.zig");
@@ -482,7 +481,7 @@ pub fn alive(conn: *Connection, io: Io) Io.Cancelable!bool {
         .endpoint => |*owned| owned,
         .carrier => |carrier| return carrier.vtable.alive(carrier, io),
     };
-    if (stream_end.borrow().socketStream()) |stream| if (sys.peek(stream.socket.handle)) |seen| return switch (seen) {
+    if (stream_end.borrow().socketStream()) |stream| if (reactor.net.peek(io, stream.socket.handle)) |seen| return switch (seen) {
         .idle => true,
         .readable => secure,
         .closed => false,

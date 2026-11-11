@@ -58,6 +58,10 @@ pub fn dev(b: *std.Build, tools: type) void {
     const xenoglyph = xenoglyph_package.module("xenoglyph");
     const airlock = airlock_package.module("airlock");
     const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
+    // reactor's seam for the simulated network's tests: an `Io` whose sockets are not the
+    // system's, where reactor's raw socket calls ask the test instead.
+    const reactor_build = b.lazyImport(@This(), "reactor") orelse return;
+    const reactor_testing = reactor_build.testing(reactor_package, shakedown.module("shakedown"));
 
     const module = package.module("uplink");
     const wire = package.module("uplink.wire");
@@ -82,6 +86,7 @@ pub fn dev(b: *std.Build, tools: type) void {
         .optimize = optimize,
         .imports = imports,
         .shakedown = shakedown.module("shakedown"),
+        .reactor_testing = reactor_testing,
         .package = p,
         .filter = test_filter,
     };
@@ -289,6 +294,7 @@ const TestInputs = struct {
     optimize: std.lang.Optimize,
     imports: []const std.Build.Module.Import,
     shakedown: *std.Build.Module,
+    reactor_testing: *std.Build.Module,
     /// uplink's own build, which holds its files.
     package: *std.Build,
     filter: ?[]const u8,
@@ -308,6 +314,7 @@ fn addTests(b: *std.Build, name: []const u8, backend: ?[]const u8, inputs: TestI
         }),
     });
     tests.root_module.addImport("shakedown", inputs.shakedown);
+    tests.root_module.addImport("reactor.testing", inputs.reactor_testing);
     const io = b.addOptions();
     io.addOption(?[]const u8, "backend", backend);
     tests.root_module.addOptions("test_io", io);

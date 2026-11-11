@@ -13,7 +13,6 @@ const cloak = @import("cloak");
 const tls = @import("../tls.zig");
 const span = @import("../span.zig");
 const Timed = @import("../net/Timed.zig");
-const sys = @import("../net/sys.zig");
 const stream_owner = @import("../net/stream.zig");
 const reactor = @import("reactor");
 const Context = @import("Context.zig");
@@ -211,7 +210,7 @@ pub fn awaitEnd(c: *Socket, io: Io, timeout: Io.Timeout) Io.Cancelable!bool {
         if (r.end == r.buffer.len) return waitOut(io, until);
         // A look that neither waits nor takes answers at once where the
         // system has one: what a query with no time to wait needs.
-        if (sys.peek(stream.socket.handle)) |seen| switch (seen) {
+        if (reactor.net.peek(io, stream.socket.handle)) |seen| switch (seen) {
             .closed => return true,
             .readable => {},
             .idle => if (expired(io, until)) return false,

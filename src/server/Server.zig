@@ -249,7 +249,7 @@ fn serveOpened(s: *Server, io: Io, endpoint: Endpoint) void {
     defer s.context.ended(io);
     // A pipe has no socket options, and no address to tell.
     if (endpoint.socketStream()) |stream| {
-        reactor.net.setOptions(stream.socket, s.context.options.socket) catch |err| {
+        reactor.net.setOptions(io, stream.socket, s.context.options.socket) catch |err| {
             if (s.context.options.observer) |o| o.emit(.{ .option_refused = .{ .error_name = @errorName(err) } });
             var owned: OwnedEndpoint = .init(endpoint);
             owned.deinit(io);
