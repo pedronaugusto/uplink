@@ -567,6 +567,46 @@ pub fn topSession(conn: *const Connection) ?*const cloak.tls.Session {
     return null;
 }
 
+/// The reader below `slot` as an end that says why a read failed: the session's own, or the
+/// socket's, its cause the connection's record (`failed`).
+fn readEndBelow(conn: *Connection, slot: usize) aegis.io.ReadEnd {
+    var i = slot;
+    while (i > 0) {
+        i -= 1;
+        if (conn.session_on[i]) return conn.sessions[i].readEnd();
+    }
+    return .init(&conn.input.interface, conn, recordedCause);
+}
+
+/// The writer below `slot` as an end that says why a write failed.
+fn writeEndBelow(conn: *Connection, slot: usize) aegis.io.WriteEnd {
+    var i = slot;
+    while (i > 0) {
+        i -= 1;
+        if (conn.session_on[i]) return conn.sessions[i].writeEnd();
+    }
+    return .init(&conn.output.interface, conn, recordedCause);
+}
+
+/// The top layer's reader and writer as ends (`readEndBelow`).
+pub fn readEnd(conn: *Connection) aegis.io.ReadEnd {
+    return conn.readEndBelow(conn.sessions.len);
+}
+pub fn writeEnd(conn: *Connection) aegis.io.WriteEnd {
+    return conn.writeEndBelow(conn.sessions.len);
+}
+
+/// Why the socket's last read or write failed, as the connection recorded it: a cancel or a
+/// timeout; null for a failure it names no cause for.
+fn recordedCause(context: *const anyopaque) ?anyerror {
+    const conn: *const Connection = @ptrCast(@alignCast(context));
+    return switch (conn.failed()) {
+        .canceled => error.Canceled,
+        .timed_out => error.TimedOut,
+        .none, .broken => null,
+    };
+}
+
 fn readerBelow(conn: *Connection, slot: usize) *Io.Reader {
     var i = slot;
     while (i > 0) {
@@ -925,7 +965,7 @@ fn startTls(conn: *Connection, slot: usize, host: []const u8, offer: Offer) (Ope
     var decoders = [_]tls.Decoder{ .init(.zstd, ctx.gpa), .init(.zlib, ctx.gpa) };
     var codecs = [_]*tls.Codec{ &decoders[0].codec, &decoders[1].codec };
     var namespace_buf: [Io.net.HostName.max_len + 32]u8 = undefined;
-    session.open(ctx.gpa, io, conn.readerBelow(slot), conn.writerBelow(slot), read_buffer, write_buffer, .{
+    session.open(ctx.gpa, io, conn.readEndBelow(slot), conn.writeEndBelow(slot), read_buffer, write_buffer, .{
         .identity = tls.reference(host),
         .trust = if (trust) |snapshot| .{ .snapshot = snapshot } else if (leaf_keys) .{ .leaf_keys = ctx.tls.pins } else .none,
         .pins = if (target and !leaf_keys) ctx.tls.pins else &.{},
@@ -1123,16 +1163,16 @@ fn socksTunnel(conn: *Connection, proxy: Proxy, started: Io.Timestamp) OpenError
     const credential: ?socks.Credential = if (proxy.credential) |c| .{ .user = c.user, .password = c.password } else null;
     const host = conn.route.host();
     if ((version == .socks4 or version == .socks4a) and std.mem.findScalar(u8, host, ':') != null) return error.ProxyAddressUnsupported;
-    if (version == .socks5 or version == .socks5h) socks.authenticate(conn.reader(), conn.writer(), credential) catch |err| return conn.socksFailed(err);
+    if (version == .socks5 or version == .socks5h) socks.authenticate(conn.readEnd(), conn.writeEnd(), credential) catch |err| return conn.socksFailed(err);
     const literal = reactor.net.literal(host, conn.route.port);
     const address: ?Io.net.IpAddress = switch (version) {
         .socks4a => null,
         .socks5h => literal,
         .socks4, .socks5 => literal orelse try conn.socksLookup(version == .socks4, until),
     };
-    socks.request(conn.writer(), version, host, conn.route.port, address, credential) catch |err| return conn.socksFailed(err);
+    socks.request(conn.writeEnd(), version, host, conn.route.port, address, credential) catch |err| return conn.socksFailed(err);
     var status: u16 = 0;
-    socks.reply(conn.reader(), version, &status) catch |err| {
+    socks.reply(conn.readEnd(), version, &status) catch |err| {
         if (conn.diagnostics) |d| d.proxy_status = status;
         return conn.socksFailed(err);
     };
@@ -1170,6 +1210,7 @@ fn timedOutOpen(conn: *Connection) OpenError {
 fn socksFailed(conn: *Connection, err: anyerror) OpenError {
     return switch (err) {
         error.ReadFailed => conn.readError(),
+        error.Canceled => error.Canceled,
         error.EndOfStream => error.ConnectionFailed,
         error.WriteFailed => conn.writeError(),
         error.ProxyRefused, error.ProxyCommandUnsupported => error.ProxyRefused,

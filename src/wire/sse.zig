@@ -10,6 +10,7 @@
 //! is dropped, as the standard says.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 
 /// One event. `data` and `type` point into the parser's buffers and are
@@ -301,26 +302,28 @@ fn lineEnd(in: []const u8, from: usize) usize {
 
 /// Events read from a stream, such as a response body.
 pub const Reader = struct {
-    in: *Io.Reader,
+    in: aegis.io.ReadEnd,
     parser: Parser,
 
-    /// Events from `in`, each at most `data_buffer.len` bytes of data.
-    pub fn init(in: *Io.Reader, data_buffer: []u8) Reader {
+    /// Events from `in`, each at most `data_buffer.len` bytes of data. `in` says why a read
+    /// failed: a canceled one is `error.Canceled` from `next`.
+    pub fn init(in: aegis.io.ReadEnd, data_buffer: []u8) Reader {
         return .{ .in = in, .parser = .init(data_buffer) };
     }
 
     /// Errors from `next`.
-    pub const NextError = Error || error{ReadFailed};
+    pub const NextError = Error || error{ ReadFailed, Canceled };
 
     /// The next event, or null at the stream's end.
     pub fn next(r: *Reader) NextError!?Event {
         while (true) {
-            if (r.in.bufferedLen() == 0) r.in.fillMore() catch |err| switch (err) {
+            const in = r.in.reader();
+            if (in.bufferedLen() == 0) in.fillMore() catch |err| switch (err) {
                 error.EndOfStream => return null,
-                error.ReadFailed => return error.ReadFailed,
+                error.ReadFailed => return r.in.settle(error.ReadFailed),
             };
-            const step = try r.parser.feed(r.in.buffered());
-            r.in.toss(step.consumed);
+            const step = try r.parser.feed(in.buffered());
+            in.toss(step.consumed);
             if (step.event) |e| return e;
         }
     }
@@ -458,7 +461,7 @@ test "data past the buffer is refused by name, and the reader stops at the end" 
     try testing.expectError(error.DataTooLong, p.feed("data: too long\n\n"));
     var in: Io.Reader = .fixed("id: 9\ndata: a\n\ndata: b\n\n");
     var buf: [32]u8 = undefined;
-    var r: Reader = .init(&in, &buf);
+    var r: Reader = .init(.causeless(&in), &buf);
     try testing.expectEqualStrings("a", (try r.next()).?.data);
     const second = (try r.next()).?;
     try testing.expectEqualStrings("b", second.data);
@@ -473,7 +476,7 @@ test "a written event reads back as itself" {
     try writeEvent(&w, .{ .data = "" });
     var in: Io.Reader = .fixed(w.buffered());
     var data: [64]u8 = undefined;
-    var r: Reader = .init(&in, &data);
+    var r: Reader = .init(.causeless(&in), &data);
     const e = (try r.next()).?;
     try testing.expectEqualStrings("update", e.type);
     try testing.expectEqualStrings("line one\nline two\nline three", e.data);
@@ -530,4 +533,27 @@ test "fuzz: any stream is read in pieces as it is read whole" {
             } else |err| try testing.expectError(err, b);
         }
     }.one, .{});
+}
+
+/// A stream whose reads fail, its end saying the failure was a cancel.
+const CanceledRead = struct {
+    buffer: [16]u8 = undefined,
+    reader: Io.Reader = .{ .vtable = &.{ .stream = stream }, .buffer = &.{}, .seek = 0, .end = 0 },
+    fn stream(_: *Io.Reader, _: *Io.Writer, _: Io.Limit) Io.Reader.StreamError!usize {
+        return error.ReadFailed;
+    }
+    fn cause(_: *const anyopaque) ?anyerror {
+        return error.Canceled;
+    }
+    fn end(self: *CanceledRead) aegis.io.ReadEnd {
+        self.reader.buffer = &self.buffer;
+        return .init(&self.reader, self, cause);
+    }
+};
+
+test "an event stream whose read was canceled is Canceled, not a failed read" {
+    var canceled: CanceledRead = .{};
+    var data: [64]u8 = undefined;
+    var r: Reader = .init(canceled.end(), &data);
+    try std.testing.expectError(error.Canceled, r.next());
 }

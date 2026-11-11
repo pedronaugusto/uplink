@@ -3,6 +3,7 @@
 //! protocol stay put.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 
 /// The SOCKS variants: 4a and 5h send the name for the proxy to look up.
@@ -37,6 +38,7 @@ pub const ReplyError = error{
     SocksProtocolError,
     ReadFailed,
     EndOfStream,
+    Canceled,
 };
 /// Errors from `authenticate`.
 pub const AuthenticateError = error{
@@ -52,6 +54,7 @@ pub const AuthenticateError = error{
     ReadFailed,
     EndOfStream,
     WriteFailed,
+    Canceled,
 };
 /// Errors from `request`.
 pub const RequestError = error{
@@ -65,10 +68,19 @@ pub const RequestError = error{
     ProxyTtlExpired,
     SocksProtocolError,
     WriteFailed,
+    Canceled,
 };
 
 /// Finish a SOCKS4/4a or SOCKS5 CONNECT reply, including its bound address.
-pub fn reply(r: *Io.Reader, version: Version, status: ?*u16) ReplyError!void {
+/// `in` and the caller's ends say why a read or a write failed: a canceled one is `error.Canceled`.
+pub fn reply(in: aegis.io.ReadEnd, version: Version, status: ?*u16) ReplyError!void {
+    return replyFrom(in.reader(), version, status) catch |err| switch (err) {
+        error.ReadFailed => in.settle(error.ReadFailed),
+        else => |e| e,
+    };
+}
+
+fn replyFrom(r: *Io.Reader, version: Version, status: ?*u16) ReplyError!void {
     if (version == .socks4 or version == .socks4a) {
         var bytes: [8]u8 = undefined;
         try r.readSliceAll(&bytes);
@@ -106,7 +118,15 @@ pub fn reply(r: *Io.Reader, version: Version, status: ?*u16) ReplyError!void {
 
 /// Authenticate SOCKS5, offering no-auth and, when supplied, RFC 1929.
 /// The RFC 1929 reply version is ignored; the status alone decides it.
-pub fn authenticate(r: *Io.Reader, w: *Io.Writer, credential: ?Credential) AuthenticateError!void {
+pub fn authenticate(in: aegis.io.ReadEnd, out: aegis.io.WriteEnd, credential: ?Credential) AuthenticateError!void {
+    return authenticateOver(in.reader(), out.writer(), credential) catch |err| switch (err) {
+        error.ReadFailed => in.settle(error.ReadFailed),
+        error.WriteFailed => out.settle(error.WriteFailed),
+        else => |e| e,
+    };
+}
+
+fn authenticateOver(r: *Io.Reader, w: *Io.Writer, credential: ?Credential) AuthenticateError!void {
     try w.writeAll(if (credential != null) &.{ 5, 2, 0, 2 } else &.{ 5, 1, 0 });
     try w.flush();
     var answer: [2]u8 = undefined;
@@ -131,7 +151,14 @@ pub fn authenticate(r: *Io.Reader, w: *Io.Writer, credential: ?Credential) Authe
 
 /// Write a CONNECT request. `address` is the local lookup for 4/5, or a
 /// literal for 5h; 4a always sends the name behind its 0.0.0.1 marker.
-pub fn request(w: *Io.Writer, version: Version, host: []const u8, port: u16, address: ?Io.net.IpAddress, credential: ?Credential) RequestError!void {
+pub fn request(out: aegis.io.WriteEnd, version: Version, host: []const u8, port: u16, address: ?Io.net.IpAddress, credential: ?Credential) RequestError!void {
+    return requestTo(out.writer(), version, host, port, address, credential) catch |err| switch (err) {
+        error.WriteFailed => out.settle(error.WriteFailed),
+        else => |e| e,
+    };
+}
+
+fn requestTo(w: *Io.Writer, version: Version, host: []const u8, port: u16, address: ?Io.net.IpAddress, credential: ?Credential) RequestError!void {
     const port_bytes = std.mem.toBytes(std.mem.nativeToBig(u16, port));
     if (version == .socks4 or version == .socks4a) {
         if (std.mem.findScalar(u8, host, ':') != null) return error.ProxyAddressUnsupported;
@@ -183,15 +210,15 @@ test "SOCKS replies consume the whole bound address and leave the tunnel's bytes
         &.{ 5, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 80, 42 },
     }) |bytes| {
         var r: Io.Reader = .fixed(bytes);
-        try reply(&r, .socks5, null);
+        try reply(.causeless(&r), .socks5, null);
         try testing.expectEqual(@as(u8, 42), try r.takeByte());
         for (0..bytes.len - 1) |len| {
             var short: Io.Reader = .fixed(bytes[0..len]);
-            try testing.expectError(error.EndOfStream, reply(&short, .socks5, null));
+            try testing.expectError(error.EndOfStream, reply(.causeless(&short), .socks5, null));
         }
     }
     var r: Io.Reader = .fixed(&.{ 0, 90, 0, 80, 127, 0, 0, 1, 42 });
-    try reply(&r, .socks4, null);
+    try reply(.causeless(&r), .socks4, null);
     try testing.expectEqual(@as(u8, 42), try r.takeByte());
 }
 
@@ -200,43 +227,43 @@ test "SOCKS refusals have names and preserve the peer's reply code" {
     for (errors, 1..) |err, code| {
         var r: Io.Reader = .fixed(&.{ 5, @intCast(code), 0, 1 });
         var status: u16 = 0;
-        try testing.expectError(err, reply(&r, .socks5, &status));
+        try testing.expectError(err, reply(.causeless(&r), .socks5, &status));
         try testing.expectEqual(code, status);
     }
     for ([_][]const u8{ &.{ 4, 0, 0, 1 }, &.{ 5, 0, 1, 1 }, &.{ 5, 0, 0, 2 } }) |bytes| {
         var r: Io.Reader = .fixed(bytes);
-        try testing.expectError(error.SocksProtocolError, reply(&r, .socks5, null));
+        try testing.expectError(error.SocksProtocolError, reply(.causeless(&r), .socks5, null));
     }
 }
 
 test "SOCKS framing distinguishes local addresses from proxy-resolved names" {
     var buffer: [1024]u8 = undefined;
     var w: Io.Writer = .fixed(&buffer);
-    try request(&w, .socks5h, "remote.invalid", 443, null, null);
+    try request(.causeless(&w), .socks5h, "remote.invalid", 443, null, null);
     try testing.expectEqualSlices(u8, &.{ 5, 1, 0, 3, 14, 'r', 'e', 'm', 'o', 't', 'e', '.', 'i', 'n', 'v', 'a', 'l', 'i', 'd', 1, 187 }, w.buffered());
     w.end = 0;
-    try request(&w, .socks5, "localhost", 80, try Io.net.IpAddress.parse("127.0.0.1", 80), null);
+    try request(.causeless(&w), .socks5, "localhost", 80, try Io.net.IpAddress.parse("127.0.0.1", 80), null);
     try testing.expectEqualSlices(u8, &.{ 5, 1, 0, 1, 127, 0, 0, 1, 0, 80 }, w.buffered());
     w.end = 0;
-    try request(&w, .socks4a, "remote.invalid", 80, null, .{ .user = "u", .password = "ignored" });
+    try request(.causeless(&w), .socks4a, "remote.invalid", 80, null, .{ .user = "u", .password = "ignored" });
     try testing.expectEqualSlices(u8, &.{ 4, 1, 0, 80, 0, 0, 0, 1, 'u', 0, 'r', 'e', 'm', 'o', 't', 'e', '.', 'i', 'n', 'v', 'a', 'l', 'i', 'd', 0 }, w.buffered());
-    try testing.expectError(error.ProxyAddressUnsupported, request(&w, .socks4, "::1", 80, try Io.net.IpAddress.parse("::1", 80), null));
+    try testing.expectError(error.ProxyAddressUnsupported, request(.causeless(&w), .socks4, "::1", 80, try Io.net.IpAddress.parse("::1", 80), null));
 }
 
 test "SOCKS authentication follows the selected method and bounds credential lengths" {
     var buffer: [1024]u8 = undefined;
     var w: Io.Writer = .fixed(&buffer);
     var r: Io.Reader = .fixed(&.{ 5, 2, 1, 0 });
-    try authenticate(&r, &w, .{ .user = "user", .password = "pass" });
+    try authenticate(.causeless(&r), .causeless(&w), .{ .user = "user", .password = "pass" });
     try testing.expectEqualSlices(u8, &.{ 5, 2, 0, 2, 1, 4, 'u', 's', 'e', 'r', 4, 'p', 'a', 's', 's' }, w.buffered());
     for ([_][]const u8{ &.{ 5, 255 }, &.{ 5, 2, 1, 1 } }) |bytes| {
         r = .fixed(bytes);
-        try testing.expectError(error.ProxyAuthenticationRequired, authenticate(&r, &w, .{ .user = "user", .password = "pass" }));
+        try testing.expectError(error.ProxyAuthenticationRequired, authenticate(.causeless(&r), .causeless(&w), .{ .user = "user", .password = "pass" }));
     }
     r = .fixed(&.{ 5, 2 });
-    try testing.expectError(error.ProxyAuthenticationRequired, authenticate(&r, &w, .{ .user = &@as([256]u8, @splat('u')), .password = "pass" }));
+    try testing.expectError(error.ProxyAuthenticationRequired, authenticate(.causeless(&r), .causeless(&w), .{ .user = &@as([256]u8, @splat('u')), .password = "pass" }));
     r = .fixed(&.{ 5, 1 });
-    try testing.expectError(error.ProxyAuthMethodUnsupported, authenticate(&r, &w, null));
+    try testing.expectError(error.ProxyAuthMethodUnsupported, authenticate(.causeless(&r), .causeless(&w), null));
 }
 
 test "fuzz: a SOCKS reply is consumed exactly or refused by name" {
@@ -249,9 +276,30 @@ test "fuzz: a SOCKS reply is consumed exactly or refused by name" {
             const bytes = inputs.draw(case, &scratch, &seeds, 32);
             for ([_]Version{ .socks4, .socks5 }) |version| {
                 var r: Io.Reader = .fixed(bytes);
-                reply(&r, version, null) catch continue;
+                reply(.causeless(&r), version, null) catch continue;
                 try testing.expect(r.seek <= bytes.len);
             }
         }
     }.run, .{});
+}
+
+/// A stream whose reads fail, its end saying the failure was a cancel.
+const CanceledRead = struct {
+    buffer: [16]u8 = undefined,
+    reader: Io.Reader = .{ .vtable = &.{ .stream = stream }, .buffer = &.{}, .seek = 0, .end = 0 },
+    fn stream(_: *Io.Reader, _: *Io.Writer, _: Io.Limit) Io.Reader.StreamError!usize {
+        return error.ReadFailed;
+    }
+    fn cause(_: *const anyopaque) ?anyerror {
+        return error.Canceled;
+    }
+    fn end(self: *CanceledRead) aegis.io.ReadEnd {
+        self.reader.buffer = &self.buffer;
+        return .init(&self.reader, self, cause);
+    }
+};
+
+test "a reply whose read was canceled is Canceled, not a failed read" {
+    var canceled: CanceledRead = .{};
+    try std.testing.expectError(error.Canceled, reply(canceled.end(), .socks5, null));
 }

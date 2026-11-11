@@ -583,7 +583,7 @@ const OneAnswer = struct {
         var socket_in = stream.reader(io, buffers[0..n]);
         var socket_out = stream.writer(io, buffers[n..][0..n]);
         var session: cloak.tls.Session = undefined;
-        session.accept(gpa, io, &socket_in.interface, &socket_out.interface, buffers[2 * n ..][0..n], buffers[3 * n ..][0..n], .{ .credentials = s.credentials }) catch return;
+        session.accept(gpa, io, .fromStream(&socket_in), .fromStream(&socket_out), buffers[2 * n ..][0..n], buffers[3 * n ..][0..n], .{ .credentials = s.credentials }) catch return;
         defer session.deinit();
         const in = session.reader();
         while (std.mem.find(u8, in.buffered(), "\r\n\r\n") == null) in.fillMore() catch return;

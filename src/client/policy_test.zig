@@ -817,7 +817,7 @@ test "Server-Sent Events are read from a body as it streams" {
     var response = try client.send(io, .{ .url = server.url(&buf, "/events") });
     defer response.deinit(io);
     var data: [64]u8 = undefined;
-    var events: sse.Reader = .init(response.reader(io), &data);
+    var events: sse.Reader = .init(response.readEnd(io), &data);
     try testing.expectEqualStrings("one", (try events.next()).?.data);
     const two = (try events.next()).?;
     try testing.expectEqualStrings("two", two.data);

@@ -364,7 +364,7 @@ pub fn handshake(c: *Socket, options: tls.ServerOptions) error{Failed}!void {
         return error.Failed;
     };
     var report: cloak.tls.Session.Diagnostics = .{};
-    c.session.accept(s.gpa, io, &c.input.interface, &c.output.interface, read_buffer, write_buffer, .{
+    c.session.accept(s.gpa, io, .init(&c.input.interface, c, recordedCause), .init(&c.output.interface, c, recordedCause), read_buffer, write_buffer, .{
         .credentials = options.credentials,
         .alpn = if (s.options.http2) tls.server_protocols else tls.server_protocols_h1,
         .client_auth = options.client_certificate,
@@ -432,6 +432,17 @@ pub fn readError(c: *const Socket) ReadError {
 }
 
 /// Why the first operation that failed did.
+/// Why the socket's last read or write failed, as it recorded it, for the session's ends: a
+/// cancel or a timeout; null for a failure it names no cause for.
+fn recordedCause(context: *const anyopaque) ?anyerror {
+    const c: *const Socket = @ptrCast(@alignCast(context));
+    return switch (c.failed()) {
+        .canceled => error.Canceled,
+        .timed_out => error.TimedOut,
+        .none, .broken => null,
+    };
+}
+
 pub fn failed(c: *const Socket) Failure {
     return c.failure.load(.monotonic);
 }

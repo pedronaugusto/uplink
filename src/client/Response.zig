@@ -11,6 +11,7 @@
 //! points into it.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const place = @import("../place.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -303,6 +304,18 @@ pub fn collect(r: *Response, gpa: Allocator, io: Io, limit: Io.Limit) CollectErr
         error.StreamTooLong => error.StreamTooLong,
         error.ReadFailed => r.failure(),
     };
+}
+
+/// The body's reader as an end that says why a read failed (`failure`), for a reader that takes
+/// ends (`wire.sse.Reader`).
+pub fn readEnd(r: *Response, io: Io) aegis.io.ReadEnd {
+    return .init(r.reader(io), r, bodyCause);
+}
+
+fn bodyCause(context: *const anyopaque) ?anyerror {
+    const r: *const Response = @ptrCast(@alignCast(context));
+    if (r.body.state.current() != .read_failed) return null;
+    return r.failure();
 }
 
 /// Why the last read of the body failed.
