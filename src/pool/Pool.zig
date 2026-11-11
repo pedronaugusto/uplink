@@ -413,127 +413,147 @@ const test_io = @import("../testing/io.zig");
 const shakedown = @import("shakedown");
 
 test "the last kept is taken first, a route keeps its cap, and the pool its own" {
-    const io = test_io.io();
-    var pool: Pool = .init(testing.allocator, .{ .max_idle_per_route = 2, .max_idle = 3 });
-    defer pool.deinit(io);
-    var conns: [5]Connection = undefined;
-    const routes = [_]Route{
-        try Route.init(false, "a", 80, null),
-        try Route.init(false, "a", 80, null),
-        try Route.init(false, "A", 80, null),
-        try Route.init(true, "b", 443, null),
-        try Route.init(false, "c", 80, null),
-    };
-    for (&conns, routes) |*c, r| c.route = r;
-    try testing.expectEqual(null, pool.keep(io, .{ .h1 = &conns[0] }).evicted);
-    try testing.expectEqual(null, pool.keep(io, .{ .h1 = &conns[1] }).evicted);
-    // A third for route `a` puts out its oldest.
-    try testing.expectEqual(&conns[0], pool.keep(io, .{ .h1 = &conns[2] }).evicted.?.h1);
-    try testing.expectEqual(null, pool.keep(io, .{ .h1 = &conns[3] }).evicted);
-    // The pool is full: its oldest of all goes.
-    try testing.expectEqual(&conns[1], pool.keep(io, .{ .h1 = &conns[4] }).evicted.?.h1);
-    var waited = false;
-    try testing.expectEqual(&conns[2], (try pool.acquire(io, &routes[0], null, &waited)).idle.h1);
-    try testing.expectEqual(Acquired.open, try pool.acquire(io, &routes[0], null, &waited));
-    try testing.expectEqual(@as(u32, 2), pool.count());
-    while (pool.drain(io)) |_| {}
-    try testing.expectEqual(@as(u32, 0), pool.count());
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const io = test_io.io();
+            var pool: Pool = .init(testing.allocator, .{ .max_idle_per_route = 2, .max_idle = 3 });
+            defer pool.deinit(io);
+            var conns: [5]Connection = undefined;
+            const routes = [_]Route{
+                try Route.init(false, "a", 80, null),
+                try Route.init(false, "a", 80, null),
+                try Route.init(false, "A", 80, null),
+                try Route.init(true, "b", 443, null),
+                try Route.init(false, "c", 80, null),
+            };
+            for (&conns, routes) |*c, r| c.route = r;
+            try testing.expectEqual(null, pool.keep(io, .{ .h1 = &conns[0] }).evicted);
+            try testing.expectEqual(null, pool.keep(io, .{ .h1 = &conns[1] }).evicted);
+            // A third for route `a` puts out its oldest.
+            try testing.expectEqual(&conns[0], pool.keep(io, .{ .h1 = &conns[2] }).evicted.?.h1);
+            try testing.expectEqual(null, pool.keep(io, .{ .h1 = &conns[3] }).evicted);
+            // The pool is full: its oldest of all goes.
+            try testing.expectEqual(&conns[1], pool.keep(io, .{ .h1 = &conns[4] }).evicted.?.h1);
+            var waited = false;
+            try testing.expectEqual(&conns[2], (try pool.acquire(io, &routes[0], null, &waited)).idle.h1);
+            try testing.expectEqual(Acquired.open, try pool.acquire(io, &routes[0], null, &waited));
+            try testing.expectEqual(@as(u32, 2), pool.count());
+            while (pool.drain(io)) |_| {}
+            try testing.expectEqual(@as(u32, 0), pool.count());
+        }
+    }.inSim, .{});
 }
 
 test "a pool that keeps nothing hands every connection back" {
-    const io = test_io.io();
-    var pool: Pool = .init(testing.allocator, .{ .max_idle = 0 });
-    defer pool.deinit(io);
-    var conn: Connection = undefined;
-    conn.route = try Route.init(false, "a", 80, null);
-    try testing.expectEqual(&conn, pool.keep(io, .{ .h1 = &conn }).evicted.?.h1);
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const io = test_io.io();
+            var pool: Pool = .init(testing.allocator, .{ .max_idle = 0 });
+            defer pool.deinit(io);
+            var conn: Connection = undefined;
+            conn.route = try Route.init(false, "a", 80, null);
+            try testing.expectEqual(&conn, pool.keep(io, .{ .h1 = &conn }).evicted.?.h1);
+        }
+    }.inSim, .{});
 }
 
 test "a connection idle past its time is handed out to be closed, not used" {
-    var clock: shakedown.Clock = .init(test_io.io(), .{});
-    const io = clock.io();
-    var pool: Pool = .init(testing.allocator, .{ .idle_timeout = .literal("90s") });
-    defer pool.deinit(io);
-    const route: Route = try .init(false, "a", 80, null);
-    var a: Connection = undefined;
-    a.route = route;
-    var b: Connection = undefined;
-    b.route = try Route.init(false, "b", 80, null);
-    var c: Connection = undefined;
-    c.route = try Route.init(false, "c", 80, null);
-    try testing.expectEqual(Kept{}, pool.keep(io, .{ .h1 = &a }));
-    clock.advance(.fromSeconds(60));
-    try testing.expectEqual(Kept{}, pool.keep(io, .{ .h1 = &b }));
-    clock.advance(.fromSeconds(30));
-    // Keeping another puts the expired oldest out.
-    try testing.expectEqual(&a, pool.keep(io, .{ .h1 = &c }).expired.?.h1);
-    clock.advance(.fromSeconds(60));
-    var waited = false;
-    try testing.expectEqual(&b, (try pool.acquire(io, &b.route, null, &waited)).expired.h1);
-    try testing.expectEqual(&c, (try pool.acquire(io, &c.route, null, &waited)).idle.h1);
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            var clock: shakedown.Clock = .init(test_io.io(), .{});
+            const io = clock.io();
+            var pool: Pool = .init(testing.allocator, .{ .idle_timeout = .literal("90s") });
+            defer pool.deinit(io);
+            const route: Route = try .init(false, "a", 80, null);
+            var a: Connection = undefined;
+            a.route = route;
+            var b: Connection = undefined;
+            b.route = try Route.init(false, "b", 80, null);
+            var c: Connection = undefined;
+            c.route = try Route.init(false, "c", 80, null);
+            try testing.expectEqual(Kept{}, pool.keep(io, .{ .h1 = &a }));
+            clock.advance(.fromSeconds(60));
+            try testing.expectEqual(Kept{}, pool.keep(io, .{ .h1 = &b }));
+            clock.advance(.fromSeconds(30));
+            // Keeping another puts the expired oldest out.
+            try testing.expectEqual(&a, pool.keep(io, .{ .h1 = &c }).expired.?.h1);
+            clock.advance(.fromSeconds(60));
+            var waited = false;
+            try testing.expectEqual(&b, (try pool.acquire(io, &b.route, null, &waited)).expired.h1);
+            try testing.expectEqual(&c, (try pool.acquire(io, &c.route, null, &waited)).idle.h1);
+        }
+    }.inSim, .{});
 }
 
 test "a full route makes exchanges wait in order, for a kept connection or for room" {
-    const io = test_io.io();
-    var pool: Pool = .init(testing.allocator, .{ .max_per_route = 1 });
-    defer pool.deinit(io);
-    const route: Route = try .init(false, "a", 80, null);
-    var waited = false;
-    try testing.expectEqual(Acquired.open, try pool.acquire(io, &route, null, &waited));
-    try testing.expect(!waited);
-    const Wait = struct {
-        fn run(pl: *Pool, r: Route, out: *AcquireError!Acquired, flag: *bool) void {
-            out.* = pl.acquire(test_io.io(), &r, null, flag);
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const io = test_io.io();
+            var pool: Pool = .init(testing.allocator, .{ .max_per_route = 1 });
+            defer pool.deinit(io);
+            const route: Route = try .init(false, "a", 80, null);
+            var waited = false;
+            try testing.expectEqual(Acquired.open, try pool.acquire(io, &route, null, &waited));
+            try testing.expect(!waited);
+            const Wait = struct {
+                fn run(pl: *Pool, r: Route, out: *AcquireError!Acquired, flag: *bool) void {
+                    out.* = pl.acquire(test_io.io(), &r, null, flag);
+                }
+            };
+            var first: AcquireError!Acquired = undefined;
+            var second: AcquireError!Acquired = undefined;
+            var first_waited = false;
+            var second_waited = false;
+            var group: Io.Group = .init;
+            defer group.cancel(io);
+            group.concurrent(io, Wait.run, .{ &pool, route, &first, &first_waited }) catch return error.SkipZigTest;
+            try waitForWaiters(&pool, &route, 1);
+            group.concurrent(io, Wait.run, .{ &pool, route, &second, &second_waited }) catch return error.SkipZigTest;
+            try waitForWaiters(&pool, &route, 2);
+            // The connection comes back: the first waiter has it. Then it closes:
+            // the second gets room for a new one.
+            var conn: Connection = undefined;
+            conn.route = route;
+            try testing.expectEqual(Kept{}, pool.keep(io, .{ .h1 = &conn }));
+            pool.closed(io, &route);
+            try group.await(io);
+            try testing.expectEqual(&conn, (try first).idle.h1);
+            try testing.expectEqual(Acquired.open, try second);
+            try testing.expect(first_waited and second_waited);
+            pool.closed(io, &route);
+            try testing.expectEqual(@as(usize, 0), routeCount(&pool));
         }
-    };
-    var first: AcquireError!Acquired = undefined;
-    var second: AcquireError!Acquired = undefined;
-    var first_waited = false;
-    var second_waited = false;
-    var group: Io.Group = .init;
-    defer group.cancel(io);
-    group.concurrent(io, Wait.run, .{ &pool, route, &first, &first_waited }) catch return error.SkipZigTest;
-    try waitForWaiters(&pool, &route, 1);
-    group.concurrent(io, Wait.run, .{ &pool, route, &second, &second_waited }) catch return error.SkipZigTest;
-    try waitForWaiters(&pool, &route, 2);
-    // The connection comes back: the first waiter has it. Then it closes:
-    // the second gets room for a new one.
-    var conn: Connection = undefined;
-    conn.route = route;
-    try testing.expectEqual(Kept{}, pool.keep(io, .{ .h1 = &conn }));
-    pool.closed(io, &route);
-    try group.await(io);
-    try testing.expectEqual(&conn, (try first).idle.h1);
-    try testing.expectEqual(Acquired.open, try second);
-    try testing.expect(first_waited and second_waited);
-    pool.closed(io, &route);
-    try testing.expectEqual(@as(usize, 0), routeCount(&pool));
+    }.inSim, .{});
 }
 
 test "a wait for a full route ends at its deadline and leaves nothing behind" {
-    var clock: shakedown.Clock = .init(test_io.io(), .{});
-    const io = clock.io();
-    var pool: Pool = .init(testing.allocator, .{ .max_per_route = 1 });
-    defer pool.deinit(io);
-    const route: Route = try .init(false, "a", 80, null);
-    var waited = false;
-    try testing.expectEqual(Acquired.open, try pool.acquire(io, &route, null, &waited));
-    const Wait = struct {
-        fn run(pl: *Pool, wio: Io, r: Route, deadline: Io.Timestamp, out: *AcquireError!Acquired) void {
-            var w = false;
-            out.* = pl.acquire(wio, &r, deadline, &w);
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            var clock: shakedown.Clock = .init(test_io.io(), .{});
+            const io = clock.io();
+            var pool: Pool = .init(testing.allocator, .{ .max_per_route = 1 });
+            defer pool.deinit(io);
+            const route: Route = try .init(false, "a", 80, null);
+            var waited = false;
+            try testing.expectEqual(Acquired.open, try pool.acquire(io, &route, null, &waited));
+            const Wait = struct {
+                fn run(pl: *Pool, wio: Io, r: Route, deadline: Io.Timestamp, out: *AcquireError!Acquired) void {
+                    var w = false;
+                    out.* = pl.acquire(wio, &r, deadline, &w);
+                }
+            };
+            var result: AcquireError!Acquired = undefined;
+            const deadline = Io.Clock.awake.now(io).addDuration(.fromSeconds(5));
+            var task = test_io.io().concurrent(Wait.run, .{ &pool, io, route, deadline, &result }) catch return error.SkipZigTest;
+            defer task.cancel(test_io.io());
+            try clock.awaitArmed(1, .{ .duration = .{ .raw = .fromSeconds(10), .clock = .awake } });
+            clock.advance(.fromSeconds(5));
+            task.await(test_io.io());
+            try testing.expectError(error.TimedOut, result);
+            pool.closed(io, &route);
+            try testing.expectEqual(@as(usize, 0), routeCount(&pool));
         }
-    };
-    var result: AcquireError!Acquired = undefined;
-    const deadline = Io.Clock.awake.now(io).addDuration(.fromSeconds(5));
-    var task = test_io.io().concurrent(Wait.run, .{ &pool, io, route, deadline, &result }) catch return error.SkipZigTest;
-    defer task.cancel(test_io.io());
-    try clock.awaitArmed(1, .{ .duration = .{ .raw = .fromSeconds(10), .clock = .awake } });
-    clock.advance(.fromSeconds(5));
-    task.await(test_io.io());
-    try testing.expectError(error.TimedOut, result);
-    pool.closed(io, &route);
-    try testing.expectEqual(@as(usize, 0), routeCount(&pool));
+    }.inSim, .{});
 }
 
 /// How many limited routes the pool keeps state for.

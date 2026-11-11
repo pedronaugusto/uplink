@@ -42,6 +42,7 @@ fn trusting(io: Io, pki: *openssl.Pki, name: []const u8) !cloak.Trust.Snapshot {
 }
 
 test "a server is checked against the authorities given" {
+    // Interop with openssl's s_server, a process on the system's sockets: in the conformance suite.
     const gpa = testing.allocator;
     const io = test_io.io();
     const pki = try openssl.Pki.make(gpa, io);
@@ -75,6 +76,7 @@ test "a server is checked against the authorities given" {
 }
 
 test "a server that speaks only TLS 1.2 is answered in TLS 1.2" {
+    // Interop with openssl's s_server, a process on the system's sockets: in the conformance suite.
     const gpa = testing.allocator;
     const io = test_io.io();
     const pki = try openssl.Pki.make(gpa, io);
@@ -89,6 +91,7 @@ test "a server that speaks only TLS 1.2 is answered in TLS 1.2" {
 }
 
 test "a server is held to the lowest version and to a pinned key, as curl holds it for git" {
+    // Interop with openssl's s_server, a process on the system's sockets: in the conformance suite.
     const gpa = testing.allocator;
     const io = test_io.io();
     const pki = try openssl.Pki.make(gpa, io);
@@ -177,6 +180,7 @@ fn loadAuth(gpa: Allocator, io: Io, pki: *openssl.Pki, cert_name: []const u8, ke
 }
 
 test "a server's demand for a client certificate is answered with ECDSA and Ed25519 keys, plain and encrypted" {
+    // Interop with openssl's s_server, a process on the system's sockets: in the conformance suite.
     const gpa = testing.allocator;
     const io = test_io.io();
     const pki = try openssl.Pki.make(gpa, io);
@@ -214,6 +218,7 @@ test "a server's demand for a client certificate is answered with ECDSA and Ed25
 }
 
 test "each handshake checks the server's certificate at the time it is made" {
+    // Interop with openssl's s_server, a process on the system's sockets: in the conformance suite.
     const gpa = testing.allocator;
     const pki = try openssl.Pki.make(gpa, test_io.io());
     defer pki.destroy();
@@ -261,6 +266,7 @@ fn firstCertificate(arena: Allocator, pem: []const u8) ![]u8 {
 }
 
 test "TLS to the server runs inside a CONNECT tunnel and inside SOCKS" {
+    // Interop with openssl's s_server, a process on the system's sockets: in the conformance suite.
     const gpa = testing.allocator;
     const io = test_io.io();
     const pki = try openssl.Pki.make(gpa, io);
@@ -378,6 +384,7 @@ fn throughH2Proxy(gpa: Allocator, io: Io, proxy_url: []const u8, trust: cloak.Tr
 }
 
 test "TLS to the server runs inside a CONNECT stream of an HTTP/2 proxy" {
+    // Interop with openssl's s_server, a process on the system's sockets: in the conformance suite.
     const gpa = testing.allocator;
     const io = test_io.io();
     const pki = try openssl.Pki.make(gpa, io);
@@ -399,6 +406,7 @@ test "TLS to the server runs inside a CONNECT stream of an HTTP/2 proxy" {
 }
 
 test "an HTTP/2 proxy that asks is answered on a new connection, and one that refuses says so" {
+    // Interop with openssl's s_server, a process on the system's sockets: in the conformance suite.
     const gpa = testing.allocator;
     const io = test_io.io();
     const pki = try openssl.Pki.make(gpa, io);
@@ -425,37 +433,41 @@ test "an HTTP/2 proxy that asks is answered on a new connection, and one that re
 }
 
 test "a proxy named http2 that does not speak it fails, and is not asked again over HTTP/1.1" {
-    const gpa = testing.allocator;
-    const io = test_io.io();
-    const pki = try openssl.Pki.make(gpa, io);
-    defer pki.destroy();
-    const trust = try trusting(io, pki, "server.pem");
-    defer trust.deinit();
-    // An HTTP/1.1 proxy given HTTP/2's preface: it never answers a CONNECT.
-    const http1 = try TestProxy.start(gpa, io, .{});
-    defer http1.stop();
-    var url_buf: [64]u8 = undefined;
-    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}", .{http1.port});
-    var arena_state: std.heap.ArenaAllocator = .init(gpa);
-    defer arena_state.deinit();
-    var proxy = try Proxy.parse(arena_state.allocator(), url, .lowercase);
-    proxy.http2 = true;
-    var client: Client = .init(gpa, .{
-        .tls = .{ .trust = trust },
-        .proxy = .{ .fixed = proxy },
-        .timeouts = .{ .handshake = .literal("500ms") },
-    });
-    defer client.deinit(io);
-    var page_url_buf: [64]u8 = undefined;
-    const page_url = try std.mem.print(&page_url_buf, "https://127.0.0.1:{d}/", .{http1.port});
-    if (client.send(io, .{ .url = page_url })) |response| {
-        var unexpected = response;
-        unexpected.deinit(io);
-        return error.TestUnexpectedResult;
-    } else |_| {}
-    const log = try http1.lines(gpa);
-    defer gpa.free(log);
-    try testing.expectEqual(@as(?usize, null), std.mem.find(u8, log, "CONNECT"));
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const io = test_io.io();
+            const pki = try openssl.Pki.make(gpa, std.testing.io);
+            defer pki.destroy();
+            const trust = try trusting(std.testing.io, pki, "server.pem");
+            defer trust.deinit();
+            // An HTTP/1.1 proxy given HTTP/2's preface: it never answers a CONNECT.
+            const http1 = try TestProxy.start(gpa, io, .{});
+            defer http1.stop();
+            var url_buf: [64]u8 = undefined;
+            const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}", .{http1.port});
+            var arena_state: std.heap.ArenaAllocator = .init(gpa);
+            defer arena_state.deinit();
+            var proxy = try Proxy.parse(arena_state.allocator(), url, .lowercase);
+            proxy.http2 = true;
+            var client: Client = .init(gpa, .{
+                .tls = .{ .trust = trust },
+                .proxy = .{ .fixed = proxy },
+                .timeouts = .{ .handshake = .literal("500ms") },
+            });
+            defer client.deinit(io);
+            var page_url_buf: [64]u8 = undefined;
+            const page_url = try std.mem.print(&page_url_buf, "https://127.0.0.1:{d}/", .{http1.port});
+            if (client.send(io, .{ .url = page_url })) |response| {
+                var unexpected = response;
+                unexpected.deinit(io);
+                return error.TestUnexpectedResult;
+            } else |_| {}
+            const log = try http1.lines(gpa);
+            defer gpa.free(log);
+            try testing.expectEqual(@as(?usize, null), std.mem.find(u8, log, "CONNECT"));
+        }
+    }.inSim, .{});
 }
 
 fn echoBody(io: Io, request: *serving.Request, response: *serving.Response) anyerror!void {
@@ -467,58 +479,63 @@ fn echoBody(io: Io, request: *serving.Request, response: *serving.Response) anye
 }
 
 test "an https HTTP/2 proxy carries a body past the flow-control windows, both ways" {
-    const gpa = testing.allocator;
-    const io = test_io.io();
-    const pki = try openssl.Pki.make(gpa, io);
-    defer pki.destroy();
-    const cert = try pki.read(io, "server-ec.pem");
-    defer gpa.free(cert);
-    const key_pem = try pki.read(io, "server-ec.key");
-    defer gpa.free(key_pem);
-    const key = try cloak.PrivateKey.parse(gpa, key_pem, .{});
-    defer key.deinit();
-    var identity = try cloak.Identity.initPem(gpa, cert, key, .{});
-    defer identity.deinit();
-    var builder: cloak.Trust = .init(gpa);
-    defer builder.deinit();
-    try builder.addPem(cert, .{});
-    var trust = try builder.freeze();
-    defer trust.deinit();
-    const credentials = [_]cloak.tls.Credential{.{ .identity = identity }};
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const io = test_io.io();
+            const pki = try openssl.Pki.make(gpa, std.testing.io);
+            defer pki.destroy();
+            const cert = try pki.read(std.testing.io, "server-ec.pem");
+            defer gpa.free(cert);
+            const key_pem = try pki.read(std.testing.io, "server-ec.key");
+            defer gpa.free(key_pem);
+            const key = try cloak.PrivateKey.parse(gpa, key_pem, .{});
+            defer key.deinit();
+            var identity = try cloak.Identity.initPem(gpa, cert, key, .{});
+            defer identity.deinit();
+            var builder: cloak.Trust = .init(gpa);
+            defer builder.deinit();
+            try builder.addPem(cert, .{});
+            var trust = try builder.freeze();
+            defer trust.deinit();
+            const credentials = [_]cloak.tls.Credential{.{ .identity = identity }};
 
-    var target: H2Proxy.Running = undefined;
-    try target.startOn(gpa, io, .{ .tls = .{ .credentials = &credentials } }, serving.Server.Handler.of(echoBody));
-    defer target.stop(io);
-    var h2_proxy: H2Proxy = .{};
-    var proxying: H2Proxy.Running = undefined;
-    try proxying.startOn(gpa, io, .{ .tls = .{ .credentials = &credentials } }, &h2_proxy.handler);
-    defer proxying.stop(io);
+            var target: H2Proxy.Running = undefined;
+            try target.startOn(gpa, io, .{ .tls = .{ .credentials = &credentials } }, serving.Server.Handler.of(echoBody));
+            defer target.stop(io);
+            var h2_proxy: H2Proxy = .{};
+            var proxying: H2Proxy.Running = undefined;
+            try proxying.startOn(gpa, io, .{ .tls = .{ .credentials = &credentials } }, &h2_proxy.handler);
+            defer proxying.stop(io);
 
-    var arena_state: std.heap.ArenaAllocator = .init(gpa);
-    defer arena_state.deinit();
-    var proxy_url_buf: [64]u8 = undefined;
-    var proxy = try Proxy.parse(arena_state.allocator(), try std.mem.print(&proxy_url_buf, "https://127.0.0.1:{d}", .{proxying.port}), .lowercase);
-    proxy.http2 = true;
-    var client: Client = .init(gpa, .{ .tls = .{ .trust = trust }, .proxy = .{ .fixed = proxy } });
-    defer client.deinit(io);
+            var arena_state: std.heap.ArenaAllocator = .init(gpa);
+            defer arena_state.deinit();
+            var proxy_url_buf: [64]u8 = undefined;
+            var proxy = try Proxy.parse(arena_state.allocator(), try std.mem.print(&proxy_url_buf, "https://127.0.0.1:{d}", .{proxying.port}), .lowercase);
+            proxy.http2 = true;
+            var client: Client = .init(gpa, .{ .tls = .{ .trust = trust }, .proxy = .{ .fixed = proxy } });
+            defer client.deinit(io);
 
-    const sent = try gpa.alloc(u8, 1 << 20);
-    defer gpa.free(sent);
-    for (sent, 0..) |*b, i| b.* = @truncate(i *% 31);
-    var url_buf: [64]u8 = undefined;
-    const url = try std.mem.print(&url_buf, "https://127.0.0.1:{d}/", .{target.port});
-    // A second round reuses the tunnel the first left in the pool.
-    for (0..2) |_| {
-        var response = try client.send(io, .{ .url = url, .method = .POST, .body = .{ .bytes = sent } });
-        defer response.deinit(io);
-        const back = try response.collect(gpa, io, .limited(2 << 20));
-        defer gpa.free(back);
-        try testing.expectEqualSlices(u8, sent, back);
-    }
-    try testing.expectEqual(@as(u32, 1), h2_proxy.connects.load(.monotonic));
+            const sent = try gpa.alloc(u8, 1 << 20);
+            defer gpa.free(sent);
+            for (sent, 0..) |*b, i| b.* = @truncate(i *% 31);
+            var url_buf: [64]u8 = undefined;
+            const url = try std.mem.print(&url_buf, "https://127.0.0.1:{d}/", .{target.port});
+            // A second round reuses the tunnel the first left in the pool.
+            for (0..2) |_| {
+                var response = try client.send(io, .{ .url = url, .method = .POST, .body = .{ .bytes = sent } });
+                defer response.deinit(io);
+                const back = try response.collect(gpa, io, .limited(2 << 20));
+                defer gpa.free(back);
+                try testing.expectEqualSlices(u8, sent, back);
+            }
+            try testing.expectEqual(@as(u32, 1), h2_proxy.connects.load(.monotonic));
+        }
+    }.inSim, .{});
 }
 
 test "an https proxy named http2 that does not agree h2 by ALPN is refused by name" {
+    // Interop with openssl's s_server, a process on the system's sockets: in the conformance suite.
     const gpa = testing.allocator;
     const io = test_io.io();
     const pki = try openssl.Pki.make(gpa, io);
@@ -534,20 +551,25 @@ test "an https proxy named http2 that does not agree h2 by ALPN is refused by na
 }
 
 test "a handshake that does not come is given up on at the handshake timeout" {
-    const gpa = testing.allocator;
-    const io = test_io.io();
-    const server = try Server.start(gpa, io, Server.fixedAnswer(.{ .silent = true }));
-    defer server.stop();
-    var client: Client = .init(gpa, .{ .tls = .{ .verify = .none }, .timeouts = .{ .handshake = .literal("100ms") } });
-    defer client.deinit(io);
-    var diagnostics: Diagnostics = .{};
-    try testing.expectError(error.TimedOut, fetch(gpa, io, &client, server.port, &diagnostics));
-    try testing.expectEqual(Diagnostics.Timeout.handshake, diagnostics.timeout.?);
-    try testing.expectEqual(Diagnostics.Stage.tls, diagnostics.stage);
-    try testing.expectEqual(@as(u32, 0), client.stats().idle);
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const io = test_io.io();
+            const server = try Server.start(gpa, io, Server.fixedAnswer(.{ .silent = true }));
+            defer server.stop();
+            var client: Client = .init(gpa, .{ .tls = .{ .verify = .none }, .timeouts = .{ .handshake = .literal("100ms") } });
+            defer client.deinit(io);
+            var diagnostics: Diagnostics = .{};
+            try testing.expectError(error.TimedOut, fetch(gpa, io, &client, server.port, &diagnostics));
+            try testing.expectEqual(Diagnostics.Timeout.handshake, diagnostics.timeout.?);
+            try testing.expectEqual(Diagnostics.Stage.tls, diagnostics.stage);
+            try testing.expectEqual(@as(u32, 0), client.stats().idle);
+        }
+    }.inSim, .{});
 }
 
 test "a session's secrets go to the key log the client was given, and nowhere else" {
+    // Interop with openssl's s_server, a process on the system's sockets: in the conformance suite.
     const gpa = testing.allocator;
     const io = test_io.io();
     const pki = try openssl.Pki.make(gpa, io);
@@ -596,50 +618,54 @@ const OneAnswer = struct {
 };
 
 test "a body to the connection's end over TLS is whole only when close_notify ends it" {
-    const gpa = testing.allocator;
-    const io = test_io.io();
-    const pki = try openssl.Pki.make(gpa, io);
-    defer pki.destroy();
-    const cert = try pki.read(io, "server-ec.pem");
-    defer gpa.free(cert);
-    const key_pem = try pki.read(io, "server-ec.key");
-    defer gpa.free(key_pem);
-    const key = try cloak.PrivateKey.parse(gpa, key_pem, .{});
-    defer key.deinit();
-    var identity = try cloak.Identity.initPem(gpa, cert, key, .{});
-    defer identity.deinit();
-    var builder: cloak.Trust = .init(gpa);
-    defer builder.deinit();
-    try builder.addPem(cert, .{});
-    var trust = try builder.freeze();
-    defer trust.deinit();
-    const credentials = [_]cloak.tls.Credential{.{ .identity = identity }};
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const io = test_io.io();
+            const pki = try openssl.Pki.make(gpa, std.testing.io);
+            defer pki.destroy();
+            const cert = try pki.read(std.testing.io, "server-ec.pem");
+            defer gpa.free(cert);
+            const key_pem = try pki.read(std.testing.io, "server-ec.key");
+            defer gpa.free(key_pem);
+            const key = try cloak.PrivateKey.parse(gpa, key_pem, .{});
+            defer key.deinit();
+            var identity = try cloak.Identity.initPem(gpa, cert, key, .{});
+            defer identity.deinit();
+            var builder: cloak.Trust = .init(gpa);
+            defer builder.deinit();
+            try builder.addPem(cert, .{});
+            var trust = try builder.freeze();
+            defer trust.deinit();
+            const credentials = [_]cloak.tls.Credential{.{ .identity = identity }};
 
-    for ([_]bool{ true, false }) |close_notify| {
-        var server: OneAnswer = .{
-            .listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true }),
-            .credentials = &credentials,
-            .answer = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nall of it",
-            .close_notify = close_notify,
-        };
-        defer server.listener.deinit(io);
-        var task = io.concurrent(OneAnswer.serve, .{ &server, io }) catch return error.SkipZigTest;
-        defer task.cancel(io);
-        var client: Client = .init(gpa, .{ .tls = .{ .trust = trust } });
-        defer client.deinit(io);
-        var url_buf: [64]u8 = undefined;
-        const url = try std.mem.print(&url_buf, "https://127.0.0.1:{d}/", .{server.listener.socket.address.getPort()});
-        var response = try client.send(io, .{ .url = url });
-        defer response.deinit(io);
-        if (close_notify) {
-            const body = try response.collect(gpa, io, .limited(1 << 10));
-            defer gpa.free(body);
-            try testing.expectEqualStrings("all of it", body);
-        } else {
-            // A bare close may be anyone's: the body may have been cut.
-            try testing.expectError(error.BodyIncomplete, response.collect(gpa, io, .limited(1 << 10)));
+            for ([_]bool{ true, false }) |close_notify| {
+                var server: OneAnswer = .{
+                    .listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true }),
+                    .credentials = &credentials,
+                    .answer = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nall of it",
+                    .close_notify = close_notify,
+                };
+                defer server.listener.deinit(io);
+                var task = io.concurrent(OneAnswer.serve, .{ &server, io }) catch return error.SkipZigTest;
+                defer task.cancel(io);
+                var client: Client = .init(gpa, .{ .tls = .{ .trust = trust } });
+                defer client.deinit(io);
+                var url_buf: [64]u8 = undefined;
+                const url = try std.mem.print(&url_buf, "https://127.0.0.1:{d}/", .{server.listener.socket.address.getPort()});
+                var response = try client.send(io, .{ .url = url });
+                defer response.deinit(io);
+                if (close_notify) {
+                    const body = try response.collect(gpa, io, .limited(1 << 10));
+                    defer gpa.free(body);
+                    try testing.expectEqualStrings("all of it", body);
+                } else {
+                    // A bare close may be anyone's: the body may have been cut.
+                    try testing.expectError(error.BodyIncomplete, response.collect(gpa, io, .limited(1 << 10)));
+                }
+            }
         }
-    }
+    }.inSim, .{});
 }
 
 /// A key log whose write waits for `release` (a cancellation point), and says when it is entered.
@@ -670,42 +696,46 @@ fn sendOnce(client: *Client, io: Io, url: []const u8) !void {
 }
 
 test "a cancel that lands while the key log writes is the handshake's cancel, not the key log's" {
-    const gpa = testing.allocator;
-    const io = test_io.io();
-    const pki = try openssl.Pki.make(gpa, io);
-    defer pki.destroy();
-    const cert = try pki.read(io, "server-ec.pem");
-    defer gpa.free(cert);
-    const key_pem = try pki.read(io, "server-ec.key");
-    defer gpa.free(key_pem);
-    const key = try cloak.PrivateKey.parse(gpa, key_pem, .{});
-    defer key.deinit();
-    var identity = try cloak.Identity.initPem(gpa, cert, key, .{});
-    defer identity.deinit();
-    var builder: cloak.Trust = .init(gpa);
-    defer builder.deinit();
-    try builder.addPem(cert, .{});
-    var trust = try builder.freeze();
-    defer trust.deinit();
-    const credentials = [_]cloak.tls.Credential{.{ .identity = identity }};
-    var server: OneAnswer = .{
-        .listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true }),
-        .credentials = &credentials,
-        .answer = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
-        .close_notify = true,
-    };
-    defer server.listener.deinit(io);
-    var task = io.concurrent(OneAnswer.serve, .{ &server, io }) catch return error.SkipZigTest;
-    defer task.cancel(io);
-    var log: WaitingLog = .{ .io = io };
-    var client: Client = .init(gpa, .{ .tls = .{ .trust = trust, .key_log = &log.writer } });
-    defer client.deinit(io);
-    var url_buf: [64]u8 = undefined;
-    const url = try std.mem.print(&url_buf, "https://127.0.0.1:{d}/", .{server.listener.socket.address.getPort()});
-    var sending = io.concurrent(sendOnce, .{ &client, io, url }) catch return error.SkipZigTest;
-    // The first key-log line is being written; the task is canceled there.
-    log.entered.waitUncancelable(io);
-    var releaser = io.concurrent(WaitingLog.releaseLater, .{ &log, io }) catch return error.SkipZigTest;
-    defer releaser.await(io);
-    try testing.expectError(error.Canceled, sending.cancel(io));
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const io = test_io.io();
+            const pki = try openssl.Pki.make(gpa, std.testing.io);
+            defer pki.destroy();
+            const cert = try pki.read(std.testing.io, "server-ec.pem");
+            defer gpa.free(cert);
+            const key_pem = try pki.read(std.testing.io, "server-ec.key");
+            defer gpa.free(key_pem);
+            const key = try cloak.PrivateKey.parse(gpa, key_pem, .{});
+            defer key.deinit();
+            var identity = try cloak.Identity.initPem(gpa, cert, key, .{});
+            defer identity.deinit();
+            var builder: cloak.Trust = .init(gpa);
+            defer builder.deinit();
+            try builder.addPem(cert, .{});
+            var trust = try builder.freeze();
+            defer trust.deinit();
+            const credentials = [_]cloak.tls.Credential{.{ .identity = identity }};
+            var server: OneAnswer = .{
+                .listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true }),
+                .credentials = &credentials,
+                .answer = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+                .close_notify = true,
+            };
+            defer server.listener.deinit(io);
+            var task = io.concurrent(OneAnswer.serve, .{ &server, io }) catch return error.SkipZigTest;
+            defer task.cancel(io);
+            var log: WaitingLog = .{ .io = io };
+            var client: Client = .init(gpa, .{ .tls = .{ .trust = trust, .key_log = &log.writer } });
+            defer client.deinit(io);
+            var url_buf: [64]u8 = undefined;
+            const url = try std.mem.print(&url_buf, "https://127.0.0.1:{d}/", .{server.listener.socket.address.getPort()});
+            var sending = io.concurrent(sendOnce, .{ &client, io, url }) catch return error.SkipZigTest;
+            // The first key-log line is being written; the task is canceled there.
+            log.entered.waitUncancelable(io);
+            var releaser = io.concurrent(WaitingLog.releaseLater, .{ &log, io }) catch return error.SkipZigTest;
+            defer releaser.await(io);
+            try testing.expectError(error.Canceled, sending.cancel(io));
+        }
+    }.inSim, .{});
 }
