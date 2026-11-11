@@ -710,9 +710,14 @@ const ClientSweep = struct {
 /// The server's node faulted, the client well behaved. The property: the
 /// faulted connection ends, nothing leaks (the testing allocator and the
 /// simulation's double-close report agree), and the next connection is served.
+/// Over TLS the client draws its random from one seed each run, on a
+/// `FaultIo` that faults nothing, so every run's handshake sends the same
+/// records.
 const ServerSweep = struct {
     client_node: *Sim.Node,
     address: Io.net.IpAddress,
+    pki: ?*const Pki = null,
+    seeded: ?*shakedown.FaultIo = null,
     fio: *shakedown.FaultIo = undefined,
     steady: reactor_testing.Seam = undefined,
     seam: reactor_testing.Seam = undefined,
@@ -735,14 +740,23 @@ const ServerSweep = struct {
         s.client_seam.init(s.client_node.io());
     }
 
+    /// The client's `Io` for this run: seeded afresh over TLS.
+    fn clientIo(s: *ServerSweep) !void {
+        if (s.pki == null) return;
+        s.seeded = try shakedown.FaultIo.init(testing.allocator, s.client_node.io(), .{ .random_seed = 2 });
+        s.client_seam.init(s.seeded.?.io());
+    }
+
     /// One request from a client of its own, its connection closed, then
     /// whether the server's end of it closed too, within a virtual minute.
     fn once(s: *ServerSweep, server: *Server, ended: *bool) anyerror!void {
         const io = s.client_seam.io();
         const result = result: {
-            var client: Client = .init(testing.allocator, .{ .timeouts = .{ .connect = .literal("5s"), .activity = .literal("5s") } });
+            var options: Client.Options = .{ .timeouts = .{ .connect = .literal("5s"), .activity = .literal("5s") } };
+            if (s.pki) |p| options.tls = .{ .trust = p.trust };
+            var client: Client = .init(testing.allocator, options);
             defer client.deinit(io);
-            break :result askWhole(&client, io, null);
+            break :result askWhole(&client, io, s.pki);
         };
         var waited: u32 = 0;
         while (server.stats(s.steady.io()).open != 0 and waited < 600) : (waited += 1) try io.sleep(.fromMilliseconds(100), .awake);
@@ -752,10 +766,17 @@ const ServerSweep = struct {
 
     pub fn run(s: *ServerSweep, _: Io) anyerror!void {
         const io = s.seam.io();
+        try s.clientIo();
+        defer if (s.seeded) |f| {
+            f.deinit();
+            s.seeded = null;
+        };
         // The listener is opened unfaulted; its accepts are the server's, faulted.
         var listener = try s.address.listen(s.steady.io(), .{});
         defer listener.deinit(s.steady.io());
-        var server: Server = .init(try s.fio.allocator(testing.allocator), .{}, .of(hello));
+        var options: Server.Options = .{};
+        if (s.pki) |p| options.tls = .{ .credentials = &p.credentials };
+        var server: Server = .init(try s.fio.allocator(testing.allocator), options, .of(hello));
         defer server.deinit(io);
         s.served = {};
         var serving = try io.concurrent(serve, .{ &server, io, &listener, &s.served });
@@ -794,6 +815,14 @@ const ServerSweep = struct {
         s.steady.init(node.io());
         const swept = try sweepWith(node.io(), &s, options);
         try testing.expect(swept.runs > 5);
+    }
+
+    fn sweepTls(node: *Sim.Node, client_node: *Sim.Node, address: Io.net.IpAddress, pki: *const Pki, options: shakedown.EveryFaultOptions) !void {
+        var s: ServerSweep = .{ .client_node = client_node, .address = address, .pki = pki };
+        s.steady.init(node.io());
+        const swept = try sweepWith(node.io(), &s, options);
+        // The handshake's calls beside the two connections': some hundred and fifty.
+        try testing.expect(swept.steps >= 100 and swept.runs > 5);
     }
 };
 
@@ -925,4 +954,71 @@ test "a partition between the client and its proxy, healed by settle, lets the t
     try pki.init();
     defer pki.deinit();
     try shakedown.check(testing.allocator, Setup{ .pki = &pki, .tunnel = .http }, partitioned, .{ .cases = 32, .reach = &.{"the exchange waited out a partition"} });
+}
+
+test "every single fault on the server's side of one request over TLS, the handshake's calls too: the connection ends, nothing leaks, the next is served" {
+    if (test_io.evented) return error.SkipZigTest;
+    var pki: Pki = undefined;
+    try pki.init();
+    defer pki.deinit();
+    const sim = try sweepSimOver(&pki);
+    defer sim.deinit();
+    const nodes = try twoNodes(sim, .{});
+    try finished(sim.run(ServerSweep.sweepTls, .{ nodes.server, nodes.client, nodes.address, &pki, full_sweep }));
+}
+
+test "every cancel on the server's side of one request over TLS, the handshake's calls too: the connection ends, nothing leaks, the next is served" {
+    if (test_io.evented) return error.SkipZigTest;
+    var pki: Pki = undefined;
+    try pki.init();
+    defer pki.deinit();
+    const sim = try sweepSimOver(&pki);
+    defer sim.deinit();
+    const nodes = try twoNodes(sim, .{});
+    try finished(sim.run(ServerSweep.sweepTls, .{ nodes.server, nodes.client, nodes.address, &pki, cancel_sweep }));
+}
+
+/// A server whose first entropy draw, its handshake's (no session tickets,
+/// whose keys would draw first), is canceled; a client asks once.
+const CanceledHandshake = struct {
+    fn run(nodes: Nodes, pki: *const Pki) !void {
+        const fio = try shakedown.FaultIo.init(testing.allocator, nodes.server.io(), .{ .plan = &.{.{ .at = .{ .nth = .{ .call = .randomSecure, .n = 1 } }, .fault = .cancel }} });
+        defer fio.deinit();
+        var server_seam: reactor_testing.Seam = undefined;
+        server_seam.init(fio.io());
+        var client_seam: reactor_testing.Seam = undefined;
+        client_seam.init(nodes.client.io());
+        const io = server_seam.io();
+        var listener = try nodes.address.listen(io, .{});
+        defer listener.deinit(io);
+        var server: Server = .init(testing.allocator, .{ .tls = .{ .credentials = &pki.credentials, .tickets = .none } }, .of(hello));
+        defer server.deinit(io);
+        var serving = try io.concurrent(Exchange.serve, .{ &server, io, &listener });
+        {
+            const client_io = client_seam.io();
+            // One connection: a retry's would linger, as a served one does.
+            var client: Client = .init(testing.allocator, .{ .tls = .{ .trust = pki.trust }, .retries = .none });
+            defer client.deinit(client_io);
+            if (askWhole(&client, client_io, pki)) |_| return error.TestUnexpectedResult else |_| {}
+        }
+        while (server.stats(io).open != 0) try client_seam.io().sleep(.fromMilliseconds(10), .awake);
+        server.shutdown(io);
+        serving.await(io);
+        // The cancel landed in the handshake, and the canceled connection
+        // made no call after it but its close: no linger's half close, no
+        // read waiting on the client.
+        try testing.expectEqual(@as(usize, 1), fio.fired().len);
+        try testing.expectEqual(@as(u64, 0), fio.count(.netShutdown));
+    }
+};
+
+test "a cancel at the server's handshake entropy draw ends the connection there, with no linger after it" {
+    if (test_io.evented) return error.SkipZigTest;
+    var pki: Pki = undefined;
+    try pki.init();
+    defer pki.deinit();
+    const sim = try Sim.init(testing.allocator, Pki.simOptions(&pki, .{ .watchdog = null, .seed = 1 }));
+    defer sim.deinit();
+    const nodes = try twoNodes(sim, .{});
+    try finished(sim.run(CanceledHandshake.run, .{ nodes, &pki }));
 }

@@ -379,6 +379,10 @@ pub fn handshake(c: *Socket, options: tls.ServerOptions) error{Failed}!void {
         .eof = .allow,
         .diagnostics = &report,
     }) catch |err| {
+        // A cancel the session met on a call of its own (an entropy draw, a
+        // signature, a key-log line), as one on a socket operation: the
+        // close that follows lingers on nothing.
+        if (err == error.Canceled) c.note(.canceled);
         pool.release(io, read_buffer);
         pool.release(io, write_buffer);
         if (s.options.observer) |o| o.emit(.{ .handshake_failed = .{ .error_name = @errorName(err) } });
