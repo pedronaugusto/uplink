@@ -111,46 +111,50 @@ fn sent(gpa: std.mem.Allocator, client: *Client, io: Io, request: @import("clien
 }
 
 test "a request goes upstream under the upstream's path, its connection's fields left behind and Forwarded added" {
-    const gpa = testing.allocator;
-    const io = test_io.io();
-    var f: Fixture = undefined;
-    try f.start(.of(describe), "/base/?key=1", .{ .upstream = undefined });
-    defer f.stop();
-    var client: Client = .init(gpa, .{ .decompress = false });
-    defer client.deinit(io);
-    var buf: [96]u8 = undefined;
-    const seen = try sent(gpa, &client, io, .{
-        .method = .POST,
-        .url = f.front.url(&buf, "/items/7?page=2"),
-        .headers = &.{
-            .{ .name = "Connection", .value = "X-Hop" },
-            .{ .name = "X-Hop", .value = "dropped" },
-            .{ .name = "Keep-Alive", .value = "timeout=5" },
-            .{ .name = "TE", .value = "trailers, deflate" },
-            .{ .name = "Proxy-Authorization", .value = "Basic Zm9vOmJhcg==" },
-            .{ .name = "Forwarded", .value = "for=192.0.2.60;proto=https" },
-            .{ .name = "X-Kept", .value = "kept" },
-        },
-        .body = .{ .bytes = "the body" },
-    });
-    defer gpa.free(seen);
-    try testing.expect(std.mem.startsWith(u8, seen, "POST /base/items/7?key=1&page=2\n"));
-    var host_buf: [32]u8 = undefined;
-    const host = try std.mem.print(&host_buf, "Host: 127.0.0.1:{d}\n", .{f.upstream.port});
-    try testing.expect(std.mem.find(u8, seen, host) != null);
-    for ([_][]const u8{ "X-Hop", "Keep-Alive", "Proxy-Authorization", "deflate" }) |gone| {
-        try testing.expect(std.mem.find(u8, seen, gone) == null);
-    }
-    try testing.expect(std.mem.find(u8, seen, "TE: trailers\n") != null);
-    try testing.expect(std.mem.find(u8, seen, "X-Kept: kept\n") != null);
-    try testing.expect(std.mem.find(u8, seen, "Accept-Encoding: identity\n") != null);
-    try testing.expect(std.mem.find(u8, seen, "Content-Length: 8\n") != null);
-    try testing.expect(std.mem.find(u8, seen, "Forwarded: for=192.0.2.60;proto=https\n") != null);
-    var forwarded_buf: [96]u8 = undefined;
-    const forwarded = try std.mem.print(&forwarded_buf, ";host=\"127.0.0.1:{d}\";proto=http\n", .{f.front.port});
-    try testing.expect(std.mem.find(u8, seen, "Forwarded: for=\"127.0.0.1:") != null);
-    try testing.expect(std.mem.find(u8, seen, forwarded) != null);
-    try testing.expect(std.mem.endsWith(u8, seen, "\n\nthe body"));
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const io = test_io.io();
+            var f: Fixture = undefined;
+            try f.start(.of(describe), "/base/?key=1", .{ .upstream = undefined });
+            defer f.stop();
+            var client: Client = .init(gpa, .{ .decompress = false });
+            defer client.deinit(io);
+            var buf: [96]u8 = undefined;
+            const seen = try sent(gpa, &client, io, .{
+                .method = .POST,
+                .url = f.front.url(&buf, "/items/7?page=2"),
+                .headers = &.{
+                    .{ .name = "Connection", .value = "X-Hop" },
+                    .{ .name = "X-Hop", .value = "dropped" },
+                    .{ .name = "Keep-Alive", .value = "timeout=5" },
+                    .{ .name = "TE", .value = "trailers, deflate" },
+                    .{ .name = "Proxy-Authorization", .value = "Basic Zm9vOmJhcg==" },
+                    .{ .name = "Forwarded", .value = "for=192.0.2.60;proto=https" },
+                    .{ .name = "X-Kept", .value = "kept" },
+                },
+                .body = .{ .bytes = "the body" },
+            });
+            defer gpa.free(seen);
+            try testing.expect(std.mem.startsWith(u8, seen, "POST /base/items/7?key=1&page=2\n"));
+            var host_buf: [32]u8 = undefined;
+            const host = try std.mem.print(&host_buf, "Host: 127.0.0.1:{d}\n", .{f.upstream.port});
+            try testing.expect(std.mem.find(u8, seen, host) != null);
+            for ([_][]const u8{ "X-Hop", "Keep-Alive", "Proxy-Authorization", "deflate" }) |gone| {
+                try testing.expect(std.mem.find(u8, seen, gone) == null);
+            }
+            try testing.expect(std.mem.find(u8, seen, "TE: trailers\n") != null);
+            try testing.expect(std.mem.find(u8, seen, "X-Kept: kept\n") != null);
+            try testing.expect(std.mem.find(u8, seen, "Accept-Encoding: identity\n") != null);
+            try testing.expect(std.mem.find(u8, seen, "Content-Length: 8\n") != null);
+            try testing.expect(std.mem.find(u8, seen, "Forwarded: for=192.0.2.60;proto=https\n") != null);
+            var forwarded_buf: [96]u8 = undefined;
+            const forwarded = try std.mem.print(&forwarded_buf, ";host=\"127.0.0.1:{d}\";proto=http\n", .{f.front.port});
+            try testing.expect(std.mem.find(u8, seen, "Forwarded: for=\"127.0.0.1:") != null);
+            try testing.expect(std.mem.find(u8, seen, forwarded) != null);
+            try testing.expect(std.mem.endsWith(u8, seen, "\n\nthe body"));
+        }
+    }.inSim, .{});
 }
 
 /// A chunked body in two flushed pieces, with a trailer.
@@ -167,18 +171,22 @@ fn chunked(io: Io, _: *Request, response: *Response) anyerror!void {
 }
 
 test "a streamed answer comes back streamed, with its trailer and without its connection's fields" {
-    const gpa = testing.allocator;
-    var f: Fixture = undefined;
-    try f.start(.of(chunked), "", .{ .upstream = undefined });
-    defer f.stop();
-    const got = try f.front.raw(gpa, "GET / HTTP/1.1\r\nHost: x\r\nTE: trailers\r\nConnection: close\r\n\r\n");
-    defer gpa.free(got);
-    try testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 200 OK\r\n"));
-    try testing.expect(std.mem.find(u8, got, "Transfer-Encoding: chunked\r\n") != null);
-    try testing.expect(std.mem.find(u8, got, "X-Upstream-Hop") == null);
-    try testing.expect(std.mem.endsWith(u8, got, "\r\n0\r\nX-Sum: 11\r\n\r\n"));
-    try testing.expect(std.mem.find(u8, got, "first,") != null);
-    try testing.expect(std.mem.find(u8, got, "second") != null);
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            var f: Fixture = undefined;
+            try f.start(.of(chunked), "", .{ .upstream = undefined });
+            defer f.stop();
+            const got = try f.front.raw(gpa, "GET / HTTP/1.1\r\nHost: x\r\nTE: trailers\r\nConnection: close\r\n\r\n");
+            defer gpa.free(got);
+            try testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 200 OK\r\n"));
+            try testing.expect(std.mem.find(u8, got, "Transfer-Encoding: chunked\r\n") != null);
+            try testing.expect(std.mem.find(u8, got, "X-Upstream-Hop") == null);
+            try testing.expect(std.mem.endsWith(u8, got, "\r\n0\r\nX-Sum: 11\r\n\r\n"));
+            try testing.expect(std.mem.find(u8, got, "first,") != null);
+            try testing.expect(std.mem.find(u8, got, "second") != null);
+        }
+    }.inSim, .{});
 }
 
 fn hello(io: Io, _: *Request, response: *Response) anyerror!void {
@@ -186,15 +194,19 @@ fn hello(io: Io, _: *Request, response: *Response) anyerror!void {
 }
 
 test "a HEAD comes back with the length a GET would have" {
-    const gpa = testing.allocator;
-    var f: Fixture = undefined;
-    try f.start(.of(hello), "", .{ .upstream = undefined });
-    defer f.stop();
-    const got = try f.front.raw(gpa, "HEAD / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
-    defer gpa.free(got);
-    try testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 200 OK\r\n"));
-    try testing.expect(std.mem.find(u8, got, "Content-Length: 5\r\n") != null);
-    try testing.expect(std.mem.endsWith(u8, got, "\r\n\r\n"));
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            var f: Fixture = undefined;
+            try f.start(.of(hello), "", .{ .upstream = undefined });
+            defer f.stop();
+            const got = try f.front.raw(gpa, "HEAD / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+            defer gpa.free(got);
+            try testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 200 OK\r\n"));
+            try testing.expect(std.mem.find(u8, got, "Content-Length: 5\r\n") != null);
+            try testing.expect(std.mem.endsWith(u8, got, "\r\n\r\n"));
+        }
+    }.inSim, .{});
 }
 
 /// Answer with the body's bytes as they came, under the coding they came
@@ -208,33 +220,37 @@ fn coded(io: Io, request: *Request, response: *Response) anyerror!void {
 }
 
 test "coded bodies pass as they came, both ways, whatever either end decodes" {
-    const gpa = testing.allocator;
-    const io = test_io.io();
-    // The upstream and the proxy's own server both decode request bodies
-    // by default; neither may touch these bytes.
-    const gzip = "\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\xcb\x48\xcd\xc9\xc9\x07\x00\x86\xa6\x10\x36\x05\x00\x00\x00";
-    var f: Fixture = undefined;
-    const upstream = try Running.start(gpa, .{ .decompress = false }, .of(coded));
-    f.upstream = upstream;
-    f.client = .init(gpa, .{});
-    f.proxy = try .init(gpa, &f.client, .{ .upstream = upstream.url(&f.upstream_url, "") });
-    f.front = try Running.start(gpa, .{}, &f.proxy.handler);
-    defer f.stop();
-    var client: Client = .init(gpa, .{});
-    defer client.deinit(io);
-    var url_buf: [64]u8 = undefined;
-    var response = try client.send(io, .{
-        .method = .PUT,
-        .url = f.front.url(&url_buf, "/"),
-        .headers = &.{ .{ .name = "Content-Encoding", .value = "gzip" }, .{ .name = "Accept-Encoding", .value = "gzip" } },
-        .body = .{ .bytes = gzip },
-    });
-    defer response.deinit(io);
-    try testing.expectEqualStrings("gzip", response.headers.get("x-asked").?);
-    try testing.expectEqualStrings("gzip", response.headers.get("content-encoding").?);
-    const back = try response.collect(gpa, io, .limited(1 << 10));
-    defer gpa.free(back);
-    try testing.expectEqualSlices(u8, gzip, back);
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const io = test_io.io();
+            // The upstream and the proxy's own server both decode request bodies
+            // by default; neither may touch these bytes.
+            const gzip = "\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\xcb\x48\xcd\xc9\xc9\x07\x00\x86\xa6\x10\x36\x05\x00\x00\x00";
+            var f: Fixture = undefined;
+            const upstream = try Running.start(gpa, .{ .decompress = false }, .of(coded));
+            f.upstream = upstream;
+            f.client = .init(gpa, .{});
+            f.proxy = try .init(gpa, &f.client, .{ .upstream = upstream.url(&f.upstream_url, "") });
+            f.front = try Running.start(gpa, .{}, &f.proxy.handler);
+            defer f.stop();
+            var client: Client = .init(gpa, .{});
+            defer client.deinit(io);
+            var url_buf: [64]u8 = undefined;
+            var response = try client.send(io, .{
+                .method = .PUT,
+                .url = f.front.url(&url_buf, "/"),
+                .headers = &.{ .{ .name = "Content-Encoding", .value = "gzip" }, .{ .name = "Accept-Encoding", .value = "gzip" } },
+                .body = .{ .bytes = gzip },
+            });
+            defer response.deinit(io);
+            try testing.expectEqualStrings("gzip", response.headers.get("x-asked").?);
+            try testing.expectEqualStrings("gzip", response.headers.get("content-encoding").?);
+            const back = try response.collect(gpa, io, .limited(1 << 10));
+            defer gpa.free(back);
+            try testing.expectEqualSlices(u8, gzip, back);
+        }
+    }.inSim, .{});
 }
 
 fn redirect(io: Io, _: *Request, response: *Response) anyerror!void {
@@ -244,18 +260,22 @@ fn redirect(io: Io, _: *Request, response: *Response) anyerror!void {
 }
 
 test "a redirect comes back to the client, not followed" {
-    const gpa = testing.allocator;
-    const io = test_io.io();
-    var f: Fixture = undefined;
-    try f.start(.of(redirect), "", .{ .upstream = undefined });
-    defer f.stop();
-    var client: Client = .init(gpa, .{ .redirects = .none });
-    defer client.deinit(io);
-    var buf: [64]u8 = undefined;
-    var response = try client.send(io, .{ .url = f.front.url(&buf, "/") });
-    defer response.deinit(io);
-    try testing.expectEqual(std.http.Status.found, response.status);
-    try testing.expectEqualStrings("/elsewhere", response.headers.get("location").?);
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const io = test_io.io();
+            var f: Fixture = undefined;
+            try f.start(.of(redirect), "", .{ .upstream = undefined });
+            defer f.stop();
+            var client: Client = .init(gpa, .{ .redirects = .none });
+            defer client.deinit(io);
+            var buf: [64]u8 = undefined;
+            var response = try client.send(io, .{ .url = f.front.url(&buf, "/") });
+            defer response.deinit(io);
+            try testing.expectEqual(std.http.Status.found, response.status);
+            try testing.expectEqualStrings("/elsewhere", response.headers.get("location").?);
+        }
+    }.inSim, .{});
 }
 
 fn slow(io: Io, _: *Request, response: *Response) anyerror!void {
@@ -264,45 +284,53 @@ fn slow(io: Io, _: *Request, response: *Response) anyerror!void {
 }
 
 test "an upstream that cannot be reached is a 502, and one out of time a 504" {
-    const gpa = testing.allocator;
-    const io = test_io.io();
-    var f: Fixture = undefined;
-    try f.start(.of(slow), "", .{ .upstream = undefined, .timeout = .{ .duration = .{ .raw = .fromMilliseconds(50), .clock = .awake } } });
-    defer f.stop();
-    var client: Client = .init(gpa, .{});
-    defer client.deinit(io);
-    var buf: [64]u8 = undefined;
-    var late = try client.send(io, .{ .url = f.front.url(&buf, "/") });
-    defer late.deinit(io);
-    try testing.expectEqual(std.http.Status.gateway_timeout, late.status);
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const io = test_io.io();
+            var f: Fixture = undefined;
+            try f.start(.of(slow), "", .{ .upstream = undefined, .timeout = .{ .duration = .{ .raw = .fromMilliseconds(50), .clock = .awake } } });
+            defer f.stop();
+            var client: Client = .init(gpa, .{});
+            defer client.deinit(io);
+            var buf: [64]u8 = undefined;
+            var late = try client.send(io, .{ .url = f.front.url(&buf, "/") });
+            defer late.deinit(io);
+            try testing.expectEqual(std.http.Status.gateway_timeout, late.status);
 
-    // A port nothing listens on: the one a closed listener had.
-    var closed = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
-    const port = closed.socket.address.getPort();
-    closed.deinit(io);
-    var upstream_buf: [64]u8 = undefined;
-    var refused: ReverseProxy = try .init(gpa, &f.client, .{ .upstream = try std.mem.print(&upstream_buf, "http://127.0.0.1:{d}", .{port}) });
-    const front = try Running.start(gpa, .{}, &refused.handler);
-    defer front.stop();
-    var gone = try client.send(io, .{ .url = front.url(&buf, "/") });
-    defer gone.deinit(io);
-    try testing.expectEqual(std.http.Status.bad_gateway, gone.status);
+            // A port nothing listens on: the one a closed listener had.
+            var closed = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
+            const port = closed.socket.address.getPort();
+            closed.deinit(io);
+            var upstream_buf: [64]u8 = undefined;
+            var refused: ReverseProxy = try .init(gpa, &f.client, .{ .upstream = try std.mem.print(&upstream_buf, "http://127.0.0.1:{d}", .{port}) });
+            const front = try Running.start(gpa, .{}, &refused.handler);
+            defer front.stop();
+            var gone = try client.send(io, .{ .url = front.url(&buf, "/") });
+            defer gone.deinit(io);
+            try testing.expectEqual(std.http.Status.bad_gateway, gone.status);
+        }
+    }.inSim, .{});
 }
 
 test "a proxy refuses a client that would add to what it forwards" {
-    const gpa = testing.allocator;
-    const io = test_io.io();
-    var jar: CookieJar = .init(gpa, .{});
-    defer jar.deinit(io);
-    var with_jar: Client = .init(gpa, .{ .cookies = &jar });
-    defer with_jar.deinit(io);
-    try testing.expectError(error.ClientKeepsCookies, ReverseProxy.init(gpa, &with_jar, .{ .upstream = "http://127.0.0.1/" }));
-    var named: Client = .init(gpa, .{ .user_agent = "me" });
-    defer named.deinit(io);
-    try testing.expectError(error.ClientNamesItself, ReverseProxy.init(gpa, &named, .{ .upstream = "http://127.0.0.1/" }));
-    var plain: Client = .init(gpa, .{});
-    defer plain.deinit(io);
-    try testing.expectError(error.InvalidUpstream, ReverseProxy.init(gpa, &plain, .{ .upstream = "ftp://127.0.0.1/" }));
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const io = test_io.io();
+            var jar: CookieJar = .init(gpa, .{});
+            defer jar.deinit(io);
+            var with_jar: Client = .init(gpa, .{ .cookies = &jar });
+            defer with_jar.deinit(io);
+            try testing.expectError(error.ClientKeepsCookies, ReverseProxy.init(gpa, &with_jar, .{ .upstream = "http://127.0.0.1/" }));
+            var named: Client = .init(gpa, .{ .user_agent = "me" });
+            defer named.deinit(io);
+            try testing.expectError(error.ClientNamesItself, ReverseProxy.init(gpa, &named, .{ .upstream = "http://127.0.0.1/" }));
+            var plain: Client = .init(gpa, .{});
+            defer plain.deinit(io);
+            try testing.expectError(error.InvalidUpstream, ReverseProxy.init(gpa, &plain, .{ .upstream = "ftp://127.0.0.1/" }));
+        }
+    }.inSim, .{});
 }
 
 /// Sends every request to `/v2` of the upstream, and names the proxy.
@@ -318,59 +346,68 @@ const Versioned = struct {
 };
 
 test "a rewrite decides where a request goes and what it carries" {
-    const gpa = testing.allocator;
-    const io = test_io.io();
-    const upstream = try Running.start(gpa, .{}, .of(describe));
-    defer upstream.stop();
-    var versioned: Versioned = .{ .upstream_port = upstream.port };
-    var through: Client = .init(gpa, .{});
-    defer through.deinit(io);
-    var proxy: ReverseProxy = try .init(gpa, &through, .{ .upstream = "http://unused.invalid/", .rewrite = &versioned.rewrite });
-    const front = try Running.start(gpa, .{}, &proxy.handler);
-    defer front.stop();
-    var client: Client = .init(gpa, .{});
-    defer client.deinit(io);
-    var buf: [64]u8 = undefined;
-    const seen = try sent(gpa, &client, io, .{ .url = front.url(&buf, "/thing") });
-    defer gpa.free(seen);
-    try testing.expect(std.mem.startsWith(u8, seen, "GET /v2/thing\n"));
-    try testing.expect(std.mem.find(u8, seen, "X-Via: versioned\n") != null);
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const io = test_io.io();
+            const upstream = try Running.start(gpa, .{}, .of(describe));
+            defer upstream.stop();
+            var versioned: Versioned = .{ .upstream_port = upstream.port };
+            var through: Client = .init(gpa, .{});
+            defer through.deinit(io);
+            var proxy: ReverseProxy = try .init(gpa, &through, .{ .upstream = "http://unused.invalid/", .rewrite = &versioned.rewrite });
+            const front = try Running.start(gpa, .{}, &proxy.handler);
+            defer front.stop();
+            var client: Client = .init(gpa, .{});
+            defer client.deinit(io);
+            var buf: [64]u8 = undefined;
+            const seen = try sent(gpa, &client, io, .{ .url = front.url(&buf, "/thing") });
+            defer gpa.free(seen);
+            try testing.expect(std.mem.startsWith(u8, seen, "GET /v2/thing\n"));
+            try testing.expect(std.mem.find(u8, seen, "X-Via: versioned\n") != null);
+        }
+    }.inSim, .{});
 }
 
 test "a proxy whose task is canceled while it reaches the upstream ends with no answer, not a 502" {
-    const gpa = testing.allocator;
-    const base = test_io.io();
-    const shakedown = @import("shakedown");
-    const upstream = try Running.start(gpa, .{}, .of(hello));
-    defer upstream.stop();
-    var through: Client = .init(gpa, .{});
-    defer through.deinit(base);
-    var upstream_url: [64]u8 = undefined;
-    var proxy: ReverseProxy = try .init(gpa, &through, .{ .upstream = upstream.url(&upstream_url, "") });
-    // The first connect the front's task makes is the proxy's, upstream.
-    const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .netConnectIp, .n = 1 } }, .fault = .cancel }};
-    const fio = try shakedown.FaultIo.init(gpa, base, .{ .plan = &plan });
-    defer fio.deinit();
-    const r = try gpa.create(Running);
-    defer gpa.destroy(r);
-    r.listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(base, .{ .reuse_address = true });
-    defer r.listener.deinit(base);
-    r.port = r.listener.socket.address.getPort();
-    r.server = .init(gpa, .{}, &proxy.handler);
-    defer r.server.deinit(base);
-    r.task = base.concurrent(Server.serve, .{ &r.server, fio.io(), &r.listener }) catch return error.SkipZigTest;
-    defer {
-        r.server.shutdown(base);
-        // glint-ignore: Z026 -- serve ends with the shutdown; its result is not what the test checks
-        r.task.await(base) catch {};
-    }
-    const canceled = try r.raw(gpa, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
-    defer gpa.free(canceled);
-    try testing.expectEqualStrings("", canceled);
-    // The next request goes through.
-    const again = try r.raw(gpa, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
-    defer gpa.free(again);
-    try testing.expect(std.mem.endsWith(u8, again, "\r\n\r\nhello"));
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const base = test_io.io();
+            const shakedown = @import("shakedown");
+            const upstream = try Running.start(gpa, .{}, .of(hello));
+            defer upstream.stop();
+            var through: Client = .init(gpa, .{});
+            defer through.deinit(base);
+            var upstream_url: [64]u8 = undefined;
+            var proxy: ReverseProxy = try .init(gpa, &through, .{ .upstream = upstream.url(&upstream_url, "") });
+            // The first connect the front's task makes is the proxy's, upstream.
+            const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .netConnectIp, .n = 1 } }, .fault = .cancel }};
+            const fio = try shakedown.FaultIo.init(gpa, base, .{ .plan = &plan });
+            defer fio.deinit();
+            const r = try gpa.create(Running);
+            defer gpa.destroy(r);
+            r.listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(base, .{ .reuse_address = true });
+            defer r.listener.deinit(base);
+            r.port = r.listener.socket.address.getPort();
+            r.server = .init(gpa, .{}, &proxy.handler);
+            defer r.server.deinit(base);
+            var seamed: test_io.Seamed = .{};
+            r.task = base.concurrent(Server.serve, .{ &r.server, seamed.over(fio.io()), &r.listener }) catch return error.SkipZigTest;
+            defer {
+                r.server.shutdown(base);
+                // glint-ignore: Z026 -- serve ends with the shutdown; its result is not what the test checks
+                r.task.await(base) catch {};
+            }
+            const canceled = try r.raw(gpa, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+            defer gpa.free(canceled);
+            try testing.expectEqualStrings("", canceled);
+            // The next request goes through.
+            const again = try r.raw(gpa, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+            defer gpa.free(again);
+            try testing.expect(std.mem.endsWith(u8, again, "\r\n\r\nhello"));
+        }
+    }.inSim, .{});
 }
 
 /// Switch to `echo` when asked, and echo lines until the client leaves;
@@ -389,31 +426,35 @@ fn upgrading(io: Io, request: *Request, response: *Response) anyerror!void {
 }
 
 test "an upgrade passes through: the upstream's 101, then each side's bytes to the other" {
-    const gpa = testing.allocator;
-    const io = test_io.io();
-    var f: Fixture = undefined;
-    try f.start(.of(upgrading), "", .{ .upstream = undefined });
-    defer f.stop();
-    var client: Client = .init(gpa, .{});
-    defer client.deinit(io);
-    var buf: [64]u8 = undefined;
-    var response = try client.send(io, .{ .url = f.front.url(&buf, "/"), .headers = &.{ .{ .name = "Connection", .value = "Upgrade" }, .{ .name = "Upgrade", .value = "echo" } } });
-    defer response.deinit(io);
-    try testing.expectEqual(std.http.Status.switching_protocols, response.status);
-    try testing.expectEqualStrings("echo", response.headers.get("upgrade").?);
-    var upgraded = try response.upgrade(io);
-    defer upgraded.close(io);
-    for ([_][]const u8{ "ping\n", "and again\n" }) |line| {
-        try upgraded.writer(io).writeAll(line);
-        try upgraded.flush(io);
-        const echoed = try upgraded.reader(io).takeDelimiterInclusive('\n');
-        try testing.expectEqualStrings(line, echoed);
-    }
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const io = test_io.io();
+            var f: Fixture = undefined;
+            try f.start(.of(upgrading), "", .{ .upstream = undefined });
+            defer f.stop();
+            var client: Client = .init(gpa, .{});
+            defer client.deinit(io);
+            var buf: [64]u8 = undefined;
+            var response = try client.send(io, .{ .url = f.front.url(&buf, "/"), .headers = &.{ .{ .name = "Connection", .value = "Upgrade" }, .{ .name = "Upgrade", .value = "echo" } } });
+            defer response.deinit(io);
+            try testing.expectEqual(std.http.Status.switching_protocols, response.status);
+            try testing.expectEqualStrings("echo", response.headers.get("upgrade").?);
+            var upgraded = try response.upgrade(io);
+            defer upgraded.close(io);
+            for ([_][]const u8{ "ping\n", "and again\n" }) |line| {
+                try upgraded.writer(io).writeAll(line);
+                try upgraded.flush(io);
+                const echoed = try upgraded.reader(io).takeDelimiterInclusive('\n');
+                try testing.expectEqualStrings(line, echoed);
+            }
 
-    // An upstream that switches to a protocol not asked for is a 502.
-    var wrong = try client.send(io, .{ .url = f.front.url(&buf, "/"), .headers = &.{ .{ .name = "Connection", .value = "Upgrade" }, .{ .name = "Upgrade", .value = "wrong" } } });
-    defer wrong.deinit(io);
-    try testing.expectEqual(std.http.Status.bad_gateway, wrong.status);
+            // An upstream that switches to a protocol not asked for is a 502.
+            var wrong = try client.send(io, .{ .url = f.front.url(&buf, "/"), .headers = &.{ .{ .name = "Connection", .value = "Upgrade" }, .{ .name = "Upgrade", .value = "wrong" } } });
+            defer wrong.deinit(io);
+            try testing.expectEqual(std.http.Status.bad_gateway, wrong.status);
+        }
+    }.inSim, .{});
 }
 
 /// The front's failed exchanges whose error was a cancel.
@@ -433,39 +474,44 @@ const SeenCanceled = struct {
 };
 
 test "a tunnel whose read is canceled ends its exchange as canceled, both sides closed, not as a stream that ended" {
-    const gpa = testing.allocator;
-    const base = test_io.io();
-    const shakedown = @import("shakedown");
-    const upstream = try Running.start(gpa, .{}, .of(upgrading));
-    defer upstream.stop();
-    var through: Client = .init(gpa, .{});
-    defer through.deinit(base);
-    var upstream_url: [64]u8 = undefined;
-    var proxy: ReverseProxy = try .init(gpa, &through, .{ .upstream = upstream.url(&upstream_url, "") });
-    // Past the front's second write (the request upstream, then the 101 to the client), the next
-    // read is a tunnel's: a cancel lands there.
-    const plan = [_]shakedown.IoPlan.Entry{
-        .{ .at = .{ .nth = .{ .call = .net_write, .n = 2 } }, .fault = .{ .short = std.math.maxInt(u32) } },
-        .{ .at = .{ .nth = .{ .call = .net_read, .n = 1, .after = 0 } }, .fault = .cancel },
-    };
-    const fio = try shakedown.FaultIo.init(gpa, base, .{ .plan = &plan });
-    defer fio.deinit();
-    var seen: SeenCanceled = .{};
-    const r = try gpa.create(Running);
-    defer gpa.destroy(r);
-    r.listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(base, .{ .reuse_address = true });
-    defer r.listener.deinit(base);
-    r.port = r.listener.socket.address.getPort();
-    r.server = .init(gpa, .{ .observer = &seen.observing }, &proxy.handler);
-    defer r.server.deinit(base);
-    r.task = base.concurrent(Server.serve, .{ &r.server, fio.io(), &r.listener }) catch return error.SkipZigTest;
-    defer {
-        r.server.shutdown(base);
-        // glint-ignore: Z026 -- serve ends with the shutdown; its result is not what the test checks
-        r.task.await(base) catch {};
-    }
-    const got = try r.raw(gpa, "GET / HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n");
-    defer gpa.free(got);
-    try testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 101"));
-    try testing.expectEqual(@as(u32, 1), seen.count.load(.monotonic));
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const base = test_io.io();
+            const shakedown = @import("shakedown");
+            const upstream = try Running.start(gpa, .{}, .of(upgrading));
+            defer upstream.stop();
+            var through: Client = .init(gpa, .{});
+            defer through.deinit(base);
+            var upstream_url: [64]u8 = undefined;
+            var proxy: ReverseProxy = try .init(gpa, &through, .{ .upstream = upstream.url(&upstream_url, "") });
+            // Past the front's second write (the request upstream, then the 101 to the client), the next
+            // read is a tunnel's: a cancel lands there.
+            const plan = [_]shakedown.IoPlan.Entry{
+                .{ .at = .{ .nth = .{ .call = .net_write, .n = 2 } }, .fault = .{ .short = std.math.maxInt(u32) } },
+                .{ .at = .{ .nth = .{ .call = .net_read, .n = 1, .after = 0 } }, .fault = .cancel },
+            };
+            const fio = try shakedown.FaultIo.init(gpa, base, .{ .plan = &plan });
+            defer fio.deinit();
+            var seen: SeenCanceled = .{};
+            const r = try gpa.create(Running);
+            defer gpa.destroy(r);
+            r.listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(base, .{ .reuse_address = true });
+            defer r.listener.deinit(base);
+            r.port = r.listener.socket.address.getPort();
+            r.server = .init(gpa, .{ .observer = &seen.observing }, &proxy.handler);
+            defer r.server.deinit(base);
+            var seamed: test_io.Seamed = .{};
+            r.task = base.concurrent(Server.serve, .{ &r.server, seamed.over(fio.io()), &r.listener }) catch return error.SkipZigTest;
+            defer {
+                r.server.shutdown(base);
+                // glint-ignore: Z026 -- serve ends with the shutdown; its result is not what the test checks
+                r.task.await(base) catch {};
+            }
+            const got = try r.raw(gpa, "GET / HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n");
+            defer gpa.free(got);
+            try testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 101"));
+            try testing.expectEqual(@as(u32, 1), seen.count.load(.monotonic));
+        }
+    }.inSim, .{});
 }

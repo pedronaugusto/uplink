@@ -21,6 +21,7 @@ const Response = @import("server/Response.zig");
 const Files = @import("server.zig").Files;
 const Proxy = @import("transport/Proxy.zig");
 const ws = @import("ws.zig");
+const ReverseProxy = @import("ReverseProxy.zig");
 const Http2 = @import("client/Shared.zig").Http2;
 const Version = @import("uplink.wire").Version;
 
@@ -364,4 +365,35 @@ test "a handler learns its client left while it computes" {
     // glint-ignore: Z026 -- the canceled send ends as it does; the handler's side is what is checked
     sending.cancel(io) catch {};
     try Leaving.until(&Leaving.left);
+}
+
+fn upstreamOf(io: Io, request: *Request, response: *Response) anyerror!void {
+    if (std.mem.eql(u8, request.path, "/ws")) return wsEcho(io, request, response);
+    return echo(io, request, response);
+}
+
+test "a reverse proxy passes a request on, and an upgrade's bytes both ways" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    var upstream: Running = undefined;
+    try upstream.start(.{}, .of(upstreamOf));
+    defer upstream.stop();
+    var outbound: Client = .init(gpa, .{});
+    defer outbound.deinit(io);
+    var upstream_url: [64]u8 = undefined;
+    var proxy: ReverseProxy = try .init(gpa, &outbound, .{ .upstream = upstream.url(&upstream_url, "http", "") });
+    var front: Running = undefined;
+    try front.start(.{}, &proxy.handler);
+    defer front.stop();
+    var client: Client = .init(gpa, .{});
+    defer client.deinit(io);
+    var buf: [64]u8 = undefined;
+    try post(&client, io, front.url(&buf, "http", "/echo"), "passed on", .http1_1);
+    var opened: ws.Opened = undefined;
+    try ws.connect(&opened, &client, gpa, io, front.url(&buf, "ws", "/ws"), .{});
+    defer opened.deinit(io);
+    try opened.conn.send(io, .text, "both ways");
+    _, const back = (try opened.conn.readMessage(io, gpa, .limited(1 << 10))).?;
+    defer gpa.free(back);
+    try testing.expectEqualStrings("both ways", back);
 }
