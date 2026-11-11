@@ -22,84 +22,100 @@ fn get(client: *Client, io: Io, url: []const u8) ![]u8 {
 }
 
 test "requests to one server go over one kept connection" {
-    const io = test_io.io();
-    const server = try Server.start(testing.allocator, io, Server.fixed(ok_answer));
-    defer server.stop();
-    var client: Client = .init(testing.allocator, .{});
-    defer client.deinit(io);
-    var buf: [64]u8 = undefined;
-    for (0..20) |_| {
-        const body = try get(&client, io, server.url(&buf, "/"));
-        defer testing.allocator.free(body);
-        try testing.expectEqualStrings("ok", body);
-    }
-    const stats = client.stats();
-    try testing.expectEqual(@as(u64, 1), stats.connections_opened);
-    try testing.expectEqual(@as(u64, 19), stats.reused);
-    try testing.expectEqual(@as(u32, 1), stats.idle);
-    try testing.expectEqual(@as(u32, 0), stats.in_use);
-    try testing.expectEqual(@as(u32, 1), server.accepted.load(.monotonic));
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const io = test_io.io();
+            const server = try Server.start(testing.allocator, io, Server.fixed(ok_answer));
+            defer server.stop();
+            var client: Client = .init(testing.allocator, .{});
+            defer client.deinit(io);
+            var buf: [64]u8 = undefined;
+            for (0..20) |_| {
+                const body = try get(&client, io, server.url(&buf, "/"));
+                defer testing.allocator.free(body);
+                try testing.expectEqualStrings("ok", body);
+            }
+            const stats = client.stats();
+            try testing.expectEqual(@as(u64, 1), stats.connections_opened);
+            try testing.expectEqual(@as(u64, 19), stats.reused);
+            try testing.expectEqual(@as(u32, 1), stats.idle);
+            try testing.expectEqual(@as(u32, 0), stats.in_use);
+            try testing.expectEqual(@as(u32, 1), server.accepted.load(.monotonic));
+        }
+    }.inSim, .{});
 }
 
 test "a request's head is written exactly, with nothing unchecked" {
-    const io = test_io.io();
-    const server = try Server.start(testing.allocator, io, Server.fixed(ok_answer));
-    defer server.stop();
-    var client: Client = .init(testing.allocator, .{ .user_agent = "uplink-test", .decompress = false });
-    defer client.deinit(io);
-    var buf: [64]u8 = undefined;
-    var response = try client.send(io, .{
-        .method = .POST,
-        .url = server.url(&buf, "/repo.git/git-upload-pack?x=1#frag"),
-        .headers = &.{.{ .name = "Git-Protocol", .value = "version=2" }},
-        .body = .{ .bytes = "0000" },
-    });
-    response.deinit(io);
-    const seen = try server.received(testing.allocator);
-    defer testing.allocator.free(seen);
-    var want_buf: [256]u8 = undefined;
-    const want = try std.mem.print(&want_buf, "POST /repo.git/git-upload-pack?x=1 HTTP/1.1\r\nHost: 127.0.0.1:{d}\r\nUser-Agent: uplink-test\r\nGit-Protocol: version=2\r\nContent-Length: 4\r\n\r\n0000", .{server.port});
-    try testing.expectEqualStrings(want, seen);
-    for ([_][]const u8{ "X: a\r\nInjected: b", "a\x00b" }) |value| {
-        try testing.expectError(error.InvalidHeader, client.send(io, .{ .url = server.url(&buf, "/"), .headers = &.{.{ .name = "X", .value = value }} }));
-    }
-    try testing.expectError(error.InvalidHeader, client.send(io, .{ .url = server.url(&buf, "/"), .headers = &.{.{ .name = "Host", .value = "evil" }} }));
-    try testing.expectError(error.InvalidUrl, client.send(io, .{ .url = "http://127.0.0.1/a b" }));
-    try testing.expectError(error.UnsupportedScheme, client.send(io, .{ .url = "ftp://127.0.0.1/" }));
-    try testing.expectEqual(@as(u32, 1), server.requests.load(.monotonic));
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const io = test_io.io();
+            const server = try Server.start(testing.allocator, io, Server.fixed(ok_answer));
+            defer server.stop();
+            var client: Client = .init(testing.allocator, .{ .user_agent = "uplink-test", .decompress = false });
+            defer client.deinit(io);
+            var buf: [64]u8 = undefined;
+            var response = try client.send(io, .{
+                .method = .POST,
+                .url = server.url(&buf, "/repo.git/git-upload-pack?x=1#frag"),
+                .headers = &.{.{ .name = "Git-Protocol", .value = "version=2" }},
+                .body = .{ .bytes = "0000" },
+            });
+            response.deinit(io);
+            const seen = try server.received(testing.allocator);
+            defer testing.allocator.free(seen);
+            var want_buf: [256]u8 = undefined;
+            const want = try std.mem.print(&want_buf, "POST /repo.git/git-upload-pack?x=1 HTTP/1.1\r\nHost: 127.0.0.1:{d}\r\nUser-Agent: uplink-test\r\nGit-Protocol: version=2\r\nContent-Length: 4\r\n\r\n0000", .{server.port});
+            try testing.expectEqualStrings(want, seen);
+            for ([_][]const u8{ "X: a\r\nInjected: b", "a\x00b" }) |value| {
+                try testing.expectError(error.InvalidHeader, client.send(io, .{ .url = server.url(&buf, "/"), .headers = &.{.{ .name = "X", .value = value }} }));
+            }
+            try testing.expectError(error.InvalidHeader, client.send(io, .{ .url = server.url(&buf, "/"), .headers = &.{.{ .name = "Host", .value = "evil" }} }));
+            try testing.expectError(error.InvalidUrl, client.send(io, .{ .url = "http://127.0.0.1/a b" }));
+            try testing.expectError(error.UnsupportedScheme, client.send(io, .{ .url = "ftp://127.0.0.1/" }));
+            try testing.expectEqual(@as(u32, 1), server.requests.load(.monotonic));
+        }
+    }.inSim, .{});
 }
 
 test "an extended CONNECT on a connection in HTTP/1.1 is refused with nothing sent, and the connection kept" {
-    const io = test_io.io();
-    const server = try Server.start(testing.allocator, io, Server.fixed(ok_answer));
-    defer server.stop();
-    var client: Client = .init(testing.allocator, .{});
-    defer client.deinit(io);
-    var buf: [64]u8 = undefined;
-    try testing.expectError(error.ExtendedConnectUnsupported, client.send(io, .{ .method = .CONNECT, .url = server.url(&buf, "/"), .protocol = "websocket" }));
-    try testing.expectError(error.InvalidHeader, client.send(io, .{ .url = server.url(&buf, "/"), .protocol = "websocket" }));
-    try testing.expectError(error.InvalidHeader, client.send(io, .{ .method = .CONNECT, .url = server.url(&buf, "/"), .protocol = "web socket" }));
-    const body = try get(&client, io, server.url(&buf, "/"));
-    defer testing.allocator.free(body);
-    try testing.expectEqualStrings("ok", body);
-    try testing.expectEqual(@as(u32, 1), server.requests.load(.monotonic));
-    try testing.expectEqual(@as(u64, 1), client.stats().connections_opened);
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const io = test_io.io();
+            const server = try Server.start(testing.allocator, io, Server.fixed(ok_answer));
+            defer server.stop();
+            var client: Client = .init(testing.allocator, .{});
+            defer client.deinit(io);
+            var buf: [64]u8 = undefined;
+            try testing.expectError(error.ExtendedConnectUnsupported, client.send(io, .{ .method = .CONNECT, .url = server.url(&buf, "/"), .protocol = "websocket" }));
+            try testing.expectError(error.InvalidHeader, client.send(io, .{ .url = server.url(&buf, "/"), .protocol = "websocket" }));
+            try testing.expectError(error.InvalidHeader, client.send(io, .{ .method = .CONNECT, .url = server.url(&buf, "/"), .protocol = "web socket" }));
+            const body = try get(&client, io, server.url(&buf, "/"));
+            defer testing.allocator.free(body);
+            try testing.expectEqualStrings("ok", body);
+            try testing.expectEqual(@as(u32, 1), server.requests.load(.monotonic));
+            try testing.expectEqual(@as(u64, 1), client.stats().connections_opened);
+        }
+    }.inSim, .{});
 }
 
 test "a 101 not taken over gives its connection to no later request" {
-    const io = test_io.io();
-    const server = try Server.start(testing.allocator, io, Server.fixed("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: other\r\n\r\n"));
-    defer server.stop();
-    var client: Client = .init(testing.allocator, .{});
-    defer client.deinit(io);
-    var buf: [64]u8 = undefined;
-    for (0..2) |_| {
-        var response = try client.send(io, .{ .url = server.url(&buf, "/"), .headers = &.{ .{ .name = "Connection", .value = "Upgrade" }, .{ .name = "Upgrade", .value = "other" } } });
-        try testing.expectEqual(std.http.Status.switching_protocols, response.status);
-        response.deinit(io);
-    }
-    try testing.expectEqual(@as(u64, 2), client.stats().connections_opened);
-    try testing.expectEqual(@as(u32, 0), client.stats().idle);
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const io = test_io.io();
+            const server = try Server.start(testing.allocator, io, Server.fixed("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: other\r\n\r\n"));
+            defer server.stop();
+            var client: Client = .init(testing.allocator, .{});
+            defer client.deinit(io);
+            var buf: [64]u8 = undefined;
+            for (0..2) |_| {
+                var response = try client.send(io, .{ .url = server.url(&buf, "/"), .headers = &.{ .{ .name = "Connection", .value = "Upgrade" }, .{ .name = "Upgrade", .value = "other" } } });
+                try testing.expectEqual(std.http.Status.switching_protocols, response.status);
+                response.deinit(io);
+            }
+            try testing.expectEqual(@as(u64, 2), client.stats().connections_opened);
+            try testing.expectEqual(@as(u32, 0), client.stats().idle);
+        }
+    }.inSim, .{});
 }
 
 /// The body of a response to `GET /` with `answer`, read whole.
@@ -116,18 +132,22 @@ fn bodyOf(comptime answer: []const u8, options: Client.Options) ![]u8 {
 }
 
 test "bodies are read as their framing says: length, chunks, the connection's end" {
-    const cases = [_]struct { []const u8, []const u8 }{
-        .{ "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n5;x=y\r\npedia\r\n0\r\nT: v\r\n\r\n", "Wikipedia" },
-        .{ "HTTP/1.0 200 OK\r\n\r\nto the end", "to the end" },
-        .{ "HTTP/1.1 204 No Content\r\nContent-Length: 5\r\n\r\n", "" },
-        .{ "HTTP/1.1 103 Early Hints\r\nLink: </a>\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nreal", "real" },
-        .{ "HTTP/1.1 200 OK\nContent-Length: 3\nX-Fold: a\n b\n\nlfs", "lfs" },
-    };
-    inline for (cases) |case| {
-        const body = try bodyOf(case[0], .{});
-        defer testing.allocator.free(body);
-        try testing.expectEqualStrings(case[1], body);
-    }
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const cases = [_]struct { []const u8, []const u8 }{
+                .{ "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n5;x=y\r\npedia\r\n0\r\nT: v\r\n\r\n", "Wikipedia" },
+                .{ "HTTP/1.0 200 OK\r\n\r\nto the end", "to the end" },
+                .{ "HTTP/1.1 204 No Content\r\nContent-Length: 5\r\n\r\n", "" },
+                .{ "HTTP/1.1 103 Early Hints\r\nLink: </a>\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nreal", "real" },
+                .{ "HTTP/1.1 200 OK\nContent-Length: 3\nX-Fold: a\n b\n\nlfs", "lfs" },
+            };
+            inline for (cases) |case| {
+                const body = try bodyOf(case[0], .{});
+                defer testing.allocator.free(body);
+                try testing.expectEqualStrings(case[1], body);
+            }
+        }
+    }.inSim, .{});
 }
 
 fn compressed(gpa: std.mem.Allocator, container: std.compress.flate.Container, text: []const u8) ![]u8 {
@@ -144,60 +164,68 @@ fn compressed(gpa: std.mem.Allocator, container: std.compress.flate.Container, t
 }
 
 test "gzip and deflate bodies are decoded, and other codings handed over as they came" {
-    const gpa = testing.allocator;
-    const io = test_io.io();
-    const text = "a body worth compressing: repeated repeated repeated repeated";
-    for ([_]struct { std.compress.flate.Container, []const u8 }{ .{ .gzip, "gzip" }, .{ .zlib, "deflate" } }) |case| {
-        const coded = try compressed(gpa, case[0], text);
-        defer gpa.free(coded);
-        const answer = try gpa.print("HTTP/1.1 200 OK\r\nContent-Encoding: {s}\r\nContent-Length: {d}\r\n\r\n{s}", .{ case[1], coded.len, coded });
-        defer gpa.free(answer);
-        const Ctx = struct {
-            fn answerFn(context: ?*anyopaque, _: Server.Request) Server.Answer {
-                const bytes: *const []const u8 = @ptrCast(@alignCast(context.?)); // safe: the test passes a pointer to its answer
-                return .{ .bytes = bytes.* };
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const io = test_io.io();
+            const text = "a body worth compressing: repeated repeated repeated repeated";
+            for ([_]struct { std.compress.flate.Container, []const u8 }{ .{ .gzip, "gzip" }, .{ .zlib, "deflate" } }) |case| {
+                const coded = try compressed(gpa, case[0], text);
+                defer gpa.free(coded);
+                const answer = try gpa.print("HTTP/1.1 200 OK\r\nContent-Encoding: {s}\r\nContent-Length: {d}\r\n\r\n{s}", .{ case[1], coded.len, coded });
+                defer gpa.free(answer);
+                const Ctx = struct {
+                    fn answerFn(context: ?*anyopaque, _: Server.Request) Server.Answer {
+                        const bytes: *const []const u8 = @ptrCast(@alignCast(context.?)); // safe: the test passes a pointer to its answer
+                        return .{ .bytes = bytes.* };
+                    }
+                };
+                const server = try Server.start(gpa, io, .{ .context = @ptrCast(@constCast(&answer)), .answer = Ctx.answerFn });
+                defer server.stop();
+                var buf: [64]u8 = undefined;
+                var client: Client = .init(gpa, .{});
+                defer client.deinit(io);
+                for (0..2) |_| {
+                    const body = try get(&client, io, server.url(&buf, "/"));
+                    defer gpa.free(body);
+                    try testing.expectEqualStrings(text, body);
+                }
+                try testing.expectEqual(@as(u64, 1), client.stats().connections_opened);
+                const seen = try server.received(gpa);
+                defer gpa.free(seen);
+                try testing.expect(std.mem.find(u8, seen, "Accept-Encoding: gzip, deflate, zstd, br\r\n") != null);
+                var raw: Client = .init(gpa, .{ .decompress = false });
+                defer raw.deinit(io);
+                const undecoded = try get(&raw, io, server.url(&buf, "/"));
+                defer gpa.free(undecoded);
+                try testing.expectEqualSlices(u8, coded, undecoded);
+                // A request that names its own codings reads them as they came.
+                var asked = try client.send(io, .{ .url = server.url(&buf, "/"), .headers = &.{.{ .name = "Accept-Encoding", .value = case[1] }} });
+                defer asked.deinit(io);
+                const kept = try asked.collect(gpa, io, .limited(1 << 20));
+                defer gpa.free(kept);
+                try testing.expectEqualSlices(u8, coded, kept);
             }
-        };
-        const server = try Server.start(gpa, io, .{ .context = @ptrCast(@constCast(&answer)), .answer = Ctx.answerFn });
-        defer server.stop();
-        var buf: [64]u8 = undefined;
-        var client: Client = .init(gpa, .{});
-        defer client.deinit(io);
-        for (0..2) |_| {
-            const body = try get(&client, io, server.url(&buf, "/"));
-            defer gpa.free(body);
-            try testing.expectEqualStrings(text, body);
+            // `a` in one uncompressed meta-block, as the brotli tool writes it.
+            const br = try bodyOf("HTTP/1.1 200 OK\r\nContent-Encoding: br\r\nContent-Length: 5\r\n\r\n\x0b\x00\x80a\x03", .{});
+            defer gpa.free(br);
+            try testing.expectEqualStrings("a", br);
+            // A coding uplink does not read is handed over as it came.
+            const other = try bodyOf("HTTP/1.1 200 OK\r\nContent-Encoding: compress\r\nContent-Length: 4\r\n\r\n\x1f\x9d\x90\x61", .{});
+            defer gpa.free(other);
+            try testing.expectEqualSlices(u8, "\x1f\x9d\x90\x61", other);
         }
-        try testing.expectEqual(@as(u64, 1), client.stats().connections_opened);
-        const seen = try server.received(gpa);
-        defer gpa.free(seen);
-        try testing.expect(std.mem.find(u8, seen, "Accept-Encoding: gzip, deflate, zstd, br\r\n") != null);
-        var raw: Client = .init(gpa, .{ .decompress = false });
-        defer raw.deinit(io);
-        const undecoded = try get(&raw, io, server.url(&buf, "/"));
-        defer gpa.free(undecoded);
-        try testing.expectEqualSlices(u8, coded, undecoded);
-        // A request that names its own codings reads them as they came.
-        var asked = try client.send(io, .{ .url = server.url(&buf, "/"), .headers = &.{.{ .name = "Accept-Encoding", .value = case[1] }} });
-        defer asked.deinit(io);
-        const kept = try asked.collect(gpa, io, .limited(1 << 20));
-        defer gpa.free(kept);
-        try testing.expectEqualSlices(u8, coded, kept);
-    }
-    // `a` in one uncompressed meta-block, as the brotli tool writes it.
-    const br = try bodyOf("HTTP/1.1 200 OK\r\nContent-Encoding: br\r\nContent-Length: 5\r\n\r\n\x0b\x00\x80a\x03", .{});
-    defer gpa.free(br);
-    try testing.expectEqualStrings("a", br);
-    // A coding uplink does not read is handed over as it came.
-    const other = try bodyOf("HTTP/1.1 200 OK\r\nContent-Encoding: compress\r\nContent-Length: 4\r\n\r\n\x1f\x9d\x90\x61", .{});
-    defer gpa.free(other);
-    try testing.expectEqualSlices(u8, "\x1f\x9d\x90\x61", other);
+    }.inSim, .{});
 }
 
 test "a Brotli window past the client's cap is refused as it is read" {
-    // WBITS 22 before an empty last meta-block: a window of 4 MiB asked for.
-    const head = "HTTP/1.1 200 OK\r\nContent-Encoding: br\r\nContent-Length: 1\r\n\r\n";
-    try testing.expectError(error.BadContentEncoding, bodyOf(head ++ "\x0b", .{ .max_brotli_window = .fromRaw(1 << 20) }));
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            // WBITS 22 before an empty last meta-block: a window of 4 MiB asked for.
+            const head = "HTTP/1.1 200 OK\r\nContent-Encoding: br\r\nContent-Length: 1\r\n\r\n";
+            try testing.expectError(error.BadContentEncoding, bodyOf(head ++ "\x0b", .{ .max_brotli_window = .fromRaw(1 << 20) }));
+        }
+    }.inSim, .{});
 }
 
 /// `text` compressed by the zstd tool at level 19.
@@ -209,142 +237,166 @@ fn rawFrame(comptime log: u5) []const u8 {
 }
 
 test "zstd bodies are decoded, and one whose window passes the client's cap refused" {
-    const gpa = testing.allocator;
-    const text = "a body worth compressing: repeated repeated repeated repeated";
-    for (0..2) |_| {
-        const body = try bodyOf(std.fmt.comptimePrint("HTTP/1.1 200 OK\r\nContent-Encoding: zstd\r\nContent-Length: {d}\r\n\r\n", .{zstd_frame.len}) ++ zstd_frame, .{});
-        defer gpa.free(body);
-        try testing.expectEqualStrings(text, body);
-    }
-    const head = "HTTP/1.1 200 OK\r\nContent-Encoding: zstd\r\nContent-Length: 14\r\n\r\n";
-    const megabyte = try bodyOf(head ++ comptime rawFrame(20), .{});
-    defer gpa.free(megabyte);
-    try testing.expectEqualStrings("hello", megabyte);
-    try testing.expectError(error.BadContentEncoding, bodyOf(head ++ comptime rawFrame(24), .{}));
-    try testing.expectError(error.BadContentEncoding, bodyOf(head ++ comptime rawFrame(20), .{ .max_zstd_window = .fromRaw(512 << 10) }));
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const text = "a body worth compressing: repeated repeated repeated repeated";
+            for (0..2) |_| {
+                const body = try bodyOf(std.fmt.comptimePrint("HTTP/1.1 200 OK\r\nContent-Encoding: zstd\r\nContent-Length: {d}\r\n\r\n", .{zstd_frame.len}) ++ zstd_frame, .{});
+                defer gpa.free(body);
+                try testing.expectEqualStrings(text, body);
+            }
+            const head = "HTTP/1.1 200 OK\r\nContent-Encoding: zstd\r\nContent-Length: 14\r\n\r\n";
+            const megabyte = try bodyOf(head ++ comptime rawFrame(20), .{});
+            defer gpa.free(megabyte);
+            try testing.expectEqualStrings("hello", megabyte);
+            try testing.expectError(error.BadContentEncoding, bodyOf(head ++ comptime rawFrame(24), .{}));
+            try testing.expectError(error.BadContentEncoding, bodyOf(head ++ comptime rawFrame(20), .{ .max_zstd_window = .fromRaw(512 << 10) }));
+        }
+    }.inSim, .{});
 }
 
 test "a coded body whose checksum is not its data's is refused, and says why" {
-    const gpa = testing.allocator;
-    const io = test_io.io();
-    const text = "a body worth compressing: repeated repeated repeated repeated";
-    const coded = try compressed(gpa, .gzip, text);
-    defer gpa.free(coded);
-    // The CRC-32 is the trailer's first four bytes.
-    coded[coded.len - 8] ^= 0x10;
-    const answer = try gpa.print("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {d}\r\n\r\n{s}", .{ coded.len, coded });
-    defer gpa.free(answer);
-    const Ctx = struct {
-        fn answerFn(context: ?*anyopaque, _: Server.Request) Server.Answer {
-            const bytes: *const []const u8 = @ptrCast(@alignCast(context.?)); // safe: the test passes a pointer to its answer
-            return .{ .bytes = bytes.* };
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const io = test_io.io();
+            const text = "a body worth compressing: repeated repeated repeated repeated";
+            const coded = try compressed(gpa, .gzip, text);
+            defer gpa.free(coded);
+            // The CRC-32 is the trailer's first four bytes.
+            coded[coded.len - 8] ^= 0x10;
+            const answer = try gpa.print("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {d}\r\n\r\n{s}", .{ coded.len, coded });
+            defer gpa.free(answer);
+            const Ctx = struct {
+                fn answerFn(context: ?*anyopaque, _: Server.Request) Server.Answer {
+                    const bytes: *const []const u8 = @ptrCast(@alignCast(context.?)); // safe: the test passes a pointer to its answer
+                    return .{ .bytes = bytes.* };
+                }
+            };
+            const server = try Server.start(gpa, io, .{ .context = @ptrCast(@constCast(&answer)), .answer = Ctx.answerFn });
+            defer server.stop();
+            var client: Client = .init(gpa, .{});
+            defer client.deinit(io);
+            var buf: [64]u8 = undefined;
+            var response = try client.send(io, .{ .url = server.url(&buf, "/") });
+            defer response.deinit(io);
+            try testing.expectError(error.BadContentEncoding, response.collect(gpa, io, .limited(1 << 20)));
+            try testing.expectEqual(error.ChecksumMismatch, response.decodingFailure().?);
         }
-    };
-    const server = try Server.start(gpa, io, .{ .context = @ptrCast(@constCast(&answer)), .answer = Ctx.answerFn });
-    defer server.stop();
-    var client: Client = .init(gpa, .{});
-    defer client.deinit(io);
-    var buf: [64]u8 = undefined;
-    var response = try client.send(io, .{ .url = server.url(&buf, "/") });
-    defer response.deinit(io);
-    try testing.expectError(error.BadContentEncoding, response.collect(gpa, io, .limited(1 << 20)));
-    try testing.expectEqual(error.ChecksumMismatch, response.decodingFailure().?);
+    }.inSim, .{});
 }
 
 test "a body under two codings is decoded, the last applied first" {
-    const gpa = testing.allocator;
-    const io = test_io.io();
-    const text = "a body worth compressing: repeated repeated repeated repeated";
-    const inner = try compressed(gpa, .zlib, text);
-    defer gpa.free(inner);
-    const outer = try compressed(gpa, .gzip, inner);
-    defer gpa.free(outer);
-    const answer = try gpa.print("HTTP/1.1 200 OK\r\nContent-Encoding: deflate, gzip\r\nContent-Length: {d}\r\n\r\n{s}", .{ outer.len, outer });
-    defer gpa.free(answer);
-    const Ctx = struct {
-        fn answerFn(context: ?*anyopaque, _: Server.Request) Server.Answer {
-            const bytes: *const []const u8 = @ptrCast(@alignCast(context.?)); // safe: the test passes a pointer to its answer
-            return .{ .bytes = bytes.* };
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const io = test_io.io();
+            const text = "a body worth compressing: repeated repeated repeated repeated";
+            const inner = try compressed(gpa, .zlib, text);
+            defer gpa.free(inner);
+            const outer = try compressed(gpa, .gzip, inner);
+            defer gpa.free(outer);
+            const answer = try gpa.print("HTTP/1.1 200 OK\r\nContent-Encoding: deflate, gzip\r\nContent-Length: {d}\r\n\r\n{s}", .{ outer.len, outer });
+            defer gpa.free(answer);
+            const Ctx = struct {
+                fn answerFn(context: ?*anyopaque, _: Server.Request) Server.Answer {
+                    const bytes: *const []const u8 = @ptrCast(@alignCast(context.?)); // safe: the test passes a pointer to its answer
+                    return .{ .bytes = bytes.* };
+                }
+            };
+            const server = try Server.start(gpa, io, .{ .context = @ptrCast(@constCast(&answer)), .answer = Ctx.answerFn });
+            defer server.stop();
+            var client: Client = .init(gpa, .{});
+            defer client.deinit(io);
+            var buf: [64]u8 = undefined;
+            const body = try get(&client, io, server.url(&buf, "/"));
+            defer gpa.free(body);
+            try testing.expectEqualStrings(text, body);
         }
-    };
-    const server = try Server.start(gpa, io, .{ .context = @ptrCast(@constCast(&answer)), .answer = Ctx.answerFn });
-    defer server.stop();
-    var client: Client = .init(gpa, .{});
-    defer client.deinit(io);
-    var buf: [64]u8 = undefined;
-    const body = try get(&client, io, server.url(&buf, "/"));
-    defer gpa.free(body);
-    try testing.expectEqualStrings(text, body);
+    }.inSim, .{});
 }
 
 test "a body read through the caller's buffer is peeked as far as that buffer holds" {
-    const gpa = testing.allocator;
-    const io = test_io.io();
-    const body_len = 70_000;
-    const Ctx = struct {
-        fn answerFn(context: ?*anyopaque, _: Server.Request) Server.Answer {
-            const bytes: *const []const u8 = @ptrCast(@alignCast(context.?)); // safe: the test passes a pointer to its answer
-            return .{ .bytes = bytes.* };
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const io = test_io.io();
+            const body_len = 70_000;
+            const Ctx = struct {
+                fn answerFn(context: ?*anyopaque, _: Server.Request) Server.Answer {
+                    const bytes: *const []const u8 = @ptrCast(@alignCast(context.?)); // safe: the test passes a pointer to its answer
+                    return .{ .bytes = bytes.* };
+                }
+            };
+            const head = std.fmt.comptimePrint("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n", .{body_len});
+            const answer = try gpa.alloc(u8, head.len + body_len);
+            defer gpa.free(answer);
+            @memcpy(answer[0..head.len], head);
+            for (answer[head.len..], 0..) |*b, i| b.* = @truncate(i);
+            const answer_slice: []const u8 = answer;
+            const server = try Server.start(gpa, io, .{ .context = @ptrCast(@constCast(&answer_slice)), .answer = Ctx.answerFn });
+            defer server.stop();
+            var client: Client = .init(gpa, .{});
+            defer client.deinit(io);
+            var url_buf: [64]u8 = undefined;
+            var response = try client.send(io, .{ .url = server.url(&url_buf, "/") });
+            defer response.deinit(io);
+            const buffer = try gpa.alloc(u8, 64 << 10);
+            defer gpa.free(buffer);
+            const r = response.readerBuffered(io, buffer);
+            // A pkt-line is up to 65520 bytes, read whole where it lies.
+            const line = try r.peek(65520);
+            try testing.expectEqualSlices(u8, answer[head.len..][0..65520], line);
+            try testing.expectEqual(body_len, try r.discardRemaining());
+            try testing.expectEqual(@as(u32, 1), client.stats().in_use);
         }
-    };
-    const head = std.fmt.comptimePrint("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n", .{body_len});
-    const answer = try gpa.alloc(u8, head.len + body_len);
-    defer gpa.free(answer);
-    @memcpy(answer[0..head.len], head);
-    for (answer[head.len..], 0..) |*b, i| b.* = @truncate(i);
-    const answer_slice: []const u8 = answer;
-    const server = try Server.start(gpa, io, .{ .context = @ptrCast(@constCast(&answer_slice)), .answer = Ctx.answerFn });
-    defer server.stop();
-    var client: Client = .init(gpa, .{});
-    defer client.deinit(io);
-    var url_buf: [64]u8 = undefined;
-    var response = try client.send(io, .{ .url = server.url(&url_buf, "/") });
-    defer response.deinit(io);
-    const buffer = try gpa.alloc(u8, 64 << 10);
-    defer gpa.free(buffer);
-    const r = response.readerBuffered(io, buffer);
-    // A pkt-line is up to 65520 bytes, read whole where it lies.
-    const line = try r.peek(65520);
-    try testing.expectEqualSlices(u8, answer[head.len..][0..65520], line);
-    try testing.expectEqual(body_len, try r.discardRemaining());
-    try testing.expectEqual(@as(u32, 1), client.stats().in_use);
+    }.inSim, .{});
 }
 
 test "a range or a HEAD is asked for without a coding, whose bytes and length it would count instead" {
-    const gpa = testing.allocator;
-    const io = test_io.io();
-    const server = try Server.start(gpa, io, Server.fixed(ok_answer));
-    defer server.stop();
-    var client: Client = .init(gpa, .{});
-    defer client.deinit(io);
-    var buf: [64]u8 = undefined;
-    var ranged = try client.send(io, .{ .url = server.url(&buf, "/object"), .headers = &.{.{ .name = "Range", .value = "bytes=10-" }} });
-    ranged.deinit(io);
-    var head = try client.send(io, .{ .method = .HEAD, .url = server.url(&buf, "/object") });
-    head.deinit(io);
-    var plain = try client.send(io, .{ .url = server.url(&buf, "/object") });
-    plain.deinit(io);
-    const seen = try server.received(gpa);
-    defer gpa.free(seen);
-    var want_buf: [512]u8 = undefined;
-    const want = try std.mem.print(&want_buf, "GET /object HTTP/1.1\r\nHost: 127.0.0.1:{0d}\r\nRange: bytes=10-\r\n\r\n" ++
-        "HEAD /object HTTP/1.1\r\nHost: 127.0.0.1:{0d}\r\n\r\n" ++
-        "GET /object HTTP/1.1\r\nHost: 127.0.0.1:{0d}\r\nAccept-Encoding: gzip, deflate, zstd, br\r\n\r\n", .{server.port});
-    try testing.expectEqualStrings(want, seen);
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const io = test_io.io();
+            const server = try Server.start(gpa, io, Server.fixed(ok_answer));
+            defer server.stop();
+            var client: Client = .init(gpa, .{});
+            defer client.deinit(io);
+            var buf: [64]u8 = undefined;
+            var ranged = try client.send(io, .{ .url = server.url(&buf, "/object"), .headers = &.{.{ .name = "Range", .value = "bytes=10-" }} });
+            ranged.deinit(io);
+            var head = try client.send(io, .{ .method = .HEAD, .url = server.url(&buf, "/object") });
+            head.deinit(io);
+            var plain = try client.send(io, .{ .url = server.url(&buf, "/object") });
+            plain.deinit(io);
+            const seen = try server.received(gpa);
+            defer gpa.free(seen);
+            var want_buf: [512]u8 = undefined;
+            const want = try std.mem.print(&want_buf, "GET /object HTTP/1.1\r\nHost: 127.0.0.1:{0d}\r\nRange: bytes=10-\r\n\r\n" ++
+                "HEAD /object HTTP/1.1\r\nHost: 127.0.0.1:{0d}\r\n\r\n" ++
+                "GET /object HTTP/1.1\r\nHost: 127.0.0.1:{0d}\r\nAccept-Encoding: gzip, deflate, zstd, br\r\n\r\n", .{server.port});
+            try testing.expectEqualStrings(want, seen);
+        }
+    }.inSim, .{});
 }
 
 test "a head longer than the connection's buffer is read, and one past the limit refused" {
-    const gpa = testing.allocator;
-    const pad: [40 << 10]u8 = @splat('b');
-    const long = "HTTP/1.1 200 OK\r\nX-Pad: " ++ pad ++ "\r\nContent-Length: 2\r\n\r\nok";
-    const body = try bodyOf(long, .{});
-    defer gpa.free(body);
-    try testing.expectEqualStrings("ok", body);
-    const big: [70 << 10]u8 = @splat('b');
-    const too_long = "HTTP/1.1 200 OK\r\nX-Pad: " ++ big ++ "\r\nContent-Length: 2\r\n\r\nok";
-    try testing.expectError(error.HttpProtocolError, bodyOf(too_long, .{}));
-    try testing.expectError(error.HttpProtocolError, bodyOf("HTTP/1.1 2000 OK\r\nContent-Length: 0\r\n\r\n", .{}));
-    try testing.expectError(error.HttpProtocolError, bodyOf("HTTP/1.1 200 OK\r\nContent-Length: 1_0\r\n\r\n", .{}));
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const pad: [40 << 10]u8 = @splat('b');
+            const long = "HTTP/1.1 200 OK\r\nX-Pad: " ++ pad ++ "\r\nContent-Length: 2\r\n\r\nok";
+            const body = try bodyOf(long, .{});
+            defer gpa.free(body);
+            try testing.expectEqualStrings("ok", body);
+            const big: [70 << 10]u8 = @splat('b');
+            const too_long = "HTTP/1.1 200 OK\r\nX-Pad: " ++ big ++ "\r\nContent-Length: 2\r\n\r\nok";
+            try testing.expectError(error.HttpProtocolError, bodyOf(too_long, .{}));
+            try testing.expectError(error.HttpProtocolError, bodyOf("HTTP/1.1 2000 OK\r\nContent-Length: 0\r\n\r\n", .{}));
+            try testing.expectError(error.HttpProtocolError, bodyOf("HTTP/1.1 200 OK\r\nContent-Length: 1_0\r\n\r\n", .{}));
+        }
+    }.inSim, .{});
 }
 
 /// Echo each request's body back, with its length.
@@ -358,102 +410,115 @@ fn echo(_: ?*anyopaque, request: Server.Request) Server.Answer {
 }
 
 test "a body from a reader goes with its length, or in chunks, and a short one is refused" {
-    const io = test_io.io();
-    const server = try Server.start(testing.allocator, io, .{ .answer = echo });
-    defer server.stop();
-    var client: Client = .init(testing.allocator, .{});
-    defer client.deinit(io);
-    var buf: [64]u8 = undefined;
-    const url = server.url(&buf, "/upload");
-    {
-        var source: Io.Reader = .fixed("exactly this");
-        var response = try client.send(io, .{ .method = .PUT, .url = url, .body = .{ .reader = .{ .reader = &source, .length = 12 } } });
-        defer response.deinit(io);
-        const body = try response.collect(testing.allocator, io, .unlimited);
-        defer testing.allocator.free(body);
-        try testing.expectEqualStrings("exactly this", body);
-        try testing.expectEqualStrings("false", response.headers.get("x-chunked").?);
-    }
-    {
-        var source: Io.Reader = .fixed("streamed to its end");
-        var response = try client.send(io, .{ .method = .POST, .url = url, .body = .{ .reader = .{ .reader = &source } } });
-        defer response.deinit(io);
-        const body = try response.collect(testing.allocator, io, .unlimited);
-        defer testing.allocator.free(body);
-        try testing.expect(std.mem.endsWith(u8, body, "streamed to its end\r\n0\r\n\r\n"));
-        try testing.expectEqualStrings("true", response.headers.get("x-chunked").?);
-    }
-    var short: Io.Reader = .fixed("short");
-    try testing.expectError(error.BodyIncomplete, client.send(io, .{ .method = .PUT, .url = url, .body = .{ .reader = .{ .reader = &short, .length = 10 } } }));
-    try testing.expectError(error.InvalidBody, client.send(io, .{ .url = url, .body = .{ .streamed = .{} } }));
-    try testing.expectEqual(@as(u32, 0), client.stats().in_use);
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const io = test_io.io();
+            const server = try Server.start(testing.allocator, io, .{ .answer = echo });
+            defer server.stop();
+            var client: Client = .init(testing.allocator, .{});
+            defer client.deinit(io);
+            var buf: [64]u8 = undefined;
+            const url = server.url(&buf, "/upload");
+            {
+                var source: Io.Reader = .fixed("exactly this");
+                var response = try client.send(io, .{ .method = .PUT, .url = url, .body = .{ .reader = .{ .reader = &source, .length = 12 } } });
+                defer response.deinit(io);
+                const body = try response.collect(testing.allocator, io, .unlimited);
+                defer testing.allocator.free(body);
+                try testing.expectEqualStrings("exactly this", body);
+                try testing.expectEqualStrings("false", response.headers.get("x-chunked").?);
+            }
+            {
+                var source: Io.Reader = .fixed("streamed to its end");
+                var response = try client.send(io, .{ .method = .POST, .url = url, .body = .{ .reader = .{ .reader = &source } } });
+                defer response.deinit(io);
+                const body = try response.collect(testing.allocator, io, .unlimited);
+                defer testing.allocator.free(body);
+                try testing.expect(std.mem.endsWith(u8, body, "streamed to its end\r\n0\r\n\r\n"));
+                try testing.expectEqualStrings("true", response.headers.get("x-chunked").?);
+            }
+            var short: Io.Reader = .fixed("short");
+            try testing.expectError(error.BodyIncomplete, client.send(io, .{ .method = .PUT, .url = url, .body = .{ .reader = .{ .reader = &short, .length = 10 } } }));
+            try testing.expectError(error.InvalidBody, client.send(io, .{ .url = url, .body = .{ .streamed = .{} } }));
+            try testing.expectEqual(@as(u32, 0), client.stats().in_use);
+        }
+    }.inSim, .{});
 }
 
 test "a body the caller writes goes exactly at its length, or in chunks" {
-    const io = test_io.io();
-    const server = try Server.start(testing.allocator, io, .{ .answer = echo });
-    defer server.stop();
-    var client: Client = .init(testing.allocator, .{});
-    defer client.deinit(io);
-    var buf: [64]u8 = undefined;
-    const url = server.url(&buf, "/upload");
-    {
-        var out = try client.begin(io, .{ .method = .POST, .url = url, .body = .{ .streamed = .{ .length = 11 } } });
-        defer out.deinit(io);
-        try out.writer().writeAll("hello ");
-        try out.writer().writeAll("world");
-        var response = try out.finish(io);
-        defer response.deinit(io);
-        const body = try response.collect(testing.allocator, io, .unlimited);
-        defer testing.allocator.free(body);
-        try testing.expectEqualStrings("hello world", body);
-    }
-    {
-        var out = try client.begin(io, .{ .method = .POST, .url = url });
-        defer out.deinit(io);
-        for (0..100) |_| try out.writer().writeAll("0123456789");
-        var response = try out.finish(io);
-        defer response.deinit(io);
-        try testing.expectEqualStrings("true", response.headers.get("x-chunked").?);
-        try testing.expectError(error.ExchangeOver, out.finish(io));
-    }
-    {
-        var out = try client.begin(io, .{ .method = .POST, .url = url, .body = .{ .streamed = .{ .length = 3 } } });
-        defer out.deinit(io);
-        // Past the length: the write fails, and `finish` says why.
-        try testing.expectError(error.WriteFailed, writeAndFlush(out.writer(), "four"));
-        try testing.expectError(error.BodyTooLong, out.finish(io));
-    }
-    {
-        var out = try client.begin(io, .{ .method = .POST, .url = url, .body = .{ .streamed = .{ .length = 3 } } });
-        defer out.deinit(io);
-        try out.writer().writeAll("tw");
-        try testing.expectError(error.BodyIncomplete, out.finish(io));
-    }
-    try testing.expectEqual(@as(u32, 0), client.stats().in_use);
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const io = test_io.io();
+            const server = try Server.start(testing.allocator, io, .{ .answer = echo });
+            defer server.stop();
+            var client: Client = .init(testing.allocator, .{});
+            defer client.deinit(io);
+            var buf: [64]u8 = undefined;
+            const url = server.url(&buf, "/upload");
+            {
+                var out = try client.begin(io, .{ .method = .POST, .url = url, .body = .{ .streamed = .{ .length = 11 } } });
+                defer out.deinit(io);
+                try out.writer().writeAll("hello ");
+                try out.writer().writeAll("world");
+                var response = try out.finish(io);
+                defer response.deinit(io);
+                const body = try response.collect(testing.allocator, io, .unlimited);
+                defer testing.allocator.free(body);
+                try testing.expectEqualStrings("hello world", body);
+            }
+            {
+                var out = try client.begin(io, .{ .method = .POST, .url = url });
+                defer out.deinit(io);
+                for (0..100) |_| try out.writer().writeAll("0123456789");
+                var response = try out.finish(io);
+                defer response.deinit(io);
+                try testing.expectEqualStrings("true", response.headers.get("x-chunked").?);
+                try testing.expectError(error.ExchangeOver, out.finish(io));
+            }
+            {
+                var out = try client.begin(io, .{ .method = .POST, .url = url, .body = .{ .streamed = .{ .length = 3 } } });
+                defer out.deinit(io);
+                // Past the length: the write fails, and `finish` says why.
+                try testing.expectError(error.WriteFailed, writeAndFlush(out.writer(), "four"));
+                try testing.expectError(error.BodyTooLong, out.finish(io));
+            }
+            {
+                var out = try client.begin(io, .{ .method = .POST, .url = url, .body = .{ .streamed = .{ .length = 3 } } });
+                defer out.deinit(io);
+                try out.writer().writeAll("tw");
+                try testing.expectError(error.BodyIncomplete, out.finish(io));
+            }
+            try testing.expectEqual(@as(u32, 0), client.stats().in_use);
+        }
+    }.inSim, .{});
 }
 
 test "a body write a cancel stops is Canceled at finish, not a body cut short" {
-    const gpa = testing.allocator;
-    const server = try Server.start(gpa, test_io.io(), .{ .answer = echo });
-    defer server.stop();
-    var buf: [64]u8 = undefined;
-    const url = server.url(&buf, "/upload");
-    // More than the body writer's buffer holds, so the write the cancel
-    // stops is one `writeAll` makes, the head with it.
-    const body = try gpa.alloc(u8, 256 << 10);
-    defer gpa.free(body);
-    @memset(body, 'x');
-    const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .net_write, .n = 1 } }, .fault = .cancel, .times = 1 }};
-    const faults = try shakedown.FaultIo.init(gpa, test_io.io(), .{ .plan = &plan });
-    defer faults.deinit();
-    const io = faults.io();
-    var client: Client = .init(gpa, .{});
-    defer client.deinit(io);
-    var out = try client.begin(io, .{ .method = .POST, .url = url, .body = .{ .streamed = .{ .length = body.len } } });
-    defer out.deinit(io);
-    try testing.expectError(error.WriteFailed, out.writer().writeAll(body));
-    try testing.expectError(error.Canceled, out.finish(io));
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const server = try Server.start(gpa, test_io.io(), .{ .answer = echo });
+            defer server.stop();
+            var buf: [64]u8 = undefined;
+            const url = server.url(&buf, "/upload");
+            // More than the body writer's buffer holds, so the write the cancel
+            // stops is one `writeAll` makes, the head with it.
+            const body = try gpa.alloc(u8, 256 << 10);
+            defer gpa.free(body);
+            @memset(body, 'x');
+            const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .net_write, .n = 1 } }, .fault = .cancel, .times = 1 }};
+            const faults = try shakedown.FaultIo.init(gpa, test_io.io(), .{ .plan = &plan });
+            defer faults.deinit();
+            var seamed: test_io.Seamed = .{};
+            const io = seamed.over(faults.io());
+            var client: Client = .init(gpa, .{});
+            defer client.deinit(io);
+            var out = try client.begin(io, .{ .method = .POST, .url = url, .body = .{ .streamed = .{ .length = body.len } } });
+            defer out.deinit(io);
+            try testing.expectError(error.WriteFailed, out.writer().writeAll(body));
+            try testing.expectError(error.Canceled, out.finish(io));
+        }
+    }.inSim, .{});
 }
 
 fn writeAndFlush(w: *Io.Writer, bytes: []const u8) Io.Writer.Error!void {
@@ -469,52 +534,60 @@ fn closing(_: ?*anyopaque, request: Server.Request) Server.Answer {
 }
 
 test "a kept connection the server closed is noticed before it is used, or replaced when it fails" {
-    const io = test_io.io();
-    const server = try Server.start(testing.allocator, io, .{ .answer = closing });
-    defer server.stop();
-    var buf: [64]u8 = undefined;
-    {
-        // Closed while idle: the check before reuse sees its end.
-        var client: Client = .init(testing.allocator, .{});
-        defer client.deinit(io);
-        for (0..3) |_| {
-            const body = try get(&client, io, server.url(&buf, "/close"));
-            testing.allocator.free(body);
-            try io.sleep(.fromMilliseconds(20), .awake);
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const io = test_io.io();
+            const server = try Server.start(testing.allocator, io, .{ .answer = closing });
+            defer server.stop();
+            var buf: [64]u8 = undefined;
+            {
+                // Closed while idle: the check before reuse sees its end.
+                var client: Client = .init(testing.allocator, .{});
+                defer client.deinit(io);
+                for (0..3) |_| {
+                    const body = try get(&client, io, server.url(&buf, "/close"));
+                    testing.allocator.free(body);
+                    try io.sleep(.fromMilliseconds(20), .awake);
+                }
+                try testing.expectEqual(@as(u64, 3), client.stats().connections_opened);
+                try testing.expectEqual(@as(u64, 0), client.stats().reused);
+            }
+            {
+                // Closed after the request arrived, with no answer: a GET goes
+                // again on a new connection; a POST with a body does not.
+                var client: Client = .init(testing.allocator, .{});
+                defer client.deinit(io);
+                const first = try get(&client, io, server.url(&buf, "/keep"));
+                testing.allocator.free(first);
+                const again = try get(&client, io, server.url(&buf, "/keep"));
+                testing.allocator.free(again);
+                try testing.expectEqual(@as(u64, 2), client.stats().connections_opened);
+                try testing.expectError(error.ConnectionFailed, client.send(io, .{ .method = .POST, .url = server.url(&buf, "/keep"), .body = .{ .bytes = "x" } }));
+                try testing.expectEqual(@as(u32, 0), client.stats().in_use);
+            }
         }
-        try testing.expectEqual(@as(u64, 3), client.stats().connections_opened);
-        try testing.expectEqual(@as(u64, 0), client.stats().reused);
-    }
-    {
-        // Closed after the request arrived, with no answer: a GET goes
-        // again on a new connection; a POST with a body does not.
-        var client: Client = .init(testing.allocator, .{});
-        defer client.deinit(io);
-        const first = try get(&client, io, server.url(&buf, "/keep"));
-        testing.allocator.free(first);
-        const again = try get(&client, io, server.url(&buf, "/keep"));
-        testing.allocator.free(again);
-        try testing.expectEqual(@as(u64, 2), client.stats().connections_opened);
-        try testing.expectError(error.ConnectionFailed, client.send(io, .{ .method = .POST, .url = server.url(&buf, "/keep"), .body = .{ .bytes = "x" } }));
-        try testing.expectEqual(@as(u32, 0), client.stats().in_use);
-    }
+    }.inSim, .{});
 }
 
 test "an answer that stops coming is given up on at the activity timeout, and its connection not kept" {
-    const io = test_io.io();
-    const server = try Server.start(testing.allocator, io, Server.fixedAnswer(.{ .silent = true }));
-    defer server.stop();
-    var client: Client = .init(testing.allocator, .{ .timeouts = .{ .activity = .literal("100ms") } });
-    defer client.deinit(io);
-    var buf: [64]u8 = undefined;
-    var diagnostics: Diagnostics = .{};
-    try testing.expectError(error.TimedOut, client.send(io, .{ .url = server.url(&buf, "/"), .diagnostics = &diagnostics }));
-    try testing.expectEqual(Diagnostics.Timeout.activity, diagnostics.timeout.?);
-    try testing.expectEqual(Diagnostics.Stage.head, diagnostics.stage);
-    const stats = client.stats();
-    try testing.expectEqual(@as(u32, 0), stats.idle);
-    try testing.expectEqual(@as(u32, 0), stats.in_use);
-    try testing.expectEqual(@as(u64, 0), stats.timeouts_unenforced);
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const io = test_io.io();
+            const server = try Server.start(testing.allocator, io, Server.fixedAnswer(.{ .silent = true }));
+            defer server.stop();
+            var client: Client = .init(testing.allocator, .{ .timeouts = .{ .activity = .literal("100ms") } });
+            defer client.deinit(io);
+            var buf: [64]u8 = undefined;
+            var diagnostics: Diagnostics = .{};
+            try testing.expectError(error.TimedOut, client.send(io, .{ .url = server.url(&buf, "/"), .diagnostics = &diagnostics }));
+            try testing.expectEqual(Diagnostics.Timeout.activity, diagnostics.timeout.?);
+            try testing.expectEqual(Diagnostics.Stage.head, diagnostics.stage);
+            const stats = client.stats();
+            try testing.expectEqual(@as(u32, 0), stats.idle);
+            try testing.expectEqual(@as(u32, 0), stats.in_use);
+            try testing.expectEqual(@as(u64, 0), stats.timeouts_unenforced);
+        }
+    }.inSim, .{});
 }
 
 /// An `Io` with no task to spare.
@@ -532,72 +605,85 @@ const Serial = shakedown.Layer(u8, .{
 });
 
 test "with no task to spare, reads are bounded by the Io where it can, and counted where it cannot" {
-    const server = try Server.start(testing.allocator, test_io.io(), Server.fixedAnswer(.{ .silent = true }));
-    defer server.stop();
-    var serial: Serial = .init(test_io.io(), 0);
-    const io = serial.io();
-    var client: Client = .init(testing.allocator, .{ .timeouts = .{ .activity = .literal("100ms") } });
-    defer client.deinit(io);
-    var buf: [64]u8 = undefined;
-    if (builtin.target.os.tag == .windows) {
-        // Zig 0.17's Threaded refuses a timed socket read on Windows: the
-        // request would wait for ever, so it is not sent; the refusal is
-        // proved by the transport's own test.
-        return error.SkipZigTest;
-    }
-    try testing.expectError(error.TimedOut, client.send(io, .{ .url = server.url(&buf, "/") }));
-    try testing.expectEqual(@as(u64, 0), client.stats().timeouts_unenforced);
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const server = try Server.start(testing.allocator, test_io.io(), Server.fixedAnswer(.{ .silent = true }));
+            defer server.stop();
+            var serial: Serial = .init(test_io.io(), 0);
+            var seamed: test_io.Seamed = .{};
+            const io = seamed.over(serial.io());
+            var client: Client = .init(testing.allocator, .{ .timeouts = .{ .activity = .literal("100ms") } });
+            defer client.deinit(io);
+            var buf: [64]u8 = undefined;
+            if (builtin.target.os.tag == .windows) {
+                // Zig 0.17's Threaded refuses a timed socket read on Windows: the
+                // request would wait for ever, so it is not sent; the refusal is
+                // proved by the transport's own test.
+                return error.SkipZigTest;
+            }
+            try testing.expectError(error.TimedOut, client.send(io, .{ .url = server.url(&buf, "/") }));
+            try testing.expectEqual(@as(u64, 0), client.stats().timeouts_unenforced);
+        }
+    }.inSim, .{});
 }
 
 test "tasks sending at once through one client share the connections it keeps" {
-    const io = test_io.io();
-    const server = try Server.start(testing.allocator, io, Server.fixed(ok_answer));
-    defer server.stop();
-    var client: Client = .init(testing.allocator, .{ .pool = .{ .max_idle_per_route = 4 }, .timeouts = .{ .connect = .literal("10s"), .activity = .literal("10s") } });
-    defer client.deinit(io);
-    var buf: [64]u8 = undefined;
-    const url = server.url(&buf, "/");
-    const Task = struct {
-        fn run(c: *Client, u: []const u8, out: *anyerror!void) void {
-            out.* = each(c, u);
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const io = test_io.io();
+            const server = try Server.start(testing.allocator, io, Server.fixed(ok_answer));
+            defer server.stop();
+            var client: Client = .init(testing.allocator, .{ .pool = .{ .max_idle_per_route = 4 }, .timeouts = .{ .connect = .literal("10s"), .activity = .literal("10s") } });
+            defer client.deinit(io);
+            var buf: [64]u8 = undefined;
+            const url = server.url(&buf, "/");
+            const Task = struct {
+                fn run(c: *Client, u: []const u8, out: *anyerror!void) void {
+                    out.* = each(c, u);
+                }
+                fn each(c: *Client, u: []const u8) !void {
+                    for (0..5) |_| {
+                        const body = try get(c, test_io.io(), u);
+                        defer testing.allocator.free(body);
+                        if (!std.mem.eql(u8, body, "ok")) return error.TestUnexpectedResult;
+                    }
+                }
+            };
+            var group: Io.Group = .init;
+            defer group.cancel(io);
+            var results: [4]anyerror!void = undefined;
+            for (&results) |*out| group.concurrent(io, Task.run, .{ &client, url, out }) catch return error.SkipZigTest;
+            try group.await(io);
+            for (results) |r| try r;
+            try testing.expect(client.stats().connections_opened <= 4);
+            try testing.expect(client.stats().idle <= 4);
         }
-        fn each(c: *Client, u: []const u8) !void {
-            for (0..5) |_| {
-                const body = try get(c, test_io.io(), u);
-                defer testing.allocator.free(body);
-                if (!std.mem.eql(u8, body, "ok")) return error.TestUnexpectedResult;
-            }
-        }
-    };
-    var group: Io.Group = .init;
-    defer group.cancel(io);
-    var results: [4]anyerror!void = undefined;
-    for (&results) |*out| group.concurrent(io, Task.run, .{ &client, url, out }) catch return error.SkipZigTest;
-    try group.await(io);
-    for (results) |r| try r;
-    try testing.expect(client.stats().connections_opened <= 4);
-    try testing.expect(client.stats().idle <= 4);
+    }.inSim, .{});
 }
 
 test "a request on a warm client allocates nothing" {
-    const io = test_io.io();
-    const server = try Server.start(testing.allocator, io, Server.fixed(ok_answer));
-    defer server.stop();
-    var counting: shakedown.alloc.Counting = .init(testing.allocator);
-    var client: Client = .init(counting.allocator(), .{ .timeouts = .{ .activity = .literal("30s") } });
-    defer client.deinit(io);
-    var buf: [64]u8 = undefined;
-    const url = server.url(&buf, "/");
-    var body: [8]u8 = undefined;
-    for (0..53) |i| {
-        if (i == 3) counting = .{ .child = counting.child, .live_bytes = counting.live_bytes };
-        var response = try client.send(io, .{ .url = url });
-        defer response.deinit(io);
-        const n = try response.reader(io).readSliceShort(&body);
-        try testing.expectEqualStrings("ok", body[0..n]);
-    }
-    try testing.expectEqual(@as(u64, 0), counting.allocations);
-    try testing.expectEqual(@as(u64, 0), counting.frees);
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const io = test_io.io();
+            const server = try Server.start(testing.allocator, io, Server.fixed(ok_answer));
+            defer server.stop();
+            var counting: shakedown.alloc.Counting = .init(testing.allocator);
+            var client: Client = .init(counting.allocator(), .{ .timeouts = .{ .activity = .literal("30s") } });
+            defer client.deinit(io);
+            var buf: [64]u8 = undefined;
+            const url = server.url(&buf, "/");
+            var body: [8]u8 = undefined;
+            for (0..53) |i| {
+                if (i == 3) counting = .{ .child = counting.child, .live_bytes = counting.live_bytes };
+                var response = try client.send(io, .{ .url = url });
+                defer response.deinit(io);
+                const n = try response.reader(io).readSliceShort(&body);
+                try testing.expectEqualStrings("ok", body[0..n]);
+            }
+            try testing.expectEqual(@as(u64, 0), counting.allocations);
+            try testing.expectEqual(@as(u64, 0), counting.frees);
+        }
+    }.inSim, .{});
 }
 
 /// Counts the socket operations an `Io` is asked for.
@@ -626,6 +712,7 @@ const Counted = struct {
 };
 
 test "a small exchange on a kept connection is one write and one read, and a look at the socket that waits for nothing" {
+    // The system's peek, past the `Io`: on the system's sockets, in the conformance suite.
     const server = try Server.start(testing.allocator, test_io.io(), Server.fixed(ok_answer));
     defer server.stop();
     var counted: Counted.L = .init(test_io.io(), .{});
@@ -649,145 +736,165 @@ test "a small exchange on a kept connection is one write and one read, and a loo
 }
 
 test "a request through an HTTP proxy is sent whole, and the proxy's Digest challenge answered" {
-    const gpa = testing.allocator;
-    const io = test_io.io();
-    const server = try Server.start(gpa, io, Server.fixed(ok_answer));
-    defer server.stop();
-    const proxy = try TestProxy.start(gpa, io, .{ .credential = "user:secret", .scheme = .digest });
-    defer proxy.stop();
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    defer arena.deinit();
-    var proxy_url: [64]u8 = undefined;
-    var client: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&proxy_url, "http://user:secret@127.0.0.1:{d}", .{proxy.port}), .lowercase) } });
-    defer client.deinit(io);
-    var buf: [64]u8 = undefined;
-    const body = try get(&client, io, server.url(&buf, "/repo.git/info/refs"));
-    defer gpa.free(body);
-    try testing.expectEqualStrings("ok", body);
-    const log = try proxy.lines(gpa);
-    defer gpa.free(log);
-    var want_buf: [256]u8 = undefined;
-    const want = try std.mem.print(&want_buf, "GET http://127.0.0.1:{d}/repo.git/info/refs HTTP/1.1 [none]\nGET http://127.0.0.1:{d}/repo.git/info/refs HTTP/1.1 [Digest]\n", .{ server.port, server.port });
-    try testing.expectEqualStrings(want, log);
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const io = test_io.io();
+            const server = try Server.start(gpa, io, Server.fixed(ok_answer));
+            defer server.stop();
+            const proxy = try TestProxy.start(gpa, io, .{ .credential = "user:secret", .scheme = .digest });
+            defer proxy.stop();
+            var arena: std.heap.ArenaAllocator = .init(gpa);
+            defer arena.deinit();
+            var proxy_url: [64]u8 = undefined;
+            var client: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&proxy_url, "http://user:secret@127.0.0.1:{d}", .{proxy.port}), .lowercase) } });
+            defer client.deinit(io);
+            var buf: [64]u8 = undefined;
+            const body = try get(&client, io, server.url(&buf, "/repo.git/info/refs"));
+            defer gpa.free(body);
+            try testing.expectEqualStrings("ok", body);
+            const log = try proxy.lines(gpa);
+            defer gpa.free(log);
+            var want_buf: [256]u8 = undefined;
+            const want = try std.mem.print(&want_buf, "GET http://127.0.0.1:{d}/repo.git/info/refs HTTP/1.1 [none]\nGET http://127.0.0.1:{d}/repo.git/info/refs HTTP/1.1 [Digest]\n", .{ server.port, server.port });
+            try testing.expectEqualStrings(want, log);
+        }
+    }.inSim, .{});
 }
 
 test "a proxy is refused by name: schemes not spoken, a refusal, credentials refused" {
-    const gpa = testing.allocator;
-    const io = test_io.io();
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    defer arena.deinit();
-    var url_buf: [96]u8 = undefined;
-    {
-        const proxy = try TestProxy.start(gpa, io, .{ .credential = "a:b", .challenge = "Negotiate, NTLM" });
-        defer proxy.stop();
-        var client: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "http://a:b@127.0.0.1:{d}", .{proxy.port}), .lowercase) } });
-        defer client.deinit(io);
-        var diagnostics: Diagnostics = .{};
-        try testing.expectError(error.ProxyAuthMethodUnsupported, client.send(io, .{ .url = "https://git.test/", .diagnostics = &diagnostics }));
-        try testing.expectEqualStrings("Negotiate, NTLM", diagnostics.proxy_offered.slice());
-        try testing.expectEqual(@as(?u16, 407), diagnostics.proxy_status);
-        diagnostics = .{};
-        try testing.expectError(error.ProxyAuthMethodUnsupported, client.send(io, .{ .url = "http://git.test/", .diagnostics = &diagnostics }));
-        try testing.expectEqualStrings("Negotiate, NTLM", diagnostics.proxy_offered.slice());
-        try testing.expectEqual(@as(u32, 0), client.stats().in_use);
-    }
-    {
-        const proxy = try TestProxy.start(gpa, io, .{ .refuse = 403 });
-        defer proxy.stop();
-        var client: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "127.0.0.1:{d}", .{proxy.port}), .lowercase) } });
-        defer client.deinit(io);
-        var diagnostics: Diagnostics = .{};
-        try testing.expectError(error.ProxyRefused, client.send(io, .{ .url = "https://git.test/", .diagnostics = &diagnostics }));
-        try testing.expectEqual(@as(?u16, 403), diagnostics.proxy_status);
-        try testing.expectEqual(Diagnostics.Stage.tunnel, diagnostics.stage);
-    }
-    {
-        const proxy = try TestProxy.start(gpa, io, .{ .kind = .socks, .credential = "user:right" });
-        defer proxy.stop();
-        var client: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "socks5h://user:wrong@127.0.0.1:{d}", .{proxy.port}), .lowercase) } });
-        defer client.deinit(io);
-        try testing.expectError(error.ProxyAuthenticationRequired, client.send(io, .{ .url = "http://git.test/" }));
-    }
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const io = test_io.io();
+            var arena: std.heap.ArenaAllocator = .init(gpa);
+            defer arena.deinit();
+            var url_buf: [96]u8 = undefined;
+            {
+                const proxy = try TestProxy.start(gpa, io, .{ .credential = "a:b", .challenge = "Negotiate, NTLM" });
+                defer proxy.stop();
+                var client: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "http://a:b@127.0.0.1:{d}", .{proxy.port}), .lowercase) } });
+                defer client.deinit(io);
+                var diagnostics: Diagnostics = .{};
+                try testing.expectError(error.ProxyAuthMethodUnsupported, client.send(io, .{ .url = "https://git.test/", .diagnostics = &diagnostics }));
+                try testing.expectEqualStrings("Negotiate, NTLM", diagnostics.proxy_offered.slice());
+                try testing.expectEqual(@as(?u16, 407), diagnostics.proxy_status);
+                diagnostics = .{};
+                try testing.expectError(error.ProxyAuthMethodUnsupported, client.send(io, .{ .url = "http://git.test/", .diagnostics = &diagnostics }));
+                try testing.expectEqualStrings("Negotiate, NTLM", diagnostics.proxy_offered.slice());
+                try testing.expectEqual(@as(u32, 0), client.stats().in_use);
+            }
+            {
+                const proxy = try TestProxy.start(gpa, io, .{ .refuse = 403 });
+                defer proxy.stop();
+                var client: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "127.0.0.1:{d}", .{proxy.port}), .lowercase) } });
+                defer client.deinit(io);
+                var diagnostics: Diagnostics = .{};
+                try testing.expectError(error.ProxyRefused, client.send(io, .{ .url = "https://git.test/", .diagnostics = &diagnostics }));
+                try testing.expectEqual(@as(?u16, 403), diagnostics.proxy_status);
+                try testing.expectEqual(Diagnostics.Stage.tunnel, diagnostics.stage);
+            }
+            {
+                const proxy = try TestProxy.start(gpa, io, .{ .kind = .socks, .credential = "user:right" });
+                defer proxy.stop();
+                var client: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "socks5h://user:wrong@127.0.0.1:{d}", .{proxy.port}), .lowercase) } });
+                defer client.deinit(io);
+                try testing.expectError(error.ProxyAuthenticationRequired, client.send(io, .{ .url = "http://git.test/" }));
+            }
+        }
+    }.inSim, .{});
 }
 
 test "SOCKS 4, 4a, 5 and 5h reach the server, looking the name up where each says" {
-    const gpa = testing.allocator;
-    const io = test_io.io();
-    const server = try Server.start(gpa, io, Server.fixed(ok_answer));
-    defer server.stop();
-    const proxy = try TestProxy.start(gpa, io, .{ .kind = .socks });
-    defer proxy.stop();
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    defer arena.deinit();
-    for ([_][]const u8{ "socks4", "socks4a", "socks5", "socks5h" }) |scheme| {
-        var url_buf: [96]u8 = undefined;
-        var client: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "{s}://127.0.0.1:{d}", .{ scheme, proxy.port }), .lowercase) } });
-        defer client.deinit(io);
-        var target_buf: [64]u8 = undefined;
-        const body = get(&client, io, try std.mem.print(&target_buf, "http://localhost:{d}/", .{server.port})) catch |err| {
-            if (err == error.ConcurrencyUnavailable) return error.SkipZigTest;
-            return err;
-        };
-        defer gpa.free(body);
-        try testing.expectEqualStrings("ok", body);
-    }
-    const log = try proxy.lines(gpa);
-    defer gpa.free(log);
-    // SOCKS4 sends an IPv4 address; 4a and 5h send the name; 5 sends
-    // the name's first IPv6 address, else its first.
-    var lines = std.mem.splitScalar(u8, log, '\n');
-    try testing.expect(std.mem.startsWith(u8, lines.next().?, "SOCKS 4 127.0.0.1:"));
-    try testing.expect(std.mem.startsWith(u8, lines.next().?, "SOCKS 4 localhost:"));
-    const five = lines.next().?;
-    try testing.expect(std.mem.startsWith(u8, five, "SOCKS 5 127.0.0.1:") or std.mem.startsWith(u8, five, "SOCKS 5 [::1]:"));
-    try testing.expect(std.mem.startsWith(u8, lines.next().?, "SOCKS 5 localhost:"));
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const io = test_io.io();
+            const server = try Server.start(gpa, io, Server.fixed(ok_answer));
+            defer server.stop();
+            const proxy = try TestProxy.start(gpa, io, .{ .kind = .socks });
+            defer proxy.stop();
+            var arena: std.heap.ArenaAllocator = .init(gpa);
+            defer arena.deinit();
+            for ([_][]const u8{ "socks4", "socks4a", "socks5", "socks5h" }) |scheme| {
+                var url_buf: [96]u8 = undefined;
+                var client: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "{s}://127.0.0.1:{d}", .{ scheme, proxy.port }), .lowercase) } });
+                defer client.deinit(io);
+                var target_buf: [64]u8 = undefined;
+                const body = get(&client, io, try std.mem.print(&target_buf, "http://localhost:{d}/", .{server.port})) catch |err| {
+                    if (err == error.ConcurrencyUnavailable) return error.SkipZigTest;
+                    return err;
+                };
+                defer gpa.free(body);
+                try testing.expectEqualStrings("ok", body);
+            }
+            const log = try proxy.lines(gpa);
+            defer gpa.free(log);
+            // SOCKS4 sends an IPv4 address; 4a and 5h send the name; 5 sends
+            // the name's first IPv6 address, else its first.
+            var lines = std.mem.splitScalar(u8, log, '\n');
+            try testing.expect(std.mem.startsWith(u8, lines.next().?, "SOCKS 4 127.0.0.1:"));
+            try testing.expect(std.mem.startsWith(u8, lines.next().?, "SOCKS 4 localhost:"));
+            const five = lines.next().?;
+            try testing.expect(std.mem.startsWith(u8, five, "SOCKS 5 127.0.0.1:") or std.mem.startsWith(u8, five, "SOCKS 5 [::1]:"));
+            try testing.expect(std.mem.startsWith(u8, lines.next().?, "SOCKS 5 localhost:"));
+        }
+    }.inSim, .{});
 }
 
 test "a SOCKS5 refusal is named by its reply code, which the diagnostics keep" {
-    const gpa = testing.allocator;
-    const io = test_io.io();
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    defer arena.deinit();
-    // RFC 1928's codes, 1 to 8: a general failure, not allowed, network and
-    // host unreachable, connection refused, TTL expired, command and
-    // address type not supported.
-    const errors = [_]Client.SendError{ error.ProxyRefused, error.ProxyRefused, error.ProxyHostUnreachable, error.ProxyHostUnreachable, error.ProxyRefused, error.ProxyHostUnreachable, error.ProxyRefused, error.ProxyAddressUnsupported };
-    for (errors, 1..) |expected, code| {
-        const proxy = try TestProxy.start(gpa, io, .{ .kind = .socks, .reply = @intCast(code) });
-        defer proxy.stop();
-        var url_buf: [64]u8 = undefined;
-        var client: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "socks5h://127.0.0.1:{d}", .{proxy.port}), .lowercase) } });
-        defer client.deinit(io);
-        var diagnostics: Diagnostics = .{};
-        try testing.expectError(expected, client.send(io, .{ .url = "http://git.test/", .diagnostics = &diagnostics }));
-        try testing.expectEqual(@as(?u16, @intCast(code)), diagnostics.proxy_status);
-        try testing.expectEqual(Diagnostics.Stage.tunnel, diagnostics.stage);
-        try testing.expectEqual(@as(u32, 0), client.stats().in_use);
-    }
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const io = test_io.io();
+            var arena: std.heap.ArenaAllocator = .init(gpa);
+            defer arena.deinit();
+            // RFC 1928's codes, 1 to 8: a general failure, not allowed, network and
+            // host unreachable, connection refused, TTL expired, command and
+            // address type not supported.
+            const errors = [_]Client.SendError{ error.ProxyRefused, error.ProxyRefused, error.ProxyHostUnreachable, error.ProxyHostUnreachable, error.ProxyRefused, error.ProxyHostUnreachable, error.ProxyRefused, error.ProxyAddressUnsupported };
+            for (errors, 1..) |expected, code| {
+                const proxy = try TestProxy.start(gpa, io, .{ .kind = .socks, .reply = @intCast(code) });
+                defer proxy.stop();
+                var url_buf: [64]u8 = undefined;
+                var client: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "socks5h://127.0.0.1:{d}", .{proxy.port}), .lowercase) } });
+                defer client.deinit(io);
+                var diagnostics: Diagnostics = .{};
+                try testing.expectError(expected, client.send(io, .{ .url = "http://git.test/", .diagnostics = &diagnostics }));
+                try testing.expectEqual(@as(?u16, @intCast(code)), diagnostics.proxy_status);
+                try testing.expectEqual(Diagnostics.Stage.tunnel, diagnostics.stage);
+                try testing.expectEqual(@as(u32, 0), client.stats().in_use);
+            }
+        }
+    }.inSim, .{});
 }
 
 test "a SOCKS negotiation that stalls is given up on at the connect timeout, and at the handshake timeout" {
-    const gpa = testing.allocator;
-    const io = test_io.io();
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    defer arena.deinit();
-    const cases = [_]struct { Timeouts, Diagnostics.Timeout }{
-        .{ .{ .connect = .literal("50ms") }, .connect },
-        .{ .{ .handshake = .literal("50ms") }, .handshake },
-    };
-    for (cases) |case| {
-        const proxy = try TestProxy.start(gpa, io, .{ .kind = .socks, .stall = true });
-        defer proxy.stop();
-        var url_buf: [64]u8 = undefined;
-        var client: Client = .init(gpa, .{
-            .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "socks5h://127.0.0.1:{d}", .{proxy.port}), .lowercase) },
-            .timeouts = case[0],
-        });
-        defer client.deinit(io);
-        var diagnostics: Diagnostics = .{};
-        try testing.expectError(error.TimedOut, client.send(io, .{ .url = "http://git.test/", .diagnostics = &diagnostics }));
-        try testing.expectEqual(@as(?Diagnostics.Timeout, case[1]), diagnostics.timeout);
-    }
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const io = test_io.io();
+            var arena: std.heap.ArenaAllocator = .init(gpa);
+            defer arena.deinit();
+            const cases = [_]struct { Timeouts, Diagnostics.Timeout }{
+                .{ .{ .connect = .literal("50ms") }, .connect },
+                .{ .{ .handshake = .literal("50ms") }, .handshake },
+            };
+            for (cases) |case| {
+                const proxy = try TestProxy.start(gpa, io, .{ .kind = .socks, .stall = true });
+                defer proxy.stop();
+                var url_buf: [64]u8 = undefined;
+                var client: Client = .init(gpa, .{
+                    .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&url_buf, "socks5h://127.0.0.1:{d}", .{proxy.port}), .lowercase) },
+                    .timeouts = case[0],
+                });
+                defer client.deinit(io);
+                var diagnostics: Diagnostics = .{};
+                try testing.expectError(error.TimedOut, client.send(io, .{ .url = "http://git.test/", .diagnostics = &diagnostics }));
+                try testing.expectEqual(@as(?Diagnostics.Timeout, case[1]), diagnostics.timeout);
+            }
+        }
+    }.inSim, .{});
 }
 
 /// One HTTP/2 client's memory, for a test's raw peer.
@@ -828,62 +935,66 @@ const Answered = struct {
 };
 
 test "an HTTP/2 response is read while another request's body waits on a server that reads nothing" {
-    const io = test_io.io();
-    const h2 = RawH2.h2;
-    Answered.done.store(false, .release);
-    var listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
-    defer listener.deinit(io);
-    var client: Client = .init(testing.allocator, .{ .http2 = .prior_knowledge });
-    defer client.deinit(io);
-    var url_one: [64]u8 = undefined;
-    var url_up: [64]u8 = undefined;
-    const one = try std.mem.print(&url_one, "http://127.0.0.1:{d}/one", .{listener.socket.address.getPort()});
-    const up = try std.mem.print(&url_up, "http://127.0.0.1:{d}/up", .{listener.socket.address.getPort()});
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const io = test_io.io();
+            const h2 = RawH2.h2;
+            Answered.done.store(false, .release);
+            var listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
+            defer listener.deinit(io);
+            var client: Client = .init(testing.allocator, .{ .http2 = .prior_knowledge });
+            defer client.deinit(io);
+            var url_one: [64]u8 = undefined;
+            var url_up: [64]u8 = undefined;
+            const one = try std.mem.print(&url_one, "http://127.0.0.1:{d}/one", .{listener.socket.address.getPort()});
+            const up = try std.mem.print(&url_up, "http://127.0.0.1:{d}/up", .{listener.socket.address.getPort()});
 
-    // The first request opens the connection and waits for its answer.
-    var getting = io.concurrent(Answered.get, .{ &client, one }) catch return error.SkipZigTest;
-    defer getting.cancel(io);
-    const peer = try listener.accept(io);
-    defer peer.close(io);
+            // The first request opens the connection and waits for its answer.
+            var getting = io.concurrent(Answered.get, .{ &client, one }) catch return error.SkipZigTest;
+            defer getting.cancel(io);
+            const peer = try listener.accept(io);
+            defer peer.close(io);
 
-    // A server with every window open as wide as it goes: it reads up to
-    // the first request's head, then nothing more.
-    var mem: RawH2 = .{};
-    var proto: h2.Connection = .init(.server, .{ .initial_window_size = std.math.maxInt(u31) }, .{ .connection_window = h2.Connection.Limits.max_window }, mem.memory());
-    var rbuf: [64 << 10]u8 = undefined;
-    var pr = peer.reader(io, &rbuf);
-    var wbuf: [4096]u8 = undefined;
-    var pw = peer.writer(io, &wbuf);
-    const r = &pr.interface;
-    const w = &pw.interface;
-    try testing.expect(proto.checkPreface(try r.peek(h2.preface.len)));
-    r.toss(h2.preface.len);
-    try proto.start(w);
-    try w.flush();
-    while (true) {
-        const head = h2.Head.parse((try r.peek(h2.head_len))[0..h2.head_len]);
-        const whole = h2.head_len + @as(usize, head.len);
-        const event = try proto.receive(w, head, (try r.peek(whole))[h2.head_len..]);
-        r.toss(whole);
-        if (event) |e| if (e == .headers) break;
-    }
-    try w.flush();
+            // A server with every window open as wide as it goes: it reads up to
+            // the first request's head, then nothing more.
+            var mem: RawH2 = .{};
+            var proto: h2.Connection = .init(.server, .{ .initial_window_size = std.math.maxInt(u31) }, .{ .connection_window = h2.Connection.Limits.max_window }, mem.memory());
+            var rbuf: [64 << 10]u8 = undefined;
+            var pr = peer.reader(io, &rbuf);
+            var wbuf: [4096]u8 = undefined;
+            var pw = peer.writer(io, &wbuf);
+            const r = &pr.interface;
+            const w = &pw.interface;
+            try testing.expect(proto.checkPreface(try r.peek(h2.preface.len)));
+            r.toss(h2.preface.len);
+            try proto.start(w);
+            try w.flush();
+            while (true) {
+                const head = h2.Head.parse((try r.peek(h2.head_len))[0..h2.head_len]);
+                const whole = h2.head_len + @as(usize, head.len);
+                const event = try proto.receive(w, head, (try r.peek(whole))[h2.head_len..]);
+                r.toss(whole);
+                if (event) |e| if (e == .headers) break;
+            }
+            try w.flush();
 
-    // The second request's body is far more than the socket buffers hold:
-    // its writes wait from here on.
-    const body = try testing.allocator.alloc(u8, 64 << 20);
-    defer testing.allocator.free(body);
-    @memset(body, 'x');
-    var uploading = io.concurrent(Answered.upload, .{ &client, up, body }) catch return error.SkipZigTest;
-    defer uploading.cancel(io);
-    try io.sleep(.fromMilliseconds(300), .awake);
+            // The second request's body is far more than the socket buffers hold:
+            // its writes wait from here on.
+            const body = try testing.allocator.alloc(u8, 64 << 20);
+            defer testing.allocator.free(body);
+            @memset(body, 'x');
+            var uploading = io.concurrent(Answered.upload, .{ &client, up, body }) catch return error.SkipZigTest;
+            defer uploading.cancel(io);
+            try io.sleep(.fromMilliseconds(300), .awake);
 
-    // The first request's answer comes, and is read all the same.
-    const status = [_]RawH2.hpack.Field{.{ .name = ":status", .value = "200" }};
-    var scratch: [256]u8 = undefined;
-    try proto.writeHeaders(w, 1, &status, true, &scratch);
-    try w.flush();
-    var waited: u32 = 0;
-    while (!Answered.done.load(.acquire) and waited < 1000) : (waited += 1) try io.sleep(.fromMilliseconds(10), .awake);
-    try testing.expect(Answered.done.load(.acquire));
+            // The first request's answer comes, and is read all the same.
+            const status = [_]RawH2.hpack.Field{.{ .name = ":status", .value = "200" }};
+            var scratch: [256]u8 = undefined;
+            try proto.writeHeaders(w, 1, &status, true, &scratch);
+            try w.flush();
+            var waited: u32 = 0;
+            while (!Answered.done.load(.acquire) and waited < 1000) : (waited += 1) try io.sleep(.fromMilliseconds(10), .awake);
+            try testing.expect(Answered.done.load(.acquire));
+        }
+    }.inSim, .{});
 }

@@ -1,4 +1,5 @@
-//! WebSocket between uplink's own client and server, over loopback: the
+//! WebSocket between uplink's own client and server, over loopback on
+//! shakedown's simulated network (`test_io.simulated`): the
 //! handshake, messages of every kind and size whole and in pieces, control
 //! frames, compression both ways, and the protocol's refusals.
 
@@ -70,42 +71,46 @@ fn open(running: *Running, client: *Client, opened: *ws.Opened, options: ws.Conn
 }
 
 test "messages of every kind and size come back whole, compressed or not" {
-    const gpa = testing.allocator;
-    const io = test_io.io();
-    const running = try Running.start(gpa, .of(echo));
-    defer running.stop();
-    var client: Client = .init(gpa, .{});
-    defer client.deinit(io);
-    for ([_]?ws.Compression{ null, .{}, .{ .no_context_takeover = true, .window_bits = 10 } }) |compression| {
-        var opened: ws.Opened = undefined;
-        try open(running, &client, &opened, .{ .protocols = &.{ "echo", "chat" }, .compression = compression });
-        defer opened.deinit(io);
-        try testing.expectEqualStrings("chat", opened.protocol.?);
-        try testing.expectEqual(compression != null, opened.conn.deflate != null);
-        const big = try gpa.alloc(u8, 300_000);
-        defer gpa.free(big);
-        for (big, 0..) |*b, i| b.* = @truncate(i % 251);
-        for ([_]struct { ws.Conn.Kind, []const u8 }{ .{ .text, "hello, κόσμε" }, .{ .binary, big }, .{ .text, "" }, .{ .binary, big[0..126] }, .{ .binary, big[0..65536] } }) |case| {
-            try opened.conn.send(io, case[0], case[1]);
-            const kind, const back = (try opened.conn.readMessage(io, gpa, .limited(1 << 24))).?;
-            defer gpa.free(back);
-            try testing.expectEqual(case[0], kind);
-            try testing.expectEqualSlices(u8, case[1], back);
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const io = test_io.io();
+            const running = try Running.start(gpa, .of(echo));
+            defer running.stop();
+            var client: Client = .init(gpa, .{});
+            defer client.deinit(io);
+            for ([_]?ws.Compression{ null, .{}, .{ .no_context_takeover = true, .window_bits = 10 } }) |compression| {
+                var opened: ws.Opened = undefined;
+                try open(running, &client, &opened, .{ .protocols = &.{ "echo", "chat" }, .compression = compression });
+                defer opened.deinit(io);
+                try testing.expectEqualStrings("chat", opened.protocol.?);
+                try testing.expectEqual(compression != null, opened.conn.deflate != null);
+                const big = try gpa.alloc(u8, 300_000);
+                defer gpa.free(big);
+                for (big, 0..) |*b, i| b.* = @truncate(i % 251);
+                for ([_]struct { ws.Conn.Kind, []const u8 }{ .{ .text, "hello, κόσμε" }, .{ .binary, big }, .{ .text, "" }, .{ .binary, big[0..126] }, .{ .binary, big[0..65536] } }) |case| {
+                    try opened.conn.send(io, case[0], case[1]);
+                    const kind, const back = (try opened.conn.readMessage(io, gpa, .limited(1 << 24))).?;
+                    defer gpa.free(back);
+                    try testing.expectEqual(case[0], kind);
+                    try testing.expectEqualSlices(u8, case[1], back);
+                }
+                // In pieces, a ping between them.
+                var piece_buf: [64]u8 = undefined;
+                var mw = opened.conn.writer(io, .text, &piece_buf);
+                for (0..50) |i| try mw.interface.print("piece {d}; ", .{i});
+                try opened.conn.ping(io, "between");
+                try mw.end();
+                const kind, const back = (try opened.conn.readMessage(io, gpa, .limited(1 << 24))).?;
+                defer gpa.free(back);
+                try testing.expectEqual(ws.Conn.Kind.text, kind);
+                try testing.expect(std.mem.startsWith(u8, back, "piece 0; piece 1; "));
+                try testing.expect(std.mem.endsWith(u8, back, "piece 49; "));
+                opened.conn.close(io, wire.ws.Close.normal, "done");
+                try testing.expectEqual(wire.ws.Close.normal, opened.conn.peer_close.?.code);
+            }
         }
-        // In pieces, a ping between them.
-        var piece_buf: [64]u8 = undefined;
-        var mw = opened.conn.writer(io, .text, &piece_buf);
-        for (0..50) |i| try mw.interface.print("piece {d}; ", .{i});
-        try opened.conn.ping(io, "between");
-        try mw.end();
-        const kind, const back = (try opened.conn.readMessage(io, gpa, .limited(1 << 24))).?;
-        defer gpa.free(back);
-        try testing.expectEqual(ws.Conn.Kind.text, kind);
-        try testing.expect(std.mem.startsWith(u8, back, "piece 0; piece 1; "));
-        try testing.expect(std.mem.endsWith(u8, back, "piece 49; "));
-        opened.conn.close(io, wire.ws.Close.normal, "done");
-        try testing.expectEqual(wire.ws.Close.normal, opened.conn.peer_close.?.code);
-    }
+    }.inSim, .{});
 }
 
 /// Send raw frames from the client side of a WebSocket; what the server
@@ -157,45 +162,53 @@ fn closeCode(bytes: []const u8) ?u16 {
 }
 
 test "frames RFC 6455 forbids are refused with the close code it names" {
-    const gpa = testing.allocator;
-    const running = try Running.start(gpa, .of(echo));
-    defer running.stop();
-    var buf: [256]u8 = undefined;
-    const Case = struct { []const u8, u16 };
-    var cases: [6]Case = undefined;
-    var storage: [6][256]u8 = undefined;
-    cases[0] = .{ clientFrame(&storage[0], 0x81, "ok \xc3\x28"), wire.ws.Close.invalid_payload };
-    cases[1] = .{ clientFrame(&storage[1], 0x80, "lone continuation"), wire.ws.Close.protocol_error };
-    cases[2] = .{ clientFrame(&storage[2], 0x83, "reserved opcode"), wire.ws.Close.protocol_error };
-    cases[3] = .{ clientFrame(&storage[3], 0xc1, "rsv1 with no extension"), wire.ws.Close.protocol_error };
-    cases[4] = .{ clientFrame(&storage[4], 0x09, "fragmented ping"), wire.ws.Close.protocol_error };
-    // Unmasked from a client.
-    @memcpy(buf[0..4], &[_]u8{ 0x81, 0x02, 'h', 'i' });
-    cases[5] = .{ buf[0..4], wire.ws.Close.protocol_error };
-    for (cases) |case| {
-        const got = try rawExchange(running, gpa, case[0]);
-        defer gpa.free(got);
-        try testing.expectEqual(case[1], closeCode(got).?);
-    }
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const running = try Running.start(gpa, .of(echo));
+            defer running.stop();
+            var buf: [256]u8 = undefined;
+            const Case = struct { []const u8, u16 };
+            var cases: [6]Case = undefined;
+            var storage: [6][256]u8 = undefined;
+            cases[0] = .{ clientFrame(&storage[0], 0x81, "ok \xc3\x28"), wire.ws.Close.invalid_payload };
+            cases[1] = .{ clientFrame(&storage[1], 0x80, "lone continuation"), wire.ws.Close.protocol_error };
+            cases[2] = .{ clientFrame(&storage[2], 0x83, "reserved opcode"), wire.ws.Close.protocol_error };
+            cases[3] = .{ clientFrame(&storage[3], 0xc1, "rsv1 with no extension"), wire.ws.Close.protocol_error };
+            cases[4] = .{ clientFrame(&storage[4], 0x09, "fragmented ping"), wire.ws.Close.protocol_error };
+            // Unmasked from a client.
+            @memcpy(buf[0..4], &[_]u8{ 0x81, 0x02, 'h', 'i' });
+            cases[5] = .{ buf[0..4], wire.ws.Close.protocol_error };
+            for (cases) |case| {
+                const got = try rawExchange(running, gpa, case[0]);
+                defer gpa.free(got);
+                try testing.expectEqual(case[1], closeCode(got).?);
+            }
+        }
+    }.inSim, .{});
 }
 
 test "a ping is answered with its payload, and a close with the same code" {
-    const gpa = testing.allocator;
-    const running = try Running.start(gpa, .of(echo));
-    defer running.stop();
-    var a: [256]u8 = undefined;
-    var b: [256]u8 = undefined;
-    var frames: [512]u8 = undefined;
-    const ping = clientFrame(&a, 0x89, "are you there");
-    const close = clientFrame(&b, 0x88, "\x0f\xa0bye");
-    @memcpy(frames[0..ping.len], ping);
-    @memcpy(frames[ping.len..][0..close.len], close);
-    const got = try rawExchange(running, gpa, frames[0 .. ping.len + close.len]);
-    defer gpa.free(got);
-    const h, const size = (try wire.ws.parseHeader(got)).?;
-    try testing.expectEqual(wire.ws.Opcode.pong, h.opcode);
-    try testing.expectEqualStrings("are you there", got[size..][0..@intCast(h.len)]);
-    try testing.expectEqual(@as(u16, 4000), closeCode(got).?);
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const running = try Running.start(gpa, .of(echo));
+            defer running.stop();
+            var a: [256]u8 = undefined;
+            var b: [256]u8 = undefined;
+            var frames: [512]u8 = undefined;
+            const ping = clientFrame(&a, 0x89, "are you there");
+            const close = clientFrame(&b, 0x88, "\x0f\xa0bye");
+            @memcpy(frames[0..ping.len], ping);
+            @memcpy(frames[ping.len..][0..close.len], close);
+            const got = try rawExchange(running, gpa, frames[0 .. ping.len + close.len]);
+            defer gpa.free(got);
+            const h, const size = (try wire.ws.parseHeader(got)).?;
+            try testing.expectEqual(wire.ws.Opcode.pong, h.opcode);
+            try testing.expectEqualStrings("are you there", got[size..][0..@intCast(h.len)]);
+            try testing.expectEqual(@as(u16, 4000), closeCode(got).?);
+        }
+    }.inSim, .{});
 }
 
 /// One end of an HTTP/2 connection over a raw stream, frames read into
@@ -247,77 +260,81 @@ const RawH2 = struct {
 };
 
 test "a WebSocket opens over HTTP/2 by an extended CONNECT, its frames the stream's data" {
-    const gpa = testing.allocator;
-    const running = try Running.startWith(gpa, .{ .h2c = .alongside_http1 }, .of(echo));
-    defer running.stop();
-    const c = try gpa.create(RawH2);
-    defer gpa.destroy(c);
-    c.* = .{};
-    try c.open(running.port);
-    defer c.close();
-    // The server's settings allow an extended CONNECT.
-    while (!c.conn.remote.enable_connect_protocol) _ = try c.next();
-    const id = try c.conn.open();
-    var scratch: [1024]u8 = undefined;
-    try c.conn.writeHeaders(&c.w.interface, id, &.{
-        .{ .name = ":method", .value = "CONNECT" },
-        .{ .name = ":protocol", .value = "websocket" },
-        .{ .name = ":scheme", .value = "http" },
-        .{ .name = ":path", .value = "/" },
-        .{ .name = ":authority", .value = "127.0.0.1" },
-        .{ .name = "sec-websocket-version", .value = "13" },
-        .{ .name = "sec-websocket-protocol", .value = "echo" },
-    }, false, &scratch);
-    try c.w.interface.flush();
-    const status, const chosen = while (true) {
-        const event = try c.next() orelse continue;
-        if (event != .headers) continue;
-        var status: []const u8 = "";
-        var chosen: []const u8 = "";
-        for (event.headers.fields) |f| {
-            if (std.mem.eql(u8, f.name, ":status")) status = f.value;
-            if (std.mem.eql(u8, f.name, "sec-websocket-protocol")) chosen = f.value;
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const running = try Running.startWith(gpa, .{ .h2c = .alongside_http1 }, .of(echo));
+            defer running.stop();
+            const c = try gpa.create(RawH2);
+            defer gpa.destroy(c);
+            c.* = .{};
+            try c.open(running.port);
+            defer c.close();
+            // The server's settings allow an extended CONNECT.
+            while (!c.conn.remote.enable_connect_protocol) _ = try c.next();
+            const id = try c.conn.open();
+            var scratch: [1024]u8 = undefined;
+            try c.conn.writeHeaders(&c.w.interface, id, &.{
+                .{ .name = ":method", .value = "CONNECT" },
+                .{ .name = ":protocol", .value = "websocket" },
+                .{ .name = ":scheme", .value = "http" },
+                .{ .name = ":path", .value = "/" },
+                .{ .name = ":authority", .value = "127.0.0.1" },
+                .{ .name = "sec-websocket-version", .value = "13" },
+                .{ .name = "sec-websocket-protocol", .value = "echo" },
+            }, false, &scratch);
+            try c.w.interface.flush();
+            const status, const chosen = while (true) {
+                const event = try c.next() orelse continue;
+                if (event != .headers) continue;
+                var status: []const u8 = "";
+                var chosen: []const u8 = "";
+                for (event.headers.fields) |f| {
+                    if (std.mem.eql(u8, f.name, ":status")) status = f.value;
+                    if (std.mem.eql(u8, f.name, "sec-websocket-protocol")) chosen = f.value;
+                }
+                break .{ try gpa.dupe(u8, status), try gpa.dupe(u8, chosen) };
+            };
+            defer gpa.free(status);
+            defer gpa.free(chosen);
+            try testing.expectEqualStrings("200", status);
+            try testing.expectEqualStrings("echo", chosen);
+            var frame_buf: [64]u8 = undefined;
+            _ = try c.conn.writeData(&c.w.interface, id, clientFrame(&frame_buf, 0x81, "hello over h2"), false);
+            try c.w.interface.flush();
+            var got: std.ArrayList(u8) = .empty;
+            defer got.deinit(gpa);
+            while (got.items.len < 2 + 13) {
+                const event = try c.next() orelse continue;
+                if (event == .data) {
+                    try got.appendSlice(gpa, event.data.bytes);
+                    try c.conn.giveBack(&c.w.interface, id, event.data.bytes.len);
+                }
+            }
+            const h, const size = (try wire.ws.parseHeader(got.items)).?;
+            try testing.expectEqual(wire.ws.Opcode.text, h.opcode);
+            try testing.expectEqualStrings("hello over h2", got.items[size..][0..@intCast(h.len)]);
+            // A close ends it: the server answers with its own and ends the stream.
+            var close_payload: [2]u8 = undefined;
+            std.mem.writeInt(u16, &close_payload, 1000, .big);
+            _ = try c.conn.writeData(&c.w.interface, id, clientFrame(&frame_buf, 0x88, &close_payload), true);
+            try c.w.interface.flush();
+            got.clearRetainingCapacity();
+            var ended = false;
+            while (!ended) {
+                const event = try c.next() orelse continue;
+                switch (event) {
+                    .data => |d| {
+                        try got.appendSlice(gpa, d.bytes);
+                        ended = d.end_stream;
+                    },
+                    .reset => ended = true,
+                    else => {},
+                }
+            }
+            try testing.expectEqual(@as(?u16, 1000), closeCode(got.items));
         }
-        break .{ try gpa.dupe(u8, status), try gpa.dupe(u8, chosen) };
-    };
-    defer gpa.free(status);
-    defer gpa.free(chosen);
-    try testing.expectEqualStrings("200", status);
-    try testing.expectEqualStrings("echo", chosen);
-    var frame_buf: [64]u8 = undefined;
-    _ = try c.conn.writeData(&c.w.interface, id, clientFrame(&frame_buf, 0x81, "hello over h2"), false);
-    try c.w.interface.flush();
-    var got: std.ArrayList(u8) = .empty;
-    defer got.deinit(gpa);
-    while (got.items.len < 2 + 13) {
-        const event = try c.next() orelse continue;
-        if (event == .data) {
-            try got.appendSlice(gpa, event.data.bytes);
-            try c.conn.giveBack(&c.w.interface, id, event.data.bytes.len);
-        }
-    }
-    const h, const size = (try wire.ws.parseHeader(got.items)).?;
-    try testing.expectEqual(wire.ws.Opcode.text, h.opcode);
-    try testing.expectEqualStrings("hello over h2", got.items[size..][0..@intCast(h.len)]);
-    // A close ends it: the server answers with its own and ends the stream.
-    var close_payload: [2]u8 = undefined;
-    std.mem.writeInt(u16, &close_payload, 1000, .big);
-    _ = try c.conn.writeData(&c.w.interface, id, clientFrame(&frame_buf, 0x88, &close_payload), true);
-    try c.w.interface.flush();
-    got.clearRetainingCapacity();
-    var ended = false;
-    while (!ended) {
-        const event = try c.next() orelse continue;
-        switch (event) {
-            .data => |d| {
-                try got.appendSlice(gpa, d.bytes);
-                ended = d.end_stream;
-            },
-            .reset => ended = true,
-            else => {},
-        }
-    }
-    try testing.expectEqual(@as(?u16, 1000), closeCode(got.items));
+    }.inSim, .{});
 }
 
 /// A transport whose stream failed: canceled, or broken.
@@ -352,51 +369,55 @@ const Failed = struct {
 };
 
 test "the client opens a WebSocket over HTTP/2 when the server takes an extended CONNECT, and by Upgrade when it does not" {
-    const gpa = testing.allocator;
-    const io = test_io.io();
-    const running = try Running.startWith(gpa, .{ .h2c = .alongside_http1 }, .of(echo));
-    defer running.stop();
-    var client: Client = .init(gpa, .{ .http2 = .prior_knowledge });
-    defer client.deinit(io);
-    var url_buf: [64]u8 = undefined;
-    const url = running.url(&url_buf, "/");
-    // Two at once, each a stream of the one connection.
-    var first: ws.Opened = undefined;
-    try ws.connect(&first, &client, gpa, io, url, .{ .protocols = &.{"echo"} });
-    defer first.deinit(io);
-    var second: ws.Opened = undefined;
-    try ws.connect(&second, &client, gpa, io, url, .{ .compression = null });
-    defer second.deinit(io);
-    try testing.expect(first.stream.carrier == .stream);
-    try testing.expect(second.stream.carrier == .stream);
-    try testing.expectEqual(first.stream.carrier.stream.h2, second.stream.carrier.stream.h2);
-    try testing.expectEqualStrings("echo", first.protocol.?);
-    const big = try gpa.alloc(u8, 300_000);
-    defer gpa.free(big);
-    for (big, 0..) |*b, i| b.* = @truncate(i % 251);
-    for ([_]*ws.Opened{ &first, &second }) |o| {
-        for ([_][]const u8{ "hello over h2", big }) |payload| {
-            try o.conn.send(io, .binary, payload);
-            _, const back = (try o.conn.readMessage(io, gpa, .limited(1 << 24))).?;
-            defer gpa.free(back);
-            try testing.expectEqualSlices(u8, payload, back);
-        }
-    }
-    first.conn.close(io, wire.ws.Close.normal, "done");
-    try testing.expectEqual(wire.ws.Close.normal, first.conn.peer_close.?.code);
-    try testing.expectEqual(@as(u64, 1), client.stats().connections_opened);
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const io = test_io.io();
+            const running = try Running.startWith(gpa, .{ .h2c = .alongside_http1 }, .of(echo));
+            defer running.stop();
+            var client: Client = .init(gpa, .{ .http2 = .prior_knowledge });
+            defer client.deinit(io);
+            var url_buf: [64]u8 = undefined;
+            const url = running.url(&url_buf, "/");
+            // Two at once, each a stream of the one connection.
+            var first: ws.Opened = undefined;
+            try ws.connect(&first, &client, gpa, io, url, .{ .protocols = &.{"echo"} });
+            defer first.deinit(io);
+            var second: ws.Opened = undefined;
+            try ws.connect(&second, &client, gpa, io, url, .{ .compression = null });
+            defer second.deinit(io);
+            try testing.expect(first.stream.carrier == .stream);
+            try testing.expect(second.stream.carrier == .stream);
+            try testing.expectEqual(first.stream.carrier.stream.h2, second.stream.carrier.stream.h2);
+            try testing.expectEqualStrings("echo", first.protocol.?);
+            const big = try gpa.alloc(u8, 300_000);
+            defer gpa.free(big);
+            for (big, 0..) |*b, i| b.* = @truncate(i % 251);
+            for ([_]*ws.Opened{ &first, &second }) |o| {
+                for ([_][]const u8{ "hello over h2", big }) |payload| {
+                    try o.conn.send(io, .binary, payload);
+                    _, const back = (try o.conn.readMessage(io, gpa, .limited(1 << 24))).?;
+                    defer gpa.free(back);
+                    try testing.expectEqualSlices(u8, payload, back);
+                }
+            }
+            first.conn.close(io, wire.ws.Close.normal, "done");
+            try testing.expectEqual(wire.ws.Close.normal, first.conn.peer_close.?.code);
+            try testing.expectEqual(@as(u64, 1), client.stats().connections_opened);
 
-    // A client in HTTP/1.1 asks by Upgrade, over a connection of its own.
-    var plain: Client = .init(gpa, .{});
-    defer plain.deinit(io);
-    var upgraded: ws.Opened = undefined;
-    try ws.connect(&upgraded, &plain, gpa, io, url, .{});
-    defer upgraded.deinit(io);
-    try testing.expect(upgraded.stream.carrier == .conn);
-    try upgraded.conn.send(io, .text, "hello over 1.1");
-    _, const back = (try upgraded.conn.readMessage(io, gpa, .limited(1 << 10))).?;
-    defer gpa.free(back);
-    try testing.expectEqualStrings("hello over 1.1", back);
+            // A client in HTTP/1.1 asks by Upgrade, over a connection of its own.
+            var plain: Client = .init(gpa, .{});
+            defer plain.deinit(io);
+            var upgraded: ws.Opened = undefined;
+            try ws.connect(&upgraded, &plain, gpa, io, url, .{});
+            defer upgraded.deinit(io);
+            try testing.expect(upgraded.stream.carrier == .conn);
+            try upgraded.conn.send(io, .text, "hello over 1.1");
+            _, const back = (try upgraded.conn.readMessage(io, gpa, .limited(1 << 10))).?;
+            defer gpa.free(back);
+            try testing.expectEqualStrings("hello over 1.1", back);
+        }
+    }.inSim, .{});
 }
 
 test "a stream that failed for a cancelation says so on reads and writes, and one that broke does not" {

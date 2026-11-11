@@ -8,8 +8,13 @@
 
 const std = @import("std");
 const reactor = @import("reactor");
+const shakedown = @import("shakedown");
+const reactor_testing = @import("reactor.testing");
 const config = @import("test_io");
 const Io = std.Io;
+
+/// The node's `Io` while a test body runs under `simulated`.
+var simulating: ?Io = null;
 
 var starting: std.atomic.Mutex = .unlocked;
 var started: std.atomic.Value(bool) = .init(false);
@@ -17,6 +22,7 @@ var runtime: reactor.Runtime = undefined;
 
 /// The `Io` for the test running now.
 pub fn io() Io {
+    if (simulating) |node| return node;
     if (comptime !evented) return std.testing.io;
     if (!started.load(.acquire)) start();
     return runtime.io();
@@ -52,4 +58,58 @@ fn start() void {
     }) catch |err| std.debug.panic("the evented test runtime on {t}: {t}", .{ backend.?, err });
     runtime.start() catch |err| std.debug.panic("the evented test runtime on {t}: {t}", .{ backend.?, err });
     started.store(true, .release);
+}
+
+/// A test's own `Io` layer over `io()` (a `FaultIo`, a counting one) with the
+/// node's seam in front of it again while simulating: reactor finds the seam
+/// only in the outermost layer. The layer itself when not simulating.
+pub const Seamed = struct {
+    seam: reactor_testing.Seam = undefined,
+
+    pub fn over(s: *Seamed, layer: Io) Io {
+        if (simulating == null) return layer;
+        s.seam.init(layer);
+        return s.seam.io();
+    }
+};
+
+/// Runs `body` with `args` as the root task of a simulation on one node of
+/// shakedown's simulated network, `io()` that node's `Io` through reactor's
+/// seam (reactor's raw socket calls ask the test). A loopback address is the
+/// node itself, so a test's server on 127.0.0.1 and its client meet as on a
+/// machine, in virtual time, with nothing of the system's network. A body
+/// that fails fails the test; one left waiting with nothing to wake it is a
+/// deadlock, reported with what each task waits on. Run in the `Io.Threaded`
+/// binary alone: a simulation brings its own `Io`, so the evented binaries
+/// would only run it again (the conformance tests that stay on the system's
+/// sockets are theirs).
+pub fn simulated(comptime body: anytype, args: anytype) !void {
+    if (evented) return error.SkipZigTest;
+    // A thread's stack, as the system gives a test's: a Debug build's TLS
+    // key share and Brotli decoder state outgrow a task's default 256 KiB.
+    const sim = try shakedown.Sim.init(std.testing.allocator, .{ .watchdog = null, .seed = 1, .stack_size = .fromRaw(8 << 20) });
+    defer sim.deinit();
+    const node = try sim.node("test", .{});
+    var seam: reactor_testing.Seam = undefined;
+    seam.init(node.io());
+    simulating = seam.io();
+    defer simulating = null;
+    const outcome = sim.run(body, args);
+    switch (outcome) {
+        .finished => {},
+        .failed => |err| return err,
+        .deadlock => |reports| {
+            std.debug.print("deadlock, {d} tasks waiting\n", .{reports.len});
+            for (reports) |report| std.debug.print("  node {d}: {f}", .{ report.node.raw(), report });
+            return error.TestUnexpectedResult;
+        },
+        .stuck, .double_close => |report| {
+            std.debug.print("{t}: node {d}: {f}", .{ outcome, report.node.raw(), report });
+            return error.TestUnexpectedResult;
+        },
+        else => {
+            std.debug.print("{t}\n", .{outcome});
+            return error.TestUnexpectedResult;
+        },
+    }
 }
