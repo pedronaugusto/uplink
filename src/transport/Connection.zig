@@ -660,6 +660,9 @@ pub fn readError(conn: *Connection) IoError {
             }
             return error.ClientCertificateRejected;
         };
+        // The socket broke beneath the session, no alert read: the failure
+        // the session kept is the transport's, not TLS's.
+        if (conn.failed() == .broken and seen.alert_received == null) break;
         if (conn.diagnostics) |d| {
             d.tls_error = err;
             d.tls_alert = seen.alert_received orelse seen.alert_sent;
