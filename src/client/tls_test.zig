@@ -13,6 +13,7 @@ const cloak = @import("cloak");
 const Diagnostics = @import("../transport/Diagnostics.zig");
 const Proxy = @import("../transport/Proxy.zig");
 const openssl = @import("../testing/openssl.zig");
+const tls = @import("../tls.zig");
 const TestProxy = @import("../testing/Proxy.zig");
 const Server = @import("../testing/Server.zig");
 const serving = struct {
@@ -561,4 +562,82 @@ test "a session's secrets go to the key log the client was given, and nowhere el
     gpa.free(page);
     try testing.expect(std.mem.find(u8, log.written(), "CLIENT_HANDSHAKE_TRAFFIC_SECRET ") != null);
     try testing.expect(std.mem.find(u8, log.written(), "CLIENT_TRAFFIC_SECRET_0 ") != null);
+}
+
+/// A TLS server for one exchange: it answers the first request's head with
+/// `answer` and then ends the connection, with close_notify first when
+/// `close_notify` says, else with the socket's bare close.
+const OneAnswer = struct {
+    listener: Io.net.Server,
+    credentials: []const cloak.tls.Credential,
+    answer: []const u8,
+    close_notify: bool,
+
+    fn serve(s: *OneAnswer, io: Io) void {
+        const gpa = testing.allocator;
+        const stream = s.listener.accept(io) catch return;
+        defer stream.close(io);
+        const n = tls.record_buffer_len;
+        const buffers = gpa.alloc(u8, 4 * n) catch return;
+        defer gpa.free(buffers);
+        var socket_in = stream.reader(io, buffers[0..n]);
+        var socket_out = stream.writer(io, buffers[n..][0..n]);
+        var session: cloak.tls.Session = undefined;
+        session.accept(gpa, io, &socket_in.interface, &socket_out.interface, buffers[2 * n ..][0..n], buffers[3 * n ..][0..n], .{ .credentials = s.credentials }) catch return;
+        defer session.deinit();
+        const in = session.reader();
+        while (std.mem.find(u8, in.buffered(), "\r\n\r\n") == null) in.fillMore() catch return;
+        const out = session.writer();
+        out.writeAll(s.answer) catch return;
+        out.flush() catch return;
+        socket_out.interface.flush() catch return;
+        if (s.close_notify) session.finish() catch return;
+    }
+};
+
+test "a body to the connection's end over TLS is whole only when close_notify ends it" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const pki = try openssl.Pki.make(gpa, io);
+    defer pki.destroy();
+    const cert = try pki.read(io, "server-ec.pem");
+    defer gpa.free(cert);
+    const key_pem = try pki.read(io, "server-ec.key");
+    defer gpa.free(key_pem);
+    const key = try cloak.PrivateKey.parse(gpa, key_pem, .{});
+    defer key.deinit();
+    var identity = try cloak.Identity.initPem(gpa, cert, key, .{});
+    defer identity.deinit();
+    var builder: cloak.Trust = .init(gpa);
+    defer builder.deinit();
+    try builder.addPem(cert, .{});
+    var trust = try builder.freeze();
+    defer trust.deinit();
+    const credentials = [_]cloak.tls.Credential{.{ .identity = identity }};
+
+    for ([_]bool{ true, false }) |close_notify| {
+        var server: OneAnswer = .{
+            .listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true }),
+            .credentials = &credentials,
+            .answer = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nall of it",
+            .close_notify = close_notify,
+        };
+        defer server.listener.deinit(io);
+        var task = io.concurrent(OneAnswer.serve, .{ &server, io }) catch return error.SkipZigTest;
+        defer task.cancel(io);
+        var client: Client = .init(gpa, .{ .tls = .{ .trust = trust } });
+        defer client.deinit(io);
+        var url_buf: [64]u8 = undefined;
+        const url = try std.mem.print(&url_buf, "https://127.0.0.1:{d}/", .{server.listener.socket.address.getPort()});
+        var response = try client.send(io, .{ .url = url });
+        defer response.deinit(io);
+        if (close_notify) {
+            const body = try response.collect(gpa, io, .limited(1 << 10));
+            defer gpa.free(body);
+            try testing.expectEqualStrings("all of it", body);
+        } else {
+            // A bare close may be anyone's: the body may have been cut.
+            try testing.expectError(error.BodyIncomplete, response.collect(gpa, io, .limited(1 << 10)));
+        }
+    }
 }

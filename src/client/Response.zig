@@ -195,6 +195,7 @@ fn open(r: *Response, io: Io, buffer: ?[]u8) *Io.Reader {
     if (!r.started) {
         r.started = true;
         r.body.in = if (r.conn) |c| c.reader() else if (r.stream) |st| st.reader(io) else if (r.stored) |*st| storedReader(st, io) else Io.Reader.ending;
+        if (r.conn) |c| r.body.tls = c.topSession();
         r.body.trailer_pool = &r.ctx.buffers;
         // A body on its way into the store reads through the tee, which
         // then holds the reader's buffer.

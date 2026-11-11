@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const aegis = @import("aegis");
+const cloak = @import("cloak");
 const Io = std.Io;
 const wire = @import("uplink.wire");
 const h1 = wire.h1;
@@ -20,6 +21,11 @@ const Body = @This();
 interface: Io.Reader,
 /// Private: the connection's reader.
 in: *Io.Reader,
+/// Private: the TLS session `in` reads from, when it is one. A body to the
+/// connection's end is whole only when the peer ended that session with
+/// close_notify: a bare close of the socket below may be anyone's, cutting
+/// the body short.
+tls: ?*const cloak.tls.Session = null,
 /// Private: how the body is delimited.
 framing: h1.Framing,
 /// Private: bytes left of a body of known length.
@@ -117,6 +123,7 @@ fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!u
         .until_close => {
             const n = b.in.stream(w, try b.capped(limit, std.math.maxInt(u64))) catch |err| return switch (err) {
                 error.EndOfStream => {
+                    if (b.tls) |session| if (!session.closeNotified()) return b.failed(.incomplete);
                     b.end(.done);
                     return error.EndOfStream;
                 },

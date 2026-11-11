@@ -556,6 +556,17 @@ pub fn writer(conn: *Connection) *Io.Writer {
     return conn.writerBelow(conn.sessions.len);
 }
 
+/// The TLS session of the top layer, the one `reader` reads from; null
+/// when that is the socket.
+pub fn topSession(conn: *const Connection) ?*const cloak.tls.Session {
+    var i: usize = conn.sessions.len;
+    while (i > 0) {
+        i -= 1;
+        if (conn.session_on[i]) return &conn.sessions[i];
+    }
+    return null;
+}
+
 fn readerBelow(conn: *Connection, slot: usize) *Io.Reader {
     var i = slot;
     while (i > 0) {
@@ -936,8 +947,8 @@ fn startTls(conn: *Connection, slot: usize, host: []const u8, offer: Offer) (Ope
         },
         .ech = offer.ech,
         .ech_retry = offer.ech_retry,
-        // HTTP says where a body ends, so an end without close_notify is
-        // not a truncation it cannot see.
+        // HTTP says where a body ends by its length or its chunks, which see
+        // a truncation; a body to the connection's end asks `closeNotified`.
         .eof = .allow,
         .diagnostics = &report,
     }) catch |err| return conn.handshakeFailed(err, report);
