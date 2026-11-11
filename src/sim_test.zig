@@ -39,12 +39,36 @@ fn twoNodes(sim: *Sim, link: Sim.Net.Link) !Nodes {
     return .{ .client = client, .server = server, .address = address };
 }
 
+/// The HTTP a client and its server speak over plain TCP.
+const Speech = enum {
+    http1,
+    /// HTTP/2 from the first byte (RFC 9113 §3.3).
+    h2_prior_knowledge,
+    /// HTTP/1.1 asking to switch (`Upgrade: h2c`), HTTP/2 once answered.
+    h2c_upgrade,
+
+    fn client(speech: Speech) Client.Options {
+        return .{ .http2 = switch (speech) {
+            .http1 => .off,
+            .h2_prior_knowledge => .prior_knowledge,
+            .h2c_upgrade => .upgrade,
+        } };
+    }
+
+    fn server(speech: Speech) Server.Options {
+        return .{ .h2c = if (speech == .http1) .off else .alongside_http1 };
+    }
+};
+
 /// One exchange: a server on the server node answering with `handler`, and
 /// `ask` run against it by a client on the client node, each through a seam
 /// of its own.
 const Exchange = struct {
     sim: *Sim,
     nodes: Nodes,
+    speech: Speech = .http1,
+    /// The server, while `ask` runs.
+    server: ?*Server = null,
     handler: *Server.Handler = .of(hello),
     ask: *const fn (e: *Exchange, io: Io, client: *Client) anyerror!void = askHello,
     client_seam: reactor_testing.Seam = undefined,
@@ -63,14 +87,16 @@ const Exchange = struct {
         const client_io = e.client_seam.io();
         var listener = try e.nodes.address.listen(server_io, .{});
         defer listener.deinit(server_io);
-        var server: Server = .init(testing.allocator, .{}, e.handler);
+        var server: Server = .init(testing.allocator, e.speech.server(), e.handler);
         defer server.deinit(server_io);
+        e.server = &server;
+        defer e.server = null;
         var serving = try server_io.concurrent(serve, .{ &server, server_io, &listener });
         defer {
             server.shutdown(server_io);
             serving.await(server_io);
         }
-        var client: Client = .init(testing.allocator, .{});
+        var client: Client = .init(testing.allocator, e.speech.client());
         defer client.deinit(client_io);
         try e.ask(e, client_io, &client);
         e.done = true;
@@ -84,6 +110,36 @@ fn askHello(_: *Exchange, io: Io, client: *Client) anyerror!void {
     const body = try response.collect(testing.allocator, io, .limited(1 << 10));
     defer testing.allocator.free(body);
     try testing.expectEqualStrings(greeting, body);
+}
+
+/// Four requests at once, each answered whole over HTTP/2, on the one
+/// connection the server accepted.
+fn askMany(e: *Exchange, io: Io, client: *Client) anyerror!void {
+    const One = struct {
+        fn ask(cl: *Client, one_io: Io) anyerror!void {
+            var response = try cl.send(one_io, .{ .url = url });
+            defer response.deinit(one_io);
+            try testing.expectEqual(std.http.Status.ok, response.status);
+            try testing.expect(response.version == .h2);
+            const body = try response.collect(testing.allocator, one_io, .limited(1 << 10));
+            defer testing.allocator.free(body);
+            try testing.expectEqualStrings(greeting, body);
+        }
+    };
+    // The first request opens the connection (and, under an upgrade, switches it).
+    try One.ask(client, io);
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    var results: [3]anyerror!void = @splat({});
+    const Each = struct {
+        fn ask(cl: *Client, one_io: Io, result: *anyerror!void) void {
+            result.* = One.ask(cl, one_io);
+        }
+    };
+    for (&results) |*result| try group.concurrent(io, Each.ask, .{ client, io, result });
+    try group.await(io);
+    for (results) |result| try result;
+    try testing.expectEqual(@as(u64, 1), e.server.?.stats(io).accepted);
 }
 
 /// The run ended with every task finished; anything else is the test's failure.
@@ -135,21 +191,22 @@ test "over a slow link the exchange still ends, live within a virtual bound" {
     try testing.expect(e.done);
 }
 
-fn lossy(_: void, c: *Case) !void {
+fn lossy(speech: Speech, c: *Case) !void {
     const sim = try c.sim(.{});
     // Up to one segment in five lost, each sent again after a backoff, over a latency drawn too.
     const link: Sim.Net.Link = .{
         .latency = .{ .uniform = .{ .min = .fromMicroseconds(100), .max = .fromMilliseconds(80) } },
         .loss_per_million = @intCast(c.source.integer(200_000)),
     };
-    var e: Exchange = .{ .sim = sim, .nodes = try twoNodes(sim, link) };
+    var e: Exchange = .{ .sim = sim, .nodes = try twoNodes(sim, link), .speech = speech };
+    if (speech != .http1) e.ask = askMany;
     try finished(sim.run(Exchange.run, .{&e}));
     try testing.expect(e.done);
 }
 
 test "over a lossy link the exchange ends whole, case by case" {
     if (test_io.evented) return error.SkipZigTest;
-    try shakedown.check(testing.allocator, {}, lossy, .{ .cases = 64 });
+    try shakedown.check(testing.allocator, Speech.http1, lossy, .{ .cases = 64 });
 }
 
 const first_part = "the first part of the body, ";
@@ -197,9 +254,9 @@ const Cut = struct {
         try testing.expectEqualStrings(first_part ++ rest, whole);
     }
 
-    fn property(_: void, c: *Case) !void {
+    fn property(speech: Speech, c: *Case) !void {
         const sim = try c.sim(.{});
-        var cut: Cut = .{ .case = c, .exchange = .{ .sim = sim, .nodes = try twoNodes(sim, .{}) } };
+        var cut: Cut = .{ .case = c, .exchange = .{ .sim = sim, .nodes = try twoNodes(sim, .{}), .speech = speech } };
         cut.exchange.handler = &cut.handler;
         cut.exchange.ask = ask;
         try finished(sim.run(Exchange.run, .{&cut.exchange}));
@@ -209,12 +266,13 @@ const Cut = struct {
 
 test "a reset mid-body fails the read as ConnectionFailed, and the next request dials again" {
     if (test_io.evented) return error.SkipZigTest;
-    try shakedown.check(testing.allocator, {}, Cut.property, .{ .cases = 32, .reach = &.{"reset arrived mid-body"} });
+    try shakedown.check(testing.allocator, Speech.http1, Cut.property, .{ .cases = 32, .reach = &.{"reset arrived mid-body"} });
 }
 
-fn partitioned(_: void, c: *Case) !void {
+fn partitioned(speech: Speech, c: *Case) !void {
     const sim = try c.sim(.{});
-    var e: Exchange = .{ .sim = sim, .nodes = try twoNodes(sim, .{ .latency = .{ .fixed = .fromMilliseconds(5) } }) };
+    var e: Exchange = .{ .sim = sim, .nodes = try twoNodes(sim, .{ .latency = .{ .fixed = .fromMilliseconds(5) } }), .speech = speech };
+    if (speech != .http1) e.ask = askMany;
     sim.net().partition(&.{e.nodes.client}, &.{e.nodes.server});
     try sim.start(Exchange.run, .{&e});
     // The partition stands for up to ten virtual seconds; settle heals it.
@@ -230,7 +288,44 @@ fn partitioned(_: void, c: *Case) !void {
 
 test "a partition healed by settle lets the exchange end, live within a virtual bound" {
     if (test_io.evented) return error.SkipZigTest;
-    try shakedown.check(testing.allocator, {}, partitioned, .{ .cases = 32, .reach = &.{"the exchange waited out a partition"} });
+    try shakedown.check(testing.allocator, Speech.http1, partitioned, .{ .cases = 32, .reach = &.{"the exchange waited out a partition"} });
+}
+
+test "HTTP/2 by prior knowledge on the simulated network: four requests on one connection, seed by seed" {
+    if (test_io.evented) return error.SkipZigTest;
+    for ([_]u64{ 1, 2, 3, 4 }) |seed| {
+        const sim = try Sim.init(testing.allocator, .{ .watchdog = null, .seed = seed });
+        defer sim.deinit();
+        var e: Exchange = .{ .sim = sim, .nodes = try twoNodes(sim, .{}), .speech = .h2_prior_knowledge, .ask = askMany };
+        try finished(sim.run(Exchange.run, .{&e}));
+        try testing.expect(e.done);
+    }
+}
+
+test "HTTP/2 by an h2c upgrade on the simulated network: the first request switches, the rest share its connection" {
+    if (test_io.evented) return error.SkipZigTest;
+    for ([_]u64{ 1, 2, 3, 4 }) |seed| {
+        const sim = try Sim.init(testing.allocator, .{ .watchdog = null, .seed = seed });
+        defer sim.deinit();
+        var e: Exchange = .{ .sim = sim, .nodes = try twoNodes(sim, .{}), .speech = .h2c_upgrade, .ask = askMany };
+        try finished(sim.run(Exchange.run, .{&e}));
+        try testing.expect(e.done);
+    }
+}
+
+test "HTTP/2 over a lossy link: four requests on one connection end whole, case by case" {
+    if (test_io.evented) return error.SkipZigTest;
+    try shakedown.check(testing.allocator, Speech.h2_prior_knowledge, lossy, .{ .cases = 64 });
+}
+
+test "HTTP/2: a reset mid-body fails the stream's read as ConnectionFailed, and the next request dials again" {
+    if (test_io.evented) return error.SkipZigTest;
+    try shakedown.check(testing.allocator, Speech.h2_prior_knowledge, Cut.property, .{ .cases = 32, .reach = &.{"reset arrived mid-body"} });
+}
+
+test "HTTP/2: a partition healed by settle lets four requests on one connection end, live within a virtual bound" {
+    if (test_io.evented) return error.SkipZigTest;
+    try shakedown.check(testing.allocator, Speech.h2_prior_knowledge, partitioned, .{ .cases = 32, .reach = &.{"the exchange waited out a partition"} });
 }
 
 // everyFault over one request: one clean run records the calls, then each
