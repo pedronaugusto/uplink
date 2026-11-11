@@ -5,6 +5,14 @@
 //! Windows). The test binary says at build time which it was built for
 //! (`build.zig`). The runtime is made at first use and lives until the
 //! process ends, since every test finishes its tasks before it returns.
+//!
+//! The client and server suites run on shakedown's simulated network
+//! (`simulated`), once, in the `Io.Threaded` binary; the evented binaries
+//! skip them. What meets the system's sockets on every backend is the
+//! conformance suite (`conformance_test.zig`, one round trip per feature)
+//! and the tests of what only the system shows: socket options and a bind
+//! made past the `Io`, the system's peek, named pipes, timed reads and
+//! connects, and interop with openssl and curl.
 
 const std = @import("std");
 const reactor = @import("reactor");
