@@ -97,6 +97,20 @@ pub fn readFailure(u: *Upgraded) Error {
     };
 }
 
+/// Whether a read or a write failed for a cancelation: the calling task's,
+/// read from the connection's own record (or the stream's).
+pub fn canceled(u: *const Upgraded) bool {
+    return switch (u.carrier) {
+        .conn => |conn| conn.failed() == .canceled,
+        .stream => |s| isCancel(s.stream.read_failure) or isCancel(u.write_failure),
+    };
+}
+
+fn isCancel(failure: ?H2.Error) bool {
+    const err = failure orelse return false;
+    return err == error.Canceled;
+}
+
 /// Wait up to `timeout` for the peer to send something; the wait ends
 /// nothing when nothing comes.
 pub fn awaitReadable(u: *Upgraded, io: Io, timeout: Io.Duration) Io.Cancelable!Timed.Readiness {

@@ -415,3 +415,57 @@ test "an upgrade passes through: the upstream's 101, then each side's bytes to t
     defer wrong.deinit(io);
     try testing.expectEqual(std.http.Status.bad_gateway, wrong.status);
 }
+
+/// The front's failed exchanges whose error was a cancel.
+const SeenCanceled = struct {
+    count: std.atomic.Value(u32) = .init(0),
+    observing: Server.Observer = .{ .eventFn = event },
+
+    fn event(o: *Server.Observer, e: Server.Observer.Event) void {
+        const seen: *SeenCanceled = @alignCast(@fieldParentPtr("observing", o));
+        switch (e) {
+            .failed => |f| if (std.mem.eql(u8, f.error_name, "Canceled")) {
+                _ = seen.count.fetchAdd(1, .monotonic);
+            },
+            else => {},
+        }
+    }
+};
+
+test "a tunnel whose read is canceled ends its exchange as canceled, both sides closed, not as a stream that ended" {
+    const gpa = testing.allocator;
+    const base = test_io.io();
+    const shakedown = @import("shakedown");
+    const upstream = try Running.start(gpa, .{}, .of(upgrading));
+    defer upstream.stop();
+    var through: Client = .init(gpa, .{});
+    defer through.deinit(base);
+    var upstream_url: [64]u8 = undefined;
+    var proxy: ReverseProxy = try .init(gpa, &through, .{ .upstream = upstream.url(&upstream_url, "") });
+    // Past the front's second write (the request upstream, then the 101 to the client), the next
+    // read is a tunnel's: a cancel lands there.
+    const plan = [_]shakedown.IoPlan.Entry{
+        .{ .at = .{ .nth = .{ .call = .net_write, .n = 2 } }, .fault = .{ .short = std.math.maxInt(u32) } },
+        .{ .at = .{ .nth = .{ .call = .net_read, .n = 1, .after = 0 } }, .fault = .cancel },
+    };
+    const fio = try shakedown.FaultIo.init(gpa, base, .{ .plan = &plan });
+    defer fio.deinit();
+    var seen: SeenCanceled = .{};
+    const r = try gpa.create(Running);
+    defer gpa.destroy(r);
+    r.listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(base, .{ .reuse_address = true });
+    defer r.listener.deinit(base);
+    r.port = r.listener.socket.address.getPort();
+    r.server = .init(gpa, .{ .observer = &seen.observing }, &proxy.handler);
+    defer r.server.deinit(base);
+    r.task = base.concurrent(Server.serve, .{ &r.server, fio.io(), &r.listener }) catch return error.SkipZigTest;
+    defer {
+        r.server.shutdown(base);
+        // glint-ignore: Z026 -- serve ends with the shutdown; its result is not what the test checks
+        r.task.await(base) catch {};
+    }
+    const got = try r.raw(gpa, "GET / HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n");
+    defer gpa.free(got);
+    try testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 101"));
+    try testing.expectEqual(@as(u32, 1), seen.count.load(.monotonic));
+}

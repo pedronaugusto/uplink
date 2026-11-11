@@ -49,6 +49,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A `ReverseProxy` tunnel (after an upstream's 101) whose read or write is canceled ends its exchange with `error.Canceled`, both connections closed, where it ended as if a stream had: a canceled direction now returns its cancel, and only a stream's end or a broken connection ends the tunnel quietly. `Upgraded.canceled()` says whether a read or write on an upgraded connection failed for a cancel.
 - A cancel that lands while a finished exchange drains what is left of its body stays asked for at the task's next cancelation point. The drain read it as "the body did not end" and dropped it, so a client task went on after `Response.deinit` as if never canceled, and a server task likewise after a request body left unread.
 - An HTTP/2 tunnel's flush with nothing to send wrote an empty DATA frame, client and server: enough of them tripped a peer's flood limit (`enhance_your_calm`). `wire.h2`'s `writeData` writes no frame for no bytes and no end.
 - A cached response whose store fails to commit at `deinit` is told to the observer as `cache_failed`; the response itself still succeeds, as before.
