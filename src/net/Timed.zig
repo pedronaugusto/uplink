@@ -199,8 +199,11 @@ pub fn awaitReadable(io: Io, endpoint: Endpoint, r: *Io.Reader, timeout: Io.Dura
 const testing = std.testing;
 const test_io = @import("../testing/io.zig");
 
-fn readUntil(t: *Timed, io: Io, keeper: Keeper, handle: Io.net.Socket.Handle, deadline: Io.Timestamp, done: *std.atomic.Value(bool)) Error!Io.Operation.Result {
-    defer done.store(true, .release);
+/// Whether a test's read under way has ended.
+const Ended = enum(u32) { no, yes };
+
+fn readUntil(t: *Timed, io: Io, keeper: Keeper, handle: Io.net.Socket.Handle, deadline: Io.Timestamp, done: *aegis.Atomic(Ended)) Error!Io.Operation.Result {
+    defer done.store(.yes, .release);
     var buf: [16]u8 = undefined;
     // the kernel writes what a read takes into `buf`; nothing reads it here, the read only waits
     var data: [1][]u8 = .{&buf};
@@ -225,7 +228,7 @@ test "a read and a write under way at once each end at their own deadline" {
     // A read waits for bytes that never come, until its deadline; a write
     // with a far one starts and ends while it waits. The write's deadline
     // neither replaces the read's nor, once the write is done, unarms it.
-    var done: std.atomic.Value(bool) = .init(false);
+    var done: aegis.Atomic(Ended) = .init(.no);
     const read_by = Io.Clock.awake.now(io).addDuration(.fromMilliseconds(300));
     var reading = try io.concurrent(readUntil, .{ &timed, io, keeper, client.socket.handle, read_by, &done });
     try io.sleep(.fromMilliseconds(50), .awake);
@@ -235,8 +238,8 @@ test "a read and a write under way at once each end at their own deadline" {
 
     // Ten times the read's deadline, then the test stops waiting.
     var waited: u32 = 0;
-    while (!done.load(.acquire) and waited < 300) : (waited += 1) try io.sleep(.fromMilliseconds(10), .awake);
-    if (!done.load(.acquire)) {
+    while (done.load(.acquire) == .no and waited < 300) : (waited += 1) try io.sleep(.fromMilliseconds(10), .awake);
+    if (done.load(.acquire) == .no) {
         // glint-ignore: Z026 -- the read is stopped only so the test ends; it has failed already
         _ = reading.cancel(io) catch {};
         return error.TestUnexpectedResult;

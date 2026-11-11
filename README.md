@@ -46,6 +46,12 @@ fetched, nothing of the client is built, and there is no `uplink` module to ask 
 modules are there, and `uplink` exposes the codecs too, as `uplink.wire`; the
 two are the same declarations, not copies.
 
+## Stability
+
+uplink is 0.x and tracks Zig 0.17.x. A breaking change comes only in a minor release
+(0.10 to 0.11), with a CHANGELOG entry saying what changed and what to write instead; a
+patch release never breaks.
+
 ## Usage
 
 [examples/usage.zig](examples/usage.zig) starts a server with a router on
