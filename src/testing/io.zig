@@ -87,7 +87,15 @@ pub fn simulated(comptime body: anytype, args: anytype) !void {
     if (evented) return error.SkipZigTest;
     // A thread's stack, as the system gives a test's: a Debug build's TLS
     // key share and Brotli decoder state outgrow a task's default 256 KiB.
-    const sim = try shakedown.Sim.init(std.testing.allocator, .{ .watchdog = null, .seed = 1, .stack_size = .fromRaw(8 << 20) });
+    // The wall clock starts an hour past the system's: a fixture the system
+    // makes while the body runs (a certificate openssl dates from its own
+    // now, seconds after this start) is valid inside, as it is outside.
+    const sim = try shakedown.Sim.init(std.testing.allocator, .{
+        .watchdog = null,
+        .seed = 1,
+        .stack_size = .fromRaw(8 << 20),
+        .clock = .{ .real = Io.Clock.real.now(std.testing.io).addDuration(.fromSeconds(60 * 60)) },
+    });
     defer sim.deinit();
     const node = try sim.node("test", .{});
     var seam: reactor_testing.Seam = undefined;

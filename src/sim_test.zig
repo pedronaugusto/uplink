@@ -26,62 +26,20 @@ const greeting = "hello over the simulated network";
 const plain_url = "http://server.test:8080/";
 const secure_url = "https://server.test:8080/";
 
-/// A server certificate for `server.test`, issued here and self-signed, and
-/// a client's trust in it: no `openssl`, no file, nothing outside the test.
-/// Valid from 2025 to 2036, around the simulation's wall clock (2026).
-const Pki = struct {
-    key: cloak.PrivateKey,
-    leaf: []u8,
-    identity: cloak.Identity,
-    trust: cloak.Trust.Snapshot,
-    credentials: [1]cloak.tls.Credential,
+const Pki = @import("testing/Pki.zig");
 
-    fn init(p: *Pki) !void {
-        const gpa = testing.allocator;
-        const io = testing.io;
-        p.key = try cloak.PrivateKey.generate(gpa, io, .p256);
-        errdefer p.key.deinit();
-        var spki: [cloak.PrivateKey.max_public_key_info]u8 = undefined;
-        p.leaf = try cloak.certificates.issue(gpa, io, &.{
-            .subject = .{ .attributes = &.{.{ .common_name = "server.test" }} },
-            .not_before = .fromNanoseconds(@as(i96, 1_735_689_600) * std.time.ns_per_s),
-            .not_after = .fromNanoseconds(@as(i96, 2_082_758_400) * std.time.ns_per_s),
-            .names = &.{.{ .dns = "server.test" }},
-            .key_usage = .{ .digital_signature = true },
-            .purposes = &.{.server_auth},
-        }, p.key.publicKeyInfo(&spki), .{ .key = p.key });
-        errdefer gpa.free(p.leaf);
-        p.identity = try cloak.Identity.init(gpa, &.{p.leaf}, p.key, .{});
-        errdefer p.identity.deinit();
-        var builder: cloak.Trust = .init(gpa);
-        defer builder.deinit();
-        try builder.addDer(p.leaf, .{});
-        p.trust = try builder.freeze();
-        p.credentials = .{.{ .identity = p.identity }};
-    }
+fn urlOf(pki: ?*const Pki) []const u8 {
+    return if (pki == null) plain_url else secure_url;
+}
 
-    fn deinit(p: *Pki) void {
-        p.trust.deinit();
-        p.identity.deinit();
-        testing.allocator.free(p.leaf);
-        p.key.deinit();
-    }
-
-    fn url(pki: ?*const Pki) []const u8 {
-        return if (pki == null) plain_url else secure_url;
-    }
-
-    /// A simulation's options for an exchange over `pki`: a handshake's key
-    /// share (ML-KEM, unoptimized in Debug) needs more than a task's default
-    /// stack.
-    fn simOptions(pki: ?*const Pki, options: Sim.Options) Sim.Options {
-        var with = options;
-        if (pki != null) with.stack_size = .fromRaw(tls_stack_size);
-        return with;
-    }
-
-    const tls_stack_size = 1024 * 1024;
-};
+/// A simulation's options for an exchange over `pki`: a handshake's key
+/// share (ML-KEM, unoptimized in Debug) needs more than a task's default
+/// stack.
+fn simOptions(pki: ?*const Pki, options: Sim.Options) Sim.Options {
+    var with = options;
+    if (pki != null) with.stack_size = .fromRaw(1024 * 1024);
+    return with;
+}
 
 /// What an exchange speaks, whether over TLS, and whether through a proxy's
 /// tunnel.
@@ -243,7 +201,7 @@ const Exchange = struct {
 };
 
 fn askHello(e: *Exchange, io: Io, client: *Client) anyerror!void {
-    var response = try client.send(io, .{ .url = Pki.url(e.pki) });
+    var response = try client.send(io, .{ .url = urlOf(e.pki) });
     defer response.deinit(io);
     try testing.expectEqual(std.http.Status.ok, response.status);
     const body = try response.collect(testing.allocator, io, .limited(1 << 10));
@@ -266,7 +224,7 @@ fn askMany(e: *Exchange, io: Io, client: *Client) anyerror!void {
         }
     };
     // The first request opens the connection (and, under an upgrade, switches it).
-    try One.ask(client, io, Pki.url(e.pki));
+    try One.ask(client, io, urlOf(e.pki));
     var group: Io.Group = .init;
     defer group.cancel(io);
     var results: [3]anyerror!void = @splat({});
@@ -275,7 +233,7 @@ fn askMany(e: *Exchange, io: Io, client: *Client) anyerror!void {
             result.* = One.ask(cl, one_io, target);
         }
     };
-    for (&results) |*result| try group.concurrent(io, Each.ask, .{ client, io, Pki.url(e.pki), result });
+    for (&results) |*result| try group.concurrent(io, Each.ask, .{ client, io, urlOf(e.pki), result });
     try group.await(io);
     for (results) |result| try result;
     try testing.expectEqual(@as(u64, 1), e.server.?.stats(io).accepted);
@@ -331,7 +289,7 @@ test "over a slow link the exchange still ends, live within a virtual bound" {
 }
 
 fn lossy(setup: Setup, c: *Case) !void {
-    const sim = try c.sim(Pki.simOptions(setup.pki, .{}));
+    const sim = try c.sim(simOptions(setup.pki, .{}));
     // Up to one segment in five lost, each sent again after a backoff, over a latency drawn too.
     const link: Sim.Net.Link = .{
         .latency = .{ .uniform = .{ .min = .fromMicroseconds(100), .max = .fromMilliseconds(80) } },
@@ -371,7 +329,7 @@ const Cut = struct {
     fn ask(e: *Exchange, io: Io, client: *Client) anyerror!void {
         const cut: *Cut = @fieldParentPtr("exchange", e);
         {
-            var response = try client.send(io, .{ .url = Pki.url(e.pki) });
+            var response = try client.send(io, .{ .url = urlOf(e.pki) });
             defer response.deinit(io);
             try testing.expectEqual(std.http.Status.ok, response.status);
             const body = response.reader(io);
@@ -387,7 +345,7 @@ const Cut = struct {
             cut.case.reached("reset arrived mid-body");
         }
         // The reset connection is not kept: the next request dials again and is answered whole.
-        var again = try client.send(io, .{ .url = Pki.url(e.pki) });
+        var again = try client.send(io, .{ .url = urlOf(e.pki) });
         defer again.deinit(io);
         const whole = try again.collect(testing.allocator, io, .limited(1 << 10));
         defer testing.allocator.free(whole);
@@ -395,7 +353,7 @@ const Cut = struct {
     }
 
     fn property(setup: Setup, c: *Case) !void {
-        const sim = try c.sim(Pki.simOptions(setup.pki, .{}));
+        const sim = try c.sim(simOptions(setup.pki, .{}));
         var cut: Cut = .{ .case = c, .exchange = .{ .sim = sim, .nodes = try setup.nodes(sim, .{}), .speech = setup.speech, .pki = setup.pki, .tunnel = setup.tunnel } };
         cut.exchange.handler = &cut.handler;
         cut.exchange.ask = ask;
@@ -410,7 +368,7 @@ test "a reset mid-body fails the read as ConnectionFailed, and the next request 
 }
 
 fn partitioned(setup: Setup, c: *Case) !void {
-    const sim = try c.sim(Pki.simOptions(setup.pki, .{}));
+    const sim = try c.sim(simOptions(setup.pki, .{}));
     var e: Exchange = .{ .sim = sim, .nodes = try setup.nodes(sim, .{ .latency = .{ .fixed = .fromMilliseconds(5) } }), .speech = setup.speech, .pki = setup.pki, .tunnel = setup.tunnel };
     if (setup.speech != .http1) e.ask = askMany;
     if (setup.tunnel != null) e.ask = if (setup.speech == .http1) askTunneled else askManyTunneled;
@@ -475,7 +433,7 @@ test "TLS on the simulated network: HTTP/1.1, and HTTP/2 agreed by ALPN, seed by
     try pki.init();
     defer pki.deinit();
     for ([_]Speech{ .http1, .h2_prior_knowledge }) |speech| for ([_]u64{ 1, 2, 3, 4 }) |seed| {
-        const sim = try Sim.init(testing.allocator, Pki.simOptions(&pki, .{ .watchdog = null, .seed = seed }));
+        const sim = try Sim.init(testing.allocator, simOptions(&pki, .{ .watchdog = null, .seed = seed }));
         defer sim.deinit();
         var e: Exchange = .{ .sim = sim, .nodes = try twoNodes(sim, .{}), .speech = speech, .pki = &pki };
         if (speech != .http1) e.ask = askMany;
@@ -541,7 +499,7 @@ const ErrorStatus = error.ErrorStatus;
 /// One request for `greeting` from `client` on `io`, over TLS when `pki` is
 /// set: a typed error, or the whole body, never less of it presented as whole.
 fn askWhole(client: *Client, io: Io, pki: ?*const Pki) anyerror!void {
-    var response = try client.send(io, .{ .url = Pki.url(pki) });
+    var response = try client.send(io, .{ .url = urlOf(pki) });
     defer response.deinit(io);
     const body = try response.collect(testing.allocator, io, .limited(1 << 10));
     defer testing.allocator.free(body);
@@ -834,7 +792,7 @@ fn sweepSim() !*Sim {
 }
 
 fn sweepSimOver(pki: ?*const Pki) !*Sim {
-    return Sim.init(testing.allocator, Pki.simOptions(pki, .{ .watchdog = null, .seed = 11, .schedule = .fifo, .spurious_wake_per_million = 0 }));
+    return Sim.init(testing.allocator, simOptions(pki, .{ .watchdog = null, .seed = 11, .schedule = .fifo, .spurious_wake_per_million = 0 }));
 }
 
 test "every single fault on the client's side of one request: a typed error or a whole response, then the next request succeeds" {
@@ -922,7 +880,7 @@ test "a proxy's tunnel on the simulated network, by CONNECT and by SOCKS5h, carr
     try pki.init();
     defer pki.deinit();
     for ([_]TestProxy.Kind{ .http, .socks }) |kind| for ([_]Speech{ .http1, .h2_prior_knowledge }) |speech| for ([_]u64{ 1, 2, 3, 4 }) |seed| {
-        const sim = try Sim.init(testing.allocator, Pki.simOptions(&pki, .{ .watchdog = null, .seed = seed }));
+        const sim = try Sim.init(testing.allocator, simOptions(&pki, .{ .watchdog = null, .seed = seed }));
         defer sim.deinit();
         var e: Exchange = .{ .sim = sim, .nodes = try threeNodes(sim, .{}), .speech = speech, .pki = &pki, .tunnel = kind };
         e.ask = if (speech == .http1) askTunneled else askManyTunneled;
@@ -1017,7 +975,7 @@ test "a cancel at the server's handshake entropy draw ends the connection there,
     var pki: Pki = undefined;
     try pki.init();
     defer pki.deinit();
-    const sim = try Sim.init(testing.allocator, Pki.simOptions(&pki, .{ .watchdog = null, .seed = 1 }));
+    const sim = try Sim.init(testing.allocator, simOptions(&pki, .{ .watchdog = null, .seed = 1 }));
     defer sim.deinit();
     const nodes = try twoNodes(sim, .{});
     try finished(sim.run(CanceledHandshake.run, .{ nodes, &pki }));

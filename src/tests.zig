@@ -21,6 +21,7 @@ test {
     _ = @import("ws_test.zig");
     _ = @import("reverse_proxy_test.zig");
     _ = @import("sim_test.zig");
+    _ = @import("conformance_test.zig");
     _ = @import("pipe_test.zig");
     _ = @import("place.zig");
 }
