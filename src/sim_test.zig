@@ -91,6 +91,15 @@ fn finished(outcome: Sim.Outcome) !void {
     switch (outcome) {
         .finished => {},
         .failed => |err| return err,
+        .deadlock => |reports| {
+            std.debug.print("deadlock, {d} tasks waiting\n", .{reports.len});
+            for (reports) |report| std.debug.print("  node {d}: {f}", .{ report.node.raw(), report });
+            return error.TestUnexpectedResult;
+        },
+        .stuck, .double_close => |report| {
+            std.debug.print("{t}: node {d}: {f}", .{ outcome, report.node.raw(), report });
+            return error.TestUnexpectedResult;
+        },
         else => {
             std.debug.print("{t}\n", .{outcome});
             return error.TestUnexpectedResult;
@@ -222,4 +231,171 @@ fn partitioned(_: void, c: *Case) !void {
 test "a partition healed by settle lets the exchange end, live within a virtual bound" {
     if (test_io.evented) return error.SkipZigTest;
     try shakedown.check(testing.allocator, {}, partitioned, .{ .cases = 32, .reach = &.{"the exchange waited out a partition"} });
+}
+
+// everyFault over one request: one clean run records the calls, then each
+// single fault at each step gets a run of its own. The sweep runs inside a
+// simulation's root task with a FIFO schedule, so every run makes the same
+// calls up to its fault; one side's node `Io` is faulted and the other's is
+// not. Every call through the faulted `Io` is made inside `run`, the next
+// request and the teardown included: a run is held to the clean run's calls
+// when `run` returns, so `check` only judges what `run` kept. The URL is the
+// server's address: a fault on a name's lookup leaves FaultIo's lookup queue
+// open (shakedown 590974b), so names wait for that fix.
+
+/// The errors a sweep injects where a call can return them: a peer gone, a
+/// connection aborted before its accept, a resource short for a moment.
+const sweep_errors: []const anyerror = &.{ error.ConnectionResetByPeer, error.ConnectionAborted, error.SystemResources };
+
+/// The full sweep, and the one that injects only cancels.
+const full_sweep: shakedown.EveryFaultOptions = .{ .errors = sweep_errors };
+const cancel_sweep: shakedown.EveryFaultOptions = .{ .errors = &.{}, .short = false, .alloc = false };
+
+/// Whether `err` is in the error set `E`.
+fn inSet(comptime E: type, err: anyerror) bool {
+    inline for (@typeInfo(E).error_set.error_names.?) |name| if (err == @field(anyerror, name)) return true;
+    return false;
+}
+
+/// A body that is not the one sent, read as if it were whole.
+const PartialAsWhole = error.PartialAsWhole;
+
+/// One request for `greeting` from `client` on `io`: a typed error, or the
+/// whole body, never less of it presented as whole.
+fn askWhole(client: *Client, io: Io) anyerror!void {
+    var response = try client.send(io, .{ .url = "http://10.8.0.2:8080/" });
+    defer response.deinit(io);
+    const body = try response.collect(testing.allocator, io, .limited(1 << 10));
+    defer testing.allocator.free(body);
+    if (response.status != .ok or !std.mem.eql(u8, greeting, body)) return PartialAsWhole;
+}
+
+/// `result` is a whole response or one of the client's own errors; a landed
+/// cancel is `Canceled`.
+fn typedOrWhole(result: anyerror!void, cancel: bool) !void {
+    const err = if (result) |_| return else |e| e;
+    if (!inSet(Client.SendError, err) and !inSet(@import("client/Response.zig").CollectError, err)) return err;
+    if (cancel) try testing.expectEqual(error.Canceled, err);
+}
+
+/// Whether the run's fault fell before `boundary`, the step the second
+/// request began at. A run with no fault, or a cancel that could not land,
+/// has none.
+fn faultedBefore(injected: ?shakedown.Injected, boundary: u64) bool {
+    const i = injected orelse return false;
+    return i.step < boundary;
+}
+
+fn isCancel(injected: ?shakedown.Injected) bool {
+    const i = injected orelse return false;
+    return i.fault == .cancel;
+}
+
+/// The sweep's clean steps and its runs; a failed run is printed with its
+/// fault and its trace.
+const Swept = struct { steps: u64, runs: u64 };
+
+fn sweepWith(base: Io, ctx: anytype, options: shakedown.EveryFaultOptions) !Swept {
+    var report: shakedown.EveryFaultReport = .{};
+    var with = options;
+    with.diagnostics = &report;
+    defer report.deinit();
+    var done = shakedown.everyFault(testing.allocator, base, ctx, with) catch |err| {
+        if (report.failure) |f| std.debug.print("{t} at {any}, first difference {any}\n{s}\n", .{ f.err, f.injected, f.difference, f.trace });
+        return err;
+    };
+    defer done.deinit();
+    return .{ .steps = done.steps, .runs = done.runs };
+}
+
+/// The test's server, on a node whose `Io` no fault reaches.
+const SteadyServer = struct {
+    seam: reactor_testing.Seam = undefined,
+    listener: Io.net.Server = undefined,
+    server: Server = undefined,
+    serving: Io.Future(void) = undefined,
+
+    fn start(s: *SteadyServer, node: *Sim.Node, address: Io.net.IpAddress) !void {
+        s.seam.init(node.io());
+        const io = s.seam.io();
+        s.listener = try address.listen(io, .{});
+        s.server = .init(testing.allocator, .{}, .of(hello));
+        s.serving = try io.concurrent(Exchange.serve, .{ &s.server, io, &s.listener });
+    }
+
+    fn stop(s: *SteadyServer) void {
+        const io = s.seam.io();
+        s.server.shutdown(io);
+        s.serving.await(io);
+        s.server.deinit(io);
+        s.listener.deinit(io);
+    }
+};
+
+/// The client's node faulted, the server steady. The property: the call
+/// returns a typed error or a whole response, never a partial one presented
+/// as whole, and the next request on the same client succeeds.
+const ClientSweep = struct {
+    fio: *shakedown.FaultIo = undefined,
+    seam: reactor_testing.Seam = undefined,
+    first: anyerror!void = {},
+    boundary: u64 = 0,
+    next: anyerror!void = {},
+
+    pub fn setUp(c: *ClientSweep, fio: *shakedown.FaultIo) !void {
+        c.fio = fio;
+        c.seam.init(fio.io());
+    }
+
+    pub fn run(c: *ClientSweep, _: Io) anyerror!void {
+        const io = c.seam.io();
+        var client: Client = .init(try c.fio.allocator(testing.allocator), .{});
+        defer client.deinit(io);
+        c.first = askWhole(&client, io);
+        c.boundary = c.fio.steps().peek();
+        c.next = askWhole(&client, io);
+    }
+
+    pub fn check(c: *ClientSweep, _: Io, result: anyerror!void, injected: ?shakedown.Injected) !void {
+        try result;
+        if (injected == null or faultedBefore(injected, c.boundary)) {
+            try typedOrWhole(c.first, isCancel(injected));
+            try c.next;
+        } else {
+            try c.first;
+            try typedOrWhole(c.next, isCancel(injected));
+        }
+    }
+
+    pub fn tearDown(_: *ClientSweep) void {}
+
+    fn sweep(node: *Sim.Node, server_node: *Sim.Node, address: Io.net.IpAddress, options: shakedown.EveryFaultOptions) !void {
+        var server: SteadyServer = .{};
+        try server.start(server_node, address);
+        defer server.stop();
+        var c: ClientSweep = .{};
+        const swept = try sweepWith(node.io(), &c, options);
+        // Two requests on one connection, and its close: some twenty calls, faulted a run each.
+        try testing.expect(swept.steps >= 20 and swept.runs > 5);
+    }
+};
+
+fn sweepSim() !*Sim {
+    return Sim.init(testing.allocator, .{ .watchdog = null, .seed = 11, .schedule = .fifo });
+}
+
+test "every single fault on the client's side of one request: a typed error or a whole response, then the next request succeeds" {
+    if (test_io.evented) return error.SkipZigTest;
+    const sim = try sweepSim();
+    defer sim.deinit();
+    const nodes = try twoNodes(sim, .{});
+    try finished(sim.run(ClientSweep.sweep, .{ nodes.client, nodes.server, nodes.address, full_sweep }));
+}
+
+test "every cancel on the client's side of one request is the call's answer, and the next request succeeds" {
+    if (test_io.evented) return error.SkipZigTest;
+    const sim = try sweepSim();
+    defer sim.deinit();
+    const nodes = try twoNodes(sim, .{});
+    try finished(sim.run(ClientSweep.sweep, .{ nodes.client, nodes.server, nodes.address, cancel_sweep }));
 }
