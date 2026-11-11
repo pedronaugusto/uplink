@@ -251,8 +251,14 @@ pub const KeyLogWriter = struct {
         return .{ .writer = writer };
     }
 
-    fn write(log: *cloak.tls.Connection.KeyLog, line: []const u8) void {
+    fn write(log: *cloak.tls.Connection.KeyLog, io: ?Io, line: []const u8) void {
         const sink: *KeyLogWriter = @fieldParentPtr("key_log", log);
+        // A key-log line never takes the task's cancel: the write runs under blocked cancel
+        // protection, and a cancel lands at the handshake's next cancellation point.
+        const held = if (io) |task| task.swapCancelProtection(.blocked) else null;
+        defer if (io) |task| {
+            _ = task.swapCancelProtection(held.?);
+        };
         // A capture that cannot be written is the caller's to notice; it must not fail the handshake it describes.
         sink.writer.writeAll(line) catch return;
     }
@@ -274,7 +280,7 @@ test "the key log writes the lines it is given" {
     var out: Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     var sink: KeyLogWriter = .init(&out.writer);
-    sink.key_log.write(&sink.key_log, "CLIENT_RANDOM x\n");
+    sink.key_log.write(&sink.key_log, null, "CLIENT_RANDOM x\n");
     try std.testing.expectEqualStrings("CLIENT_RANDOM x\n", out.written());
 }
 

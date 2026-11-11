@@ -641,3 +641,71 @@ test "a body to the connection's end over TLS is whole only when close_notify en
         }
     }
 }
+
+/// A key log whose write waits for `release` (a cancellation point), and says when it is entered.
+const WaitingLog = struct {
+    io: Io,
+    entered: Io.Event = .unset,
+    release: Io.Event = .unset,
+    writer: Io.Writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
+
+    fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
+        const self: *WaitingLog = @fieldParentPtr("writer", w);
+        self.entered.set(self.io);
+        self.release.wait(self.io) catch return error.WriteFailed;
+        var n: usize = 0;
+        for (data[0 .. data.len - 1]) |d| n += d.len;
+        return n + data[data.len - 1].len * splat;
+    }
+
+    fn releaseLater(log: *WaitingLog, io: Io) void {
+        io.sleep(.fromMilliseconds(150), .awake) catch {}; // glint-ignore: Z026 -- the release comes either way
+        log.release.set(io);
+    }
+};
+
+fn sendOnce(client: *Client, io: Io, url: []const u8) !void {
+    var response = try client.send(io, .{ .url = url });
+    response.deinit(io);
+}
+
+test "a cancel that lands while the key log writes is the handshake's cancel, not the key log's" {
+    const gpa = testing.allocator;
+    const io = test_io.io();
+    const pki = try openssl.Pki.make(gpa, io);
+    defer pki.destroy();
+    const cert = try pki.read(io, "server-ec.pem");
+    defer gpa.free(cert);
+    const key_pem = try pki.read(io, "server-ec.key");
+    defer gpa.free(key_pem);
+    const key = try cloak.PrivateKey.parse(gpa, key_pem, .{});
+    defer key.deinit();
+    var identity = try cloak.Identity.initPem(gpa, cert, key, .{});
+    defer identity.deinit();
+    var builder: cloak.Trust = .init(gpa);
+    defer builder.deinit();
+    try builder.addPem(cert, .{});
+    var trust = try builder.freeze();
+    defer trust.deinit();
+    const credentials = [_]cloak.tls.Credential{.{ .identity = identity }};
+    var server: OneAnswer = .{
+        .listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true }),
+        .credentials = &credentials,
+        .answer = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+        .close_notify = true,
+    };
+    defer server.listener.deinit(io);
+    var task = io.concurrent(OneAnswer.serve, .{ &server, io }) catch return error.SkipZigTest;
+    defer task.cancel(io);
+    var log: WaitingLog = .{ .io = io };
+    var client: Client = .init(gpa, .{ .tls = .{ .trust = trust, .key_log = &log.writer } });
+    defer client.deinit(io);
+    var url_buf: [64]u8 = undefined;
+    const url = try std.mem.print(&url_buf, "https://127.0.0.1:{d}/", .{server.listener.socket.address.getPort()});
+    var sending = io.concurrent(sendOnce, .{ &client, io, url }) catch return error.SkipZigTest;
+    // The first key-log line is being written; the task is canceled there.
+    log.entered.waitUncancelable(io);
+    var releaser = io.concurrent(WaitingLog.releaseLater, .{ &log, io }) catch return error.SkipZigTest;
+    defer releaser.await(io);
+    try testing.expectError(error.Canceled, sending.cancel(io));
+}
