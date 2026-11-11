@@ -52,6 +52,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The benchmarks compile again: `bench/` hands cloak's session and `wire.sse.Reader` the stream ends they take since the streams' ends went in (`.fromStream`, `.causeless`), where it passed bare readers and writers and `bay dev test` stopped at the bench.
 - A server connection whose TLS handshake met a cancel on a call of the session's own (its entropy draw, a signature, a key-log line) ends there, where its close went on to linger: a half close and a read waiting up to `Timeouts.linger` on a client, in a task told to stop. Only a cancel on a socket operation was recorded as one.
 - A cancel that lands on a call the client's TLS handshake makes itself (its entropy draw, a signature, a key-log line) fails the request as `Canceled`, where it was `TlsFailed`: only a cancel on a socket operation was taken for one. Found by everyFault over the handshake on the simulated network (a cancel at `randomSecure`).
 - A connection reset beneath a TLS session fails the read as `ConnectionFailed`, as it does with no TLS, where it was `TlsFailed`, which names a TLS failure: the session keeps the socket's error as its failure, and a broken socket with no alert read is now the transport's. Found on the simulated network (a reset mid-body over TLS).

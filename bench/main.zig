@@ -354,7 +354,7 @@ const Context = struct {
         var data: [4096]u8 = undefined;
         for (0..units) |_| {
             var in: Io.Reader = .fixed(c.events);
-            var r: uplink.wire.sse.Reader = .init(&in, &data);
+            var r: uplink.wire.sse.Reader = .init(.causeless(&in), &data);
             while (try r.next()) |e| std.mem.doNotOptimizeAway(e.data.ptr);
         }
     }
