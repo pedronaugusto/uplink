@@ -1,4 +1,5 @@
-//! Test-only: a proxy on 127.0.0.1, as a company runs one. Over HTTP,
+//! Test-only: a proxy on 127.0.0.1 (or the address it is given: a node of a
+//! simulated network), as a company runs one. Over HTTP,
 //! `CONNECT host:port` opens a tunnel and a request with an absolute URL is
 //! passed on to its host; over SOCKS 4, 4a, 5 and 5h, the CONNECT command
 //! opens a tunnel. It can require credentials, Basic or Digest for HTTP,
@@ -16,6 +17,8 @@ const Proxy = @This();
 io: Io,
 gpa: Allocator,
 listener: Io.net.Server,
+/// Where it listens; `port` is its port.
+address: Io.net.IpAddress,
 port: u16,
 options: Options,
 task: Io.Future(void) = undefined,
@@ -43,6 +46,12 @@ pub const Options = struct {
     reply: u8 = 0,
     /// Read what a client sends and never answer.
     stall: bool = false,
+    /// Where to listen; 127.0.0.1 on a port of the system's choosing when null.
+    listen: ?Io.net.IpAddress = null,
+    /// How a target's name is found: every name the tests make up stands for
+    /// this machine (`loopback`), or the `Io`'s own lookup finds it (`lookup`:
+    /// a simulated network's DNS).
+    names: enum { loopback, lookup } = .loopback,
 };
 
 pub const Kind = enum { http, socks };
@@ -50,9 +59,10 @@ pub const Kind = enum { http, socks };
 pub fn start(gpa: Allocator, io: Io, options: Options) !*Proxy {
     const p = try gpa.create(Proxy);
     errdefer gpa.destroy(p);
-    var listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
+    var listener = try (options.listen orelse try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
     errdefer listener.deinit(io);
-    p.* = .{ .io = io, .gpa = gpa, .listener = listener, .port = listener.socket.address.getPort(), .options = options, .log = .init(.empty) };
+    const address = listener.socket.address;
+    p.* = .{ .io = io, .gpa = gpa, .listener = listener, .address = address, .port = address.getPort(), .options = options, .log = .init(.empty) };
     p.task = io.concurrent(serve, .{p}) catch return error.SkipZigTest;
     return p;
 }
@@ -60,9 +70,8 @@ pub fn start(gpa: Allocator, io: Io, options: Options) !*Proxy {
 pub fn stop(p: *Proxy) void {
     const io = p.io;
     p.stopping.store(true, .release);
-    const address = Io.net.IpAddress.parse("127.0.0.1", p.port) catch unreachable; // unreachable: a literal address
     // glint-ignore: Z026 -- a wake that cannot connect finds the proxy already gone, which is what the stop waits for
-    if (address.connect(io, .{ .mode = .stream })) |stream| stream.close(io) else |_| {}
+    if (p.address.connect(io, .{ .mode = .stream })) |stream| stream.close(io) else |_| {}
     p.task.await(io);
     p.group.cancel(io);
     p.listener.deinit(io);
@@ -126,7 +135,7 @@ fn handleHttp(p: *Proxy, r: *Io.Reader, w: *Io.Writer, client: Io.net.Stream) !v
         }
         const target = line[std.mem.findScalar(u8, line, ' ').? + 1 .. std.mem.findScalarPos(u8, line, std.mem.findScalar(u8, line, ' ').? + 1, ' ').?];
         if (std.mem.startsWith(u8, line, "CONNECT ")) {
-            const upstream = try dialAuthority(p.io, target);
+            const upstream = try p.dialAuthority(target);
             defer upstream.close(p.io);
             r.toss(head_len);
             try w.writeAll("HTTP/1.1 200 Connection established\r\n\r\n");
@@ -137,7 +146,7 @@ fn handleHttp(p: *Proxy, r: *Io.Reader, w: *Io.Writer, client: Io.net.Stream) !v
         // connection becomes a tunnel to that host.
         const after_scheme = (std.mem.find(u8, target, "://") orelse return error.BadRequest) + 3;
         const authority_end = std.mem.findScalarPos(u8, target, after_scheme, '/') orelse target.len;
-        const upstream = try dialAuthority(p.io, target[after_scheme..authority_end]);
+        const upstream = try p.dialAuthority(target[after_scheme..authority_end]);
         defer upstream.close(p.io);
         return relay(p.io, client, r, upstream);
     }
@@ -234,16 +243,21 @@ fn handleSocks(p: *Proxy, r: *Io.Reader, w: *Io.Writer, client: Io.net.Stream) !
         if (p.options.reply != 0) return;
     }
     var authority_buf: [300]u8 = undefined;
-    const upstream = try dialAuthority(p.io, try std.mem.print(&authority_buf, "{s}:{d}", .{ host, port }));
+    const upstream = try p.dialAuthority(try std.mem.print(&authority_buf, "{s}:{d}", .{ host, port }));
     defer upstream.close(p.io);
     return relay(p.io, client, r, upstream);
 }
 
-fn dialAuthority(io: Io, authority: []const u8) !Io.net.Stream {
+fn dialAuthority(p: *Proxy, authority: []const u8) !Io.net.Stream {
+    const io = p.io;
     const colon = std.mem.findScalarLast(u8, authority, ':') orelse return error.BadRequest;
     const port = try std.fmt.parseUnsigned(u16, authority[colon + 1 ..], 10);
     var host = authority[0..colon];
     if (host.len >= 2 and host[0] == '[') host = host[1 .. host.len - 1];
+    if (p.options.names == .lookup) {
+        if (Io.net.IpAddress.parse(host, port)) |address| return address.connect(io, .{ .mode = .stream }) else |_| {}
+        return (try Io.net.HostName.init(host)).connect(io, port, .{ .mode = .stream });
+    }
     // Names the tests make up all stand for this machine.
     if (std.mem.eql(u8, host, "localhost") or std.mem.eql(u8, host, "::1") or std.mem.endsWith(u8, host, ".test")) host = "127.0.0.1";
     const address = try Io.net.IpAddress.parse(host, port);

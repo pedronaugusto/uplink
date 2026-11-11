@@ -19,6 +19,8 @@ const Server = @import("server/Server.zig");
 const Request = @import("server/Request.zig");
 const Response = @import("server/Response.zig");
 const cloak = @import("cloak");
+const TestProxy = @import("testing/Proxy.zig");
+const Proxy = @import("transport/Proxy.zig");
 
 const greeting = "hello over the simulated network";
 const plain_url = "http://server.test:8080/";
@@ -81,10 +83,18 @@ const Pki = struct {
     const tls_stack_size = 1024 * 1024;
 };
 
-/// What an exchange speaks, and whether over TLS.
+/// What an exchange speaks, whether over TLS, and whether through a proxy's
+/// tunnel.
 const Setup = struct {
     speech: Speech = .http1,
     pki: ?*const Pki = null,
+    tunnel: ?TestProxy.Kind = null,
+
+    /// The nodes the exchange runs on: a proxy's between the client's and
+    /// the server's when it tunnels.
+    fn nodes(setup: Setup, sim: *Sim, link: Sim.Net.Link) !Nodes {
+        return if (setup.tunnel != null) threeNodes(sim, link) else twoNodes(sim, link);
+    }
 };
 
 fn hello(io: Io, _: *Request, response: *Response) anyerror!void {
@@ -92,8 +102,22 @@ fn hello(io: Io, _: *Request, response: *Response) anyerror!void {
 }
 
 /// The client node, the server node at 10.8.0.2:8080 known as `server.test`,
-/// and the server's address.
-const Nodes = struct { client: *Sim.Node, server: *Sim.Node, address: Io.net.IpAddress };
+/// and the server's address; a proxy's node at 10.8.0.3:3128, `proxy.test`,
+/// when the client's way to the server is through it.
+const Nodes = struct {
+    client: *Sim.Node,
+    server: *Sim.Node,
+    address: Io.net.IpAddress,
+    proxy: ?*Sim.Node = null,
+
+    /// The node at the other end of the client's connection.
+    fn near(n: Nodes) *Sim.Node {
+        return n.proxy orelse n.server;
+    }
+};
+
+const proxy_address = "10.8.0.3";
+const proxy_port = 3128;
 
 fn twoNodes(sim: *Sim, link: Sim.Net.Link) !Nodes {
     const address = try Io.net.IpAddress.parseIp4("10.8.0.2", 8080);
@@ -102,6 +126,23 @@ fn twoNodes(sim: *Sim, link: Sim.Net.Link) !Nodes {
     try sim.net().dns("server.test", server);
     try sim.net().link(client, server, link);
     return .{ .client = client, .server = server, .address = address };
+}
+
+/// The client linked to the proxy and the proxy to the server, each over
+/// `link`, and the client partitioned from the server: a request that
+/// reaches it went through the tunnel (until a `settle` heals every
+/// partition; `tunneled` checks the proxy's log as well).
+fn threeNodes(sim: *Sim, link: Sim.Net.Link) !Nodes {
+    const address = try Io.net.IpAddress.parseIp4("10.8.0.2", 8080);
+    const client = try sim.node("client", .{});
+    const server = try sim.node("server", .{ .addresses = &.{address} });
+    const proxy = try sim.node("proxy", .{ .addresses = &.{try Io.net.IpAddress.parseIp4(proxy_address, 0)} });
+    try sim.net().dns("server.test", server);
+    try sim.net().dns("proxy.test", proxy);
+    try sim.net().link(client, proxy, link);
+    try sim.net().link(proxy, server, link);
+    sim.net().partition(&.{client}, &.{server});
+    return .{ .client = client, .server = server, .address = address, .proxy = proxy };
 }
 
 /// The HTTP a client and its server speak over plain TCP.
@@ -134,6 +175,10 @@ const Exchange = struct {
     speech: Speech = .http1,
     /// TLS on both ends, with this certificate; plain TCP when null.
     pki: ?*const Pki = null,
+    /// Through a proxy of this kind on `nodes.proxy`.
+    tunnel: ?TestProxy.Kind = null,
+    /// The proxy, while `ask` runs.
+    proxy: ?*TestProxy = null,
     /// The server, while `ask` runs.
     server: ?*Server = null,
     handler: *Server.Handler = .of(hello),
@@ -167,6 +212,29 @@ const Exchange = struct {
         }
         var client_options = e.speech.client();
         if (e.pki) |p| client_options.tls = .{ .trust = p.trust };
+        var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+        defer arena.deinit();
+        if (e.tunnel) |kind| {
+            const proxy = try TestProxy.start(testing.allocator, e.nodes.proxy.?.io(), .{
+                .kind = kind,
+                .listen = try .parseIp4(proxy_address, proxy_port),
+                .names = .lookup,
+            });
+            e.proxy = proxy;
+            errdefer {
+                proxy.stop();
+                e.proxy = null;
+            }
+            const url = switch (kind) {
+                .http => std.fmt.comptimePrint("http://proxy.test:{d}", .{proxy_port}),
+                .socks => std.fmt.comptimePrint("socks5h://proxy.test:{d}", .{proxy_port}),
+            };
+            client_options.proxy = .{ .fixed = try Proxy.parse(arena.allocator(), url, .lowercase) };
+        }
+        defer if (e.proxy) |proxy| {
+            proxy.stop();
+            e.proxy = null;
+        };
         var client: Client = .init(testing.allocator, client_options);
         defer client.deinit(client_io);
         try e.ask(e, client_io, &client);
@@ -269,8 +337,9 @@ fn lossy(setup: Setup, c: *Case) !void {
         .latency = .{ .uniform = .{ .min = .fromMicroseconds(100), .max = .fromMilliseconds(80) } },
         .loss_per_million = @intCast(c.source.integer(200_000)),
     };
-    var e: Exchange = .{ .sim = sim, .nodes = try twoNodes(sim, link), .speech = setup.speech, .pki = setup.pki };
+    var e: Exchange = .{ .sim = sim, .nodes = try setup.nodes(sim, link), .speech = setup.speech, .pki = setup.pki, .tunnel = setup.tunnel };
     if (setup.speech != .http1) e.ask = askMany;
+    if (setup.tunnel != null) e.ask = if (setup.speech == .http1) askTunneled else askManyTunneled;
     try finished(sim.run(Exchange.run, .{&e}));
     try testing.expect(e.done);
 }
@@ -309,7 +378,7 @@ const Cut = struct {
             var part: [first_part.len]u8 = undefined;
             try body.readSliceAll(&part);
             try testing.expectEqualStrings(first_part, &part);
-            e.sim.net().resetConnections(e.nodes.client, e.nodes.server);
+            e.sim.net().resetConnections(e.nodes.client, e.nodes.near());
             if (body.allocRemaining(testing.allocator, .limited(1 << 10))) |whole| {
                 testing.allocator.free(whole);
                 return error.TestUnexpectedResult;
@@ -327,7 +396,7 @@ const Cut = struct {
 
     fn property(setup: Setup, c: *Case) !void {
         const sim = try c.sim(Pki.simOptions(setup.pki, .{}));
-        var cut: Cut = .{ .case = c, .exchange = .{ .sim = sim, .nodes = try twoNodes(sim, .{}), .speech = setup.speech, .pki = setup.pki } };
+        var cut: Cut = .{ .case = c, .exchange = .{ .sim = sim, .nodes = try setup.nodes(sim, .{}), .speech = setup.speech, .pki = setup.pki, .tunnel = setup.tunnel } };
         cut.exchange.handler = &cut.handler;
         cut.exchange.ask = ask;
         try finished(sim.run(Exchange.run, .{&cut.exchange}));
@@ -342,9 +411,10 @@ test "a reset mid-body fails the read as ConnectionFailed, and the next request 
 
 fn partitioned(setup: Setup, c: *Case) !void {
     const sim = try c.sim(Pki.simOptions(setup.pki, .{}));
-    var e: Exchange = .{ .sim = sim, .nodes = try twoNodes(sim, .{ .latency = .{ .fixed = .fromMilliseconds(5) } }), .speech = setup.speech, .pki = setup.pki };
+    var e: Exchange = .{ .sim = sim, .nodes = try setup.nodes(sim, .{ .latency = .{ .fixed = .fromMilliseconds(5) } }), .speech = setup.speech, .pki = setup.pki, .tunnel = setup.tunnel };
     if (setup.speech != .http1) e.ask = askMany;
-    sim.net().partition(&.{e.nodes.client}, &.{e.nodes.server});
+    if (setup.tunnel != null) e.ask = if (setup.speech == .http1) askTunneled else askManyTunneled;
+    sim.net().partition(&.{e.nodes.client}, &.{e.nodes.near()});
     try sim.start(Exchange.run, .{&e});
     // The partition stands for up to ten virtual seconds; settle heals it.
     if (sim.runFor(.fromMilliseconds(@intCast(500 + c.source.integer(9_500))))) |outcome| try finished(outcome);
@@ -790,4 +860,69 @@ test "every cancel on the client's side of one request over TLS, the handshake's
     defer sim.deinit();
     const nodes = try twoNodes(sim, .{});
     try finished(sim.run(ClientSweep.sweepTls, .{ nodes.client, nodes.server, nodes.address, &pki, cancel_sweep }));
+}
+
+/// The tunnel was the way: the proxy was asked for the server by name, by
+/// `CONNECT` or by SOCKS5h.
+fn tunneled(proxy: *TestProxy, kind: TestProxy.Kind) !void {
+    const log = try proxy.lines(testing.allocator);
+    defer testing.allocator.free(log);
+    const asked = switch (kind) {
+        .http => "CONNECT server.test:8080 ",
+        .socks => "SOCKS 5 server.test:8080",
+    };
+    if (std.mem.find(u8, log, asked) == null) {
+        std.debug.print("proxy log:\n{s}", .{log});
+        return error.TestUnexpectedResult;
+    }
+}
+
+fn askTunneled(e: *Exchange, io: Io, client: *Client) anyerror!void {
+    try askHello(e, io, client);
+    try tunneled(e.proxy.?, e.tunnel.?);
+}
+
+fn askManyTunneled(e: *Exchange, io: Io, client: *Client) anyerror!void {
+    try askMany(e, io, client);
+    try tunneled(e.proxy.?, e.tunnel.?);
+}
+
+test "a proxy's tunnel on the simulated network, by CONNECT and by SOCKS5h, carries TLS: HTTP/1.1, and HTTP/2 agreed by ALPN, seed by seed" {
+    if (test_io.evented) return error.SkipZigTest;
+    var pki: Pki = undefined;
+    try pki.init();
+    defer pki.deinit();
+    for ([_]TestProxy.Kind{ .http, .socks }) |kind| for ([_]Speech{ .http1, .h2_prior_knowledge }) |speech| for ([_]u64{ 1, 2, 3, 4 }) |seed| {
+        const sim = try Sim.init(testing.allocator, Pki.simOptions(&pki, .{ .watchdog = null, .seed = seed }));
+        defer sim.deinit();
+        var e: Exchange = .{ .sim = sim, .nodes = try threeNodes(sim, .{}), .speech = speech, .pki = &pki, .tunnel = kind };
+        e.ask = if (speech == .http1) askTunneled else askManyTunneled;
+        try finished(sim.run(Exchange.run, .{&e}));
+        try testing.expect(e.done);
+    };
+}
+
+test "a proxy's tunnel over lossy links: the handshake and the exchange end whole, case by case" {
+    if (test_io.evented) return error.SkipZigTest;
+    var pki: Pki = undefined;
+    try pki.init();
+    defer pki.deinit();
+    try shakedown.check(testing.allocator, Setup{ .pki = &pki, .tunnel = .http }, lossy, .{ .cases = 32 });
+    try shakedown.check(testing.allocator, Setup{ .pki = &pki, .tunnel = .socks }, lossy, .{ .cases = 32 });
+}
+
+test "a proxy's tunnel reset mid-body fails the read as ConnectionFailed, and the next request tunnels again" {
+    if (test_io.evented) return error.SkipZigTest;
+    var pki: Pki = undefined;
+    try pki.init();
+    defer pki.deinit();
+    try shakedown.check(testing.allocator, Setup{ .pki = &pki, .tunnel = .http }, Cut.property, .{ .cases = 32, .reach = &.{"reset arrived mid-body"} });
+}
+
+test "a partition between the client and its proxy, healed by settle, lets the tunnel's exchange end, live within a virtual bound" {
+    if (test_io.evented) return error.SkipZigTest;
+    var pki: Pki = undefined;
+    try pki.init();
+    defer pki.deinit();
+    try shakedown.check(testing.allocator, Setup{ .pki = &pki, .tunnel = .http }, partitioned, .{ .cases = 32, .reach = &.{"the exchange waited out a partition"} });
 }
