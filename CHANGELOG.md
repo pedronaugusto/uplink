@@ -55,6 +55,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- On Windows a Unix socket connects on reactor's IOCP runtime: reactor c8b94e3 -> ba831b3 connects it through Winsock, where its own AFD bind was refused and the IOCP conformance binary crashed on "HTTP/1.1 over a Unix socket".
 - On Windows a deadline ends an operation on the simulated network, as it does on every other system: shakedown 29cc695 -> 2140f83 models AFD's abortive disconnect, which reactor's deadline abort sends there, where the simulation answered it as a bad handle and the operation waited for ever. Nine tests that ran into the simulation's step or time limit on Windows (the server-side fault and cancel sweeps, plain and over TLS; the SOCKS, activity and handshake timeouts; the reverse proxy's 504; a request's deadline) end as they do elsewhere. reactor 3c8abba -> c8b94e3 (its abort checks the answer in Debug), and aegis 525f909 -> c43e90d, which `bay tidy` selects with them.
 - `zig build check-imports` passes: `reactor.testing` is named as a test dependency, `src/net/sys.zig`, gone since its peek moved behind reactor's seam, is out of the layers, and an unused import is gone.
 - The benchmarks compile again: `bench/` hands cloak's session and `wire.sse.Reader` the stream ends they take since the streams' ends went in (`.fromStream`, `.causeless`), where it passed bare readers and writers and `bay dev test` stopped at the bench.
