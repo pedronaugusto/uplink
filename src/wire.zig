@@ -19,6 +19,8 @@ pub const socks = @import("wire/socks.zig");
 /// The parts of an `http` or `https` URL a request is made from, and
 /// references resolved against one.
 pub const url = @import("wire/url.zig");
+/// URIs and IRIs, strictly: RFC 3986 and RFC 3987, and RFC 3986 §5's resolution.
+pub const uri = @import("wire/uri.zig");
 /// HTTP dates: read in their three forms, written in one.
 pub const date = @import("wire/date.zig");
 /// `Cache-Control` read, and how long a response stays fresh.

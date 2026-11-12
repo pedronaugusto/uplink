@@ -517,4 +517,5 @@ and never times them.
 
 ## Licence
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). The URI format cases in testdata/json-schema are from JSON-Schema-Test-Suite
+(release 23.2.0), under the MIT licence (LICENSES/JSON-Schema-Test-Suite-MIT.txt).

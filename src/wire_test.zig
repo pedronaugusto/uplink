@@ -5,4 +5,5 @@
 test {
     _ = @import("wire.zig");
     _ = @import("wire/differential_test.zig");
+    _ = @import("wire/uri_test.zig");
 }

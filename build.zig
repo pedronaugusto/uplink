@@ -110,6 +110,7 @@ pub fn dev(b: *std.Build, tools: type) void {
         }),
     });
     wire_tests.root_module.addImport("shakedown", shakedown.module("shakedown"));
+    wire_tests.root_module.addImport("json_schema", jsonSchema(b, p));
 
     const test_step = b.step("test", "Run the tests and the example");
     const tests_run = b.addRunArtifact(tests);
@@ -381,4 +382,17 @@ fn addColdConsumerCheck(b: *std.Build, p: *std.Build) void {
     run.addArg("cold");
     run.has_side_effects = true;
     b.step("check-cold-consumer", "Build a client project from an empty package cache").dependOn(&run.step);
+}
+
+/// JSON-Schema-Test-Suite's URI format cases (testdata/json-schema, release 23.2.0, MIT), as a module.
+fn jsonSchema(b: *std.Build, p: *std.Build) *std.Build.Module {
+    const files = b.addWriteFiles();
+    var source: std.ArrayList(u8) = .empty;
+    for ([_][]const u8{ "uri", "uri-reference", "iri", "iri-reference" }) |name| {
+        _ = files.addCopyFile(p.path(b.fmt("testdata/json-schema/{s}.json", .{name})), b.fmt("{s}.json", .{name}));
+        source.print(b.allocator, "pub const @\"{s}\" = @embedFile(\"{s}.json\");\n", .{ name, name }) catch @panic("OOM");
+    }
+    _ = files.addCopyFile(p.path("testdata/json-schema/version"), "version");
+    source.appendSlice(b.allocator, "pub const version = @embedFile(\"version\");\n") catch @panic("OOM");
+    return b.createModule(.{ .root_source_file = files.add("json_schema.zig", source.items) });
 }

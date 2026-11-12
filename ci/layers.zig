@@ -16,6 +16,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/wire/hpack/huffman_codes.zig",
         "src/wire/hpack.zig",
         "src/wire/h2/frame.zig",
+        "src/wire/uri.zig",
     } },
     .{ .name = "wire codecs", .patterns = &.{
         "src/wire/Method.zig",
@@ -208,6 +209,7 @@ pub const references: []const gantry.rules.ReferenceRule = &.{
         "cloak",
         "warp",
         "xenoglyph",
+        "json_schema",
         "reactor",
         "shakedown",
         "std",
