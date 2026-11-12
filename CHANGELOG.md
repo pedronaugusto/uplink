@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- `wire.url.parse` refuses a horizontal tab anywhere in a URL, as it refuses a space and every other control character. A tab in the path or query went onto the HTTP/1.1 request line (and HTTP/2's `:path`) as it was, where a server or intermediary that splits the line on any whitespace reads a different request; one in the host reached the `Host` field, since the client's IDNA conversion passes it. A URL a server supplies (an href in a JSON reply) could carry one. Every earlier release has it.
+- A URL's bytes past ASCII in its path and query are written percent-encoded on the request line (`Url.writeTarget`), as browsers encode them, where they went as they were: RFC 9112's request target is ASCII. `url.parse` still takes them. A Digest answer's `uri` names the target as written (`Url.originTarget`).
+
 ## [0.10.2] - 2026-10-31
 
 ### Added
