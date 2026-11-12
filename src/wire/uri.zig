@@ -346,3 +346,124 @@ pub fn check(text: []const u8, form: Form, charset: Charset) bool {
     _ = parse(.init(text), form, charset, null) catch return false;
     return true;
 }
+
+pub const ResolveError = error{
+    /// The base has no scheme: only a `URI` can be resolved against.
+    NotAbsolute,
+    /// The result does not fit `out`.
+    NoSpaceLeft,
+};
+
+/// The target RFC 3986 §5.2.2 makes of `reference` against `base` (a `URI`, its fragment
+/// dropped), dot segments removed by §5.2.4, recomposed by §5.3 into `out`. No normalization beyond
+/// §5.2's: case and percent-encodings stay as written.
+pub fn resolve(base: Reference, reference: Reference, out: []u8) ResolveError![]u8 {
+    if (base.scheme == null) return error.NotAbsolute;
+    var w: Out = .{ .buffer = out };
+    const r = reference;
+    // T.scheme, T.authority, and where T.path and T.query come from.
+    const scheme = r.scheme orelse base.scheme.?;
+    try w.write(scheme);
+    try w.write(":");
+    var query: ?[]const u8 = r.query;
+    const path_start = blk: {
+        if (r.scheme != null or r.authority != null) {
+            if (r.authority) |a| try w.authority(a);
+            const start = w.end;
+            try w.write(r.path);
+            break :blk start;
+        }
+        if (base.authority) |a| try w.authority(a);
+        const start = w.end;
+        if (r.path.len == 0) {
+            try w.write(base.path);
+            if (r.query == null) query = base.query;
+        } else if (r.path[0] == '/') {
+            try w.write(r.path);
+        } else {
+            // §5.2.3's merge: the base path up to its last '/', or "/" where the base has an
+            // authority and no path.
+            if (base.authority != null and base.path.len == 0) {
+                try w.write("/");
+            } else if (std.mem.findScalarLast(u8, base.path, '/')) |slash| {
+                try w.write(base.path[0 .. slash + 1]);
+            }
+            try w.write(r.path);
+        }
+        break :blk start;
+    };
+    w.end = path_start + removeDotSegments(w.buffer[path_start..w.end]);
+    if (query) |q| {
+        try w.write("?");
+        try w.write(q);
+    }
+    if (r.fragment) |f| {
+        try w.write("#");
+        try w.write(f);
+    }
+    return w.buffer[0..w.end];
+}
+
+const Out = struct {
+    buffer: []u8,
+    end: usize = 0,
+
+    fn write(o: *Out, s: []const u8) ResolveError!void {
+        if (s.len > o.buffer.len - o.end) return error.NoSpaceLeft;
+        @memcpy(o.buffer[o.end..][0..s.len], s);
+        o.end += s.len;
+    }
+
+    fn authority(o: *Out, a: Authority) ResolveError!void {
+        try o.write("//");
+        if (a.userinfo) |u| {
+            try o.write(u);
+            try o.write("@");
+        }
+        try o.write(a.host_text);
+        if (a.port) |p| {
+            try o.write(":");
+            try o.write(p);
+        }
+    }
+};
+
+/// RFC 3986 §5.2.4, in place: the path with its "." and ".." segments removed, its new length.
+/// The output never outruns the input, so the one buffer holds both.
+fn removeDotSegments(path: []u8) usize {
+    var in: usize = 0; // the input buffer's start
+    var len = path.len; // the input buffer's end
+    var out: usize = 0;
+    while (in < len) {
+        const rest = path[in..len];
+        if (std.mem.startsWith(u8, rest, "../")) {
+            in += 3;
+        } else if (std.mem.startsWith(u8, rest, "./")) {
+            in += 2;
+        } else if (std.mem.startsWith(u8, rest, "/./")) {
+            in += 2;
+        } else if (std.mem.eql(u8, rest, "/.")) {
+            // "/." at the end is replaced by "/".
+            in += 1;
+            path[in] = '/';
+            len = in + 1;
+        } else if (std.mem.startsWith(u8, rest, "/../") or std.mem.eql(u8, rest, "/..")) {
+            if (rest.len == 3) {
+                in += 2;
+                path[in] = '/';
+                len = in + 1;
+            } else in += 3;
+            // The last segment of the output goes, with the '/' before it.
+            out = if (std.mem.findScalarLast(u8, path[0..out], '/')) |slash| slash else 0;
+        } else if (std.mem.eql(u8, rest, ".") or std.mem.eql(u8, rest, "..")) {
+            in = len;
+        } else {
+            // The first segment, its '/' with it, moves to the output.
+            const next = std.mem.findScalarPos(u8, path[0..len], in + 1, '/') orelse len;
+            std.mem.copyForwards(u8, path[out..][0 .. next - in], path[in..next]);
+            out += next - in;
+            in = next;
+        }
+    }
+    return out;
+}

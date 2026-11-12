@@ -153,3 +153,63 @@ fn anyText(_: void, case: *shakedown.Case) !void {
 test "fuzz: on mutated references and raw bytes, what is accepted recomposes to itself" {
     try shakedown.check(testing.allocator, {}, anyText, .{ .cases = 5000, .seed = 0x3986 });
 }
+
+test "RFC 3986 §5.4: all 42 resolution examples, 23 normal and 19 abnormal" {
+    const base = try parse("http://a/b/c/d;p?q", .uri, .uri);
+    const cases = [_]struct { []const u8, []const u8 }{
+        // §5.4.1, normal.
+        .{ "g:h", "g:h" },                      .{ "g", "http://a/b/c/g" },               .{ "./g", "http://a/b/c/g" },
+        .{ "g/", "http://a/b/c/g/" },           .{ "/g", "http://a/g" },                  .{ "//g", "http://g" },
+        .{ "?y", "http://a/b/c/d;p?y" },        .{ "g?y", "http://a/b/c/g?y" },           .{ "#s", "http://a/b/c/d;p?q#s" },
+        .{ "g#s", "http://a/b/c/g#s" },         .{ "g?y#s", "http://a/b/c/g?y#s" },       .{ ";x", "http://a/b/c/;x" },
+        .{ "g;x", "http://a/b/c/g;x" },         .{ "g;x?y#s", "http://a/b/c/g;x?y#s" },   .{ "", "http://a/b/c/d;p?q" },
+        .{ ".", "http://a/b/c/" },              .{ "./", "http://a/b/c/" },               .{ "..", "http://a/b/" },
+        .{ "../", "http://a/b/" },              .{ "../g", "http://a/b/g" },              .{ "../..", "http://a/" },
+        .{ "../../", "http://a/" },             .{ "../../g", "http://a/g" },
+        // §5.4.2, abnormal.
+                    .{ "../../../g", "http://a/g" },
+        .{ "../../../../g", "http://a/g" },     .{ "/./g", "http://a/g" },                .{ "/../g", "http://a/g" },
+        .{ "g.", "http://a/b/c/g." },           .{ ".g", "http://a/b/c/.g" },             .{ "g..", "http://a/b/c/g.." },
+        .{ "..g", "http://a/b/c/..g" },         .{ "./../g", "http://a/b/g" },            .{ "./g/.", "http://a/b/c/g/" },
+        .{ "g/./h", "http://a/b/c/g/h" },       .{ "g/../h", "http://a/b/c/h" },          .{ "g;x=1/./y", "http://a/b/c/g;x=1/y" },
+        .{ "g;x=1/../y", "http://a/b/c/y" },    .{ "g?y/./x", "http://a/b/c/g?y/./x" },   .{ "g?y/../x", "http://a/b/c/g?y/../x" },
+        .{ "g#s/./x", "http://a/b/c/g#s/./x" }, .{ "g#s/../x", "http://a/b/c/g#s/../x" },
+        // A strict parser takes the scheme as written (§5.4.2's last example).
+        .{ "http:g", "http:g" },
+    };
+    try testing.expectEqual(42, cases.len);
+    for (cases) |e| {
+        var out: [64]u8 = undefined;
+        const ref = try parse(e[0], .reference, .uri);
+        errdefer std.debug.print("{s}\n", .{e[0]});
+        try testing.expectEqualStrings(e[1], try uri.resolve(base, ref, &out));
+    }
+    var small: [8]u8 = undefined;
+    try testing.expectError(error.NoSpaceLeft, uri.resolve(base, try parse("g", .reference, .uri), &small));
+    var out: [64]u8 = undefined;
+    try testing.expectError(error.NotAbsolute, uri.resolve(try parse("/a", .reference, .uri), try parse("g", .reference, .uri), &out));
+    // A base with an authority and no path merges onto "/"; a base's fragment is dropped.
+    try testing.expectEqualStrings("http://a/g", try uri.resolve(try parse("http://a", .uri, .uri), try parse("g", .reference, .uri), &out));
+    try testing.expectEqualStrings("http://a/b/g", try uri.resolve(try parse("http://a/b/c#f", .uri, .uri), try parse("g", .reference, .uri), &out));
+}
+
+fn anyResolution(_: void, case: *shakedown.Case) !void {
+    var base_buffer: [96]u8 = undefined;
+    var ref_buffer: [96]u8 = undefined;
+    const base_text = shakedown.gen.mutated(case.source, &base_buffer, &.{ "http://a/b/c/d;p?q", "https://x.y/z/", "urn:a:b", "file:///", "http://[::1]:80/a/../b" });
+    const ref_text = shakedown.gen.mutated(case.source, &ref_buffer, &.{ "../g?y#s", "./../g", "//h/i", "g;x=1/../y", ".", "..", "/./g", "?q", "#f", "a:b" });
+    const base = parse(base_text, .uri, .uri) catch return;
+    const ref = parse(ref_text, .reference, .uri) catch return;
+    var out: [256]u8 = undefined;
+    const target = try uri.resolve(base, ref, &out);
+    // What resolution makes is a URI, with no "." or ".." segment left in its path.
+    const t = try parse(target, .uri, .uri);
+    var segments = std.mem.splitScalar(u8, t.path, '/');
+    while (segments.next()) |s| {
+        try testing.expect(!std.mem.eql(u8, s, ".") and !std.mem.eql(u8, s, ".."));
+    }
+}
+
+test "property: a resolution is a URI with no dot segments left" {
+    try shakedown.check(testing.allocator, {}, anyResolution, .{ .cases = 3000, .seed = 0x3987 });
+}
