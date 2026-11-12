@@ -39,20 +39,20 @@
         },
 
         .xenoglyph = .{
-            .url = "git+https://github.com/pedronaugusto/xenoglyph#a182c3ba7f7efee7a19dfff443bae898d36bdb69",
-            .hash = "xenoglyph-0.5.1-YKXZlWrmRgC8s4WiuZ8i650UmfZG7767XaLHnBpLZ4-J",
+            .url = "git+https://github.com/pedronaugusto/xenoglyph#d6432607111da5deb5f0a481d1674da990872c96",
+            .hash = "xenoglyph-0.5.1-YKXZlXX6RgBGRl07HQns6W6M42ZLEP22hg8cEY37HouP",
             .lazy = true,
         },
         .airlock = .{
-            .url = "git+https://github.com/pedronaugusto/airlock#da96dda71d2e400da2b30d4d80c6e3cec84cba68",
-            .hash = "airlock-0.6.0-rfvu6MklCABL4BIJgb4DUNdNLBsyrJNXZ7xhXxsZcdLp",
+            .url = "git+https://github.com/pedronaugusto/airlock#55f0265ad74ceff3ea14a1fca316f82aa3f45ae8",
+            .hash = "airlock-0.6.0-rfvu6DdECADPsZW3JjI6jPRt-hpplrgrRaA4M4Ey7e8W",
             .lazy = true,
         },
     },
     .dev_dependencies = .{
         .preflight = .{
-            .url = "git+https://github.com/pedronaugusto/preflight?ref=v0.18.5#a0eb6ad53b498f49ab636be27af10efd6f190b66",
-            .hash = "preflight-0.18.5-LX1ZwjAMFAAq6oVhY_x6-BnuKHsn3lPAG4HQrFOjVCMo",
+            .url = "git+https://github.com/pedronaugusto/preflight?ref=ci-standard#454b12e663bf57993890ba18a06f33df619a659e",
+            .hash = "preflight-0.18.6-LX1ZwhfdGABszxizm4q2gQoTUwWG3UbYWnTZlnuZIxg5",
         },
 
         .shakedown = .{

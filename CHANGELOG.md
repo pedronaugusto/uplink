@@ -43,6 +43,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Pins airlock 55f0265, the commit the development build's preflight selects (bay tidy), where it pinned da96dda.
+- Pins xenoglyph d643260, the commit the development build's preflight selects (bay tidy), where it pinned a182c3b.
 - A Timed test's read-ended flag is an aegis `Atomic` of a two-state enum, where it was a `std.atomic.Value(bool)`. Tests only; no public API changes.
 - `server.Files`' `ETag` is the modification time's typed bits, big-endian, in hex (24 digits, leading zeros kept), where it was the time's integer bits: every etag changes once, which costs a client one revalidation.
 - aegis 0.3's names: `assert.invariant` where `assert.pre` and `assert.post` were, `aegis.Secret` where `aegis.secret.Secret` was, and every condition wait the guard's (`held.wait(&condition, io, timeout)`). Pins aegis breaking-0.3 (7bdb587), and reactor, cloak, warp, xenoglyph, airlock (reflink-lock) and shakedown on it. A dialed or accepted pipe or socket comes out of the owner reactor now hands it in (`take`) into the connection's own, and warp 0.5's codec inits, which refuse short memory and options where they asserted, are given what they ask for, so those refusals cannot occur.
