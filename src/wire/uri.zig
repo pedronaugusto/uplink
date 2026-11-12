@@ -347,6 +347,46 @@ pub fn check(text: []const u8, form: Form, charset: Charset) bool {
     return true;
 }
 
+/// A reference's five parts by RFC 3986 Appendix B's expression, none of them checked. Each slice
+/// points into the text split.
+pub const Split = struct {
+    /// Before the first ':', when no '/', '?' or '#' comes first and it is not empty.
+    scheme: ?[]const u8 = null,
+    /// After "//", to the first '/', '?' or '#'.
+    authority: ?[]const u8 = null,
+    path: []const u8 = "",
+    /// After the first '?' before any '#', to the '#'.
+    query: ?[]const u8 = null,
+    /// After the first '#'.
+    fragment: ?[]const u8 = null,
+};
+
+/// `text` split by Appendix B's `^(([^:/?#]+):)?(//([^/?#]*))?([^?#]*)(\?([^#]*))?(#(.*))?`, which
+/// every string matches: the split a lenient reader starts from, before checks of its own.
+pub fn split(text: []const u8) Split {
+    var out: Split = .{};
+    var at: usize = 0;
+    if (std.mem.findAny(u8, text, ":/?#")) |i| if (i > 0 and text[i] == ':') {
+        out.scheme = text[0..i];
+        at = i + 1;
+    };
+    if (std.mem.startsWith(u8, text[at..], "//")) {
+        const end = std.mem.findAnyPos(u8, text, at + 2, "/?#") orelse text.len;
+        out.authority = text[at + 2 .. end];
+        at = end;
+    }
+    const path_end = std.mem.findAnyPos(u8, text, at, "?#") orelse text.len;
+    out.path = text[at..path_end];
+    at = path_end;
+    if (at < text.len and text[at] == '?') {
+        const end = std.mem.findScalarPos(u8, text, at, '#') orelse text.len;
+        out.query = text[at + 1 .. end];
+        at = end;
+    }
+    if (at < text.len) out.fragment = text[at + 1 ..];
+    return out;
+}
+
 pub const ResolveError = error{
     /// The base has no scheme: only a `URI` can be resolved against.
     NotAbsolute,

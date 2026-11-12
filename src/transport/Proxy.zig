@@ -113,21 +113,27 @@ pub const ParseError = error{
 pub fn parse(arena: Allocator, text: []const u8, rules: Rules) ParseError!Proxy {
     // Exactly the bytes needed: `parseKept` parses in scratch sized from `text`.
     const url = if (std.mem.find(u8, text, "://") == null) try std.mem.concat(arena, u8, &.{ "http://", text }) else try arena.dupe(u8, text);
-    const uri = std.Uri.parse(url) catch return error.InvalidProxy;
-    const kind = kindOf(uri.scheme) orelse return error.InvalidProxy;
-    const host = if (uri.host) |h| try h.toRawMaybeAlloc(arena) else return error.InvalidProxy;
+    const parts = url_mod.parts(url) catch return error.InvalidProxy;
+    const kind = kindOf(parts.scheme) orelse return error.InvalidProxy;
+    const host = if (parts.host) |h| try decoded(arena, h) else return error.InvalidProxy;
     const bare = if (host.len >= 2 and host[0] == '[' and host[host.len - 1] == ']') host[1 .. host.len - 1] else host;
     if (bare.len == 0 or std.mem.findAny(u8, bare, "\x00\r\n\t /@") != null) return error.InvalidProxy;
     var proxy: Proxy = .{
         .kind = kind,
         .host = bare,
-        .port = uri.port orelse defaultPort(kind, rules),
+        .port = parts.port orelse defaultPort(kind, rules),
     };
-    if (uri.user != null or uri.password != null) proxy.credential = .{
-        .user = if (uri.user) |u| try u.toRawMaybeAlloc(arena) else "",
-        .password = if (uri.password) |p| try p.toRawMaybeAlloc(arena) else "",
+    if (parts.user != null or parts.password != null) proxy.credential = .{
+        .user = if (parts.user) |u| try decoded(arena, u) else "",
+        .password = if (parts.password) |p| try decoded(arena, p) else "",
     };
     return proxy;
+}
+
+/// `text` with its percent escapes undone: `text` itself when it has none.
+fn decoded(arena: Allocator, text: []const u8) Allocator.Error![]const u8 {
+    if (std.mem.findScalar(u8, text, '%') == null) return text;
+    return url_mod.percentDecode(try arena.alloc(u8, text.len), text);
 }
 
 /// `parse` for a value that may carry a password: the URL is parsed in

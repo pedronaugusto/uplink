@@ -154,6 +154,49 @@ test "fuzz: on mutated references and raw bytes, what is accepted recomposes to 
     try shakedown.check(testing.allocator, {}, anyText, .{ .cases = 5000, .seed = 0x3986 });
 }
 
+test "Appendix B's split takes any text apart, unchecked" {
+    const s = uri.split("http://a b@h/p q?x?y#f#g");
+    try testing.expectEqualStrings("http", s.scheme.?);
+    try testing.expectEqualStrings("a b@h", s.authority.?);
+    try testing.expectEqualStrings("/p q", s.path);
+    try testing.expectEqualStrings("x?y", s.query.?);
+    try testing.expectEqualStrings("f#g", s.fragment.?);
+    const relative = uri.split("a/b:c");
+    try testing.expectEqual(@as(?[]const u8, null), relative.scheme);
+    try testing.expectEqualStrings("a/b:c", relative.path);
+    try testing.expectEqual(@as(?[]const u8, null), uri.split(":x").scheme);
+    try testing.expectEqualStrings("1a", uri.split("1a://h").scheme.?);
+    const empty = uri.split("");
+    try testing.expect(empty.scheme == null and empty.authority == null and empty.query == null and empty.fragment == null);
+    try testing.expectEqualStrings("", empty.path);
+}
+
+fn anySplit(_: void, case: *shakedown.Case) !void {
+    var buffer: [96]u8 = undefined;
+    const s = if (shakedown.gen.boolean(case.source)) shakedown.gen.mutated(case.source, &buffer, &examples) else shakedown.gen.bytesInto(case.source, buffer[0..shakedown.gen.intRange(case.source, usize, 0, buffer.len)]);
+    const parts = uri.split(s);
+    // The parts, put back with their delimiters, are the text.
+    var out: [128]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&out);
+    if (parts.scheme) |scheme| try w.print("{s}:", .{scheme});
+    if (parts.authority) |authority| try w.print("//{s}", .{authority});
+    try w.writeAll(parts.path);
+    if (parts.query) |query| try w.print("?{s}", .{query});
+    if (parts.fragment) |fragment| try w.print("#{s}", .{fragment});
+    try testing.expectEqualStrings(s, w.buffered());
+    // A reference `parse` accepts splits into the same parts.
+    const r = parse(s, .reference, .iri) catch return;
+    try testing.expectEqualDeep(r.scheme, parts.scheme);
+    try testing.expectEqualDeep(r.path, parts.path);
+    try testing.expectEqualDeep(r.query, parts.query);
+    try testing.expectEqualDeep(r.fragment, parts.fragment);
+    try testing.expectEqual(r.authority != null, parts.authority != null);
+}
+
+test "fuzz: split puts back to the text, and agrees with parse where parse accepts" {
+    try shakedown.check(testing.allocator, {}, anySplit, .{ .cases = 5000, .seed = 0xB });
+}
+
 test "RFC 3986 §5.4: all 42 resolution examples, 23 normal and 19 abnormal" {
     const base = try parse("http://a/b/c/d;p?q", .uri, .uri);
     const cases = [_]struct { []const u8, []const u8 }{

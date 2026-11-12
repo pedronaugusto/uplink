@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `wire.uri.split`: a reference's scheme, authority, path, query and fragment by RFC 3986 Appendix B's expression, none of them checked, each a slice of the text. `wire.url.parts`: a URL's scheme, userinfo, host and port, read leniently, as written.
 - `wire.uri`: URIs and IRIs read strictly, by RFC 3986's generic syntax with every component's grammar (IPv6 in all nine forms, IPv4 dec-octets, IPvFuture) and RFC 3987's `ucschar` and `iprivate`, sans I/O and allocation-free. `parse` gives a `Reference` whose every slice points into the text, with a `Diagnostic` where it refuses; `check` answers whether a text is exactly `URI`, `URI-reference`, `absolute-URI` or `relative-ref` in either charset (JSON Schema's `uri`, `uri-reference`, `iri`, `iri-reference`); `Reference.format` recomposes it. `resolve` makes RFC 3986 §5.2's target of a reference against a base into the caller's buffer, dot segments removed in place, with no normalization beyond §5.2's: all 42 of §5.4's examples. Checked against JSON-Schema-Test-Suite's format cases (vendored, MIT).
 - `CONNECT` over HTTP/2 to a proxy (RFC 9113 §8.5): `Proxy.http2` asks for a tunnel as a stream, on a proxy connection of its own. An `https` proxy must agree `h2` by ALPN or the connection fails with `ProxyProtocolError`; an `http` one is spoken to by prior knowledge. Off by default.
 - A server writes Brotli: `Encoder.Coding.br`, offered when `Compression.codings` names it (the default stays zstd and gzip), at `Encoder.Settings.brotli_quality` 5 and `brotli_window_bits` 20. Its encoder's buffers stay with its pooled block for the next body.
@@ -44,6 +45,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `wire.url` and `Proxy.parse` read URLs without the standard library's `std.Uri`, on a new `wire.uri.split` (RFC 3986 Appendix B, nothing checked) and `wire.url.parts`, which reads scheme, userinfo, host and port exactly as `std.Uri.parse` did: a differential test runs both readers over generated and mutated URLs and requires the same result, error and slice for each. What they accept and refuse is unchanged. `url.parse` is lenient on purpose, as HTTP clients are, and its doc comment lists what it takes that RFC 3986 refuses. `wire.url.percentDecode` undoes percent escapes as `std.Uri` did.
 - Pins airlock 55f0265, the commit the development build's preflight selects (bay tidy), where it pinned da96dda.
 - Pins xenoglyph d643260, the commit the development build's preflight selects (bay tidy), where it pinned a182c3b.
 - A Timed test's read-ended flag is an aegis `Atomic` of a two-state enum, where it was a `std.atomic.Value(bool)`. Tests only; no public API changes.

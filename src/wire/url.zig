@@ -2,9 +2,16 @@
 //! goes, and the request target (RFC 9112 §3.2) that names what it asks for.
 //! Everything is checked here, so nothing in a URL can put a byte on the
 //! wire that a request line or a `Host` field does not allow.
+//!
+//! This module reads what HTTP carries (a `Location` field, an href in a
+//! server's reply), so it is lenient the way browsers and HTTP clients
+//! are, on purpose. The strict recognizer is `uri`; this one is not a
+//! stricter or looser version of it but a different job, and is not to be
+//! made strict.
 
 const std = @import("std");
 const fields = @import("fields.zig");
+const uri = @import("uri.zig");
 
 /// A URL taken apart. Every slice points into the text it was parsed from.
 pub const Url = struct {
@@ -53,37 +60,123 @@ pub const ParseError = error{
 };
 
 /// Take `text` apart. The fragment is dropped: it is never sent.
+///
+/// Lenient on purpose: it refuses what could put a byte on the wire that
+/// does not belong there (a control character other than a tab, a space),
+/// a user and password, and a `%` or `\` in a name, and otherwise takes
+/// what RFC 3986 refuses: bytes past ASCII (a host in UTF-8 is IDNA's to
+/// convert), a tab, `"` `<` `>` `[` `]` `^` `` ` `` `{` `|` `}` anywhere;
+/// `\` and a `%` not followed by two hex digits in the path and query;
+/// anything between an IPv6 literal's brackets, and anything after them
+/// before the port, which is dropped; and a port written with a `+` sign
+/// or `_` between digits.
 pub fn parse(text: []const u8) ParseError!Url {
     if (fields.hasControl(text) or std.mem.findAny(u8, text, " ") != null) return error.InvalidUrl;
-    const uri = std.Uri.parse(text) catch return error.InvalidUrl;
-    const secure = if (std.ascii.eqlIgnoreCase(uri.scheme, "https"))
+    const p = try parts(text);
+    const secure = if (std.ascii.eqlIgnoreCase(p.scheme, "https"))
         true
-    else if (std.ascii.eqlIgnoreCase(uri.scheme, "http"))
+    else if (std.ascii.eqlIgnoreCase(p.scheme, "http"))
         false
     else
         return error.UnsupportedScheme;
-    if (uri.user != null or uri.password != null) return error.InvalidUrl;
-    const host_component = uri.host orelse return error.InvalidUrl;
-    const raw_host = switch (host_component) {
-        .raw, .percent_encoded => |h| h,
-    };
+    if (p.user != null or p.password != null) return error.InvalidUrl;
+    const raw_host = p.host orelse return error.InvalidUrl;
     // A percent-encoded host would need decoding to be looked up; names
     // that need it are IDNA's, which callers pass as punycode.
-    if (std.mem.findScalar(u8, raw_host, '%') != null and !(raw_host.len > 0 and raw_host[0] == '[')) return error.InvalidUrl;
+    if (std.mem.findScalar(u8, raw_host, '%') != null and raw_host[0] != '[') return error.InvalidUrl;
     const host = if (raw_host.len >= 2 and raw_host[0] == '[' and raw_host[raw_host.len - 1] == ']') raw_host[1 .. raw_host.len - 1] else raw_host;
     if (host.len == 0 or std.mem.findAny(u8, host, "/@?#\\") != null) return error.InvalidUrl;
-    // The path and query as written: from the end of the authority to the
-    // fragment.
-    const after_scheme = (std.mem.find(u8, text, "://") orelse return error.InvalidUrl) + 3;
-    const path_start = std.mem.findAnyPos(u8, text, after_scheme, "/?#") orelse text.len;
-    const end = std.mem.findScalarPos(u8, text, path_start, '#') orelse text.len;
-    const target = text[path_start..end];
     return .{
         .secure = secure,
         .host = host,
-        .port = uri.port orelse @as(u16, if (secure) 443 else 80),
-        .target = target,
+        .port = p.port orelse @as(u16, if (secure) 443 else 80),
+        .target = p.target,
     };
+}
+
+/// A URL's parts as `parts` reads them. Every slice points into the text;
+/// the user, password and host are as written, percent-encoded.
+pub const Parts = struct {
+    scheme: []const u8,
+    user: ?[]const u8 = null,
+    /// Null when empty.
+    password: ?[]const u8 = null,
+    /// With an IPv6 literal's brackets.
+    host: ?[]const u8 = null,
+    port: ?u16 = null,
+    /// The path and query, to the fragment.
+    target: []const u8,
+};
+
+/// `text` read as HTTP clients read a URL, on Appendix B's split: a scheme
+/// of a letter and then letters, digits, `+`, `-` and `.`; the userinfo to
+/// the authority's last `@`, the user to its first `:`; a host bracketed
+/// to the last `]` or else to the last `:`, after which a decimal `u16`
+/// port; no more than a host name's 254 bytes. An empty authority is taken
+/// only before a path. Nothing else is checked: that is for the caller.
+pub fn parts(text: []const u8) error{InvalidUrl}!Parts {
+    const s = uri.split(text);
+    const scheme = s.scheme orelse return error.InvalidUrl;
+    if (!validScheme(scheme)) return error.InvalidUrl;
+    const fragment_len = if (s.fragment) |f| f.len + 1 else 0;
+    const authority_len = if (s.authority) |a| a.len + 2 else 0;
+    var p: Parts = .{ .scheme = scheme, .target = text[scheme.len + 1 + authority_len .. text.len - fragment_len] };
+    const authority = s.authority orelse return p;
+    if (authority.len == 0) {
+        if (s.path.len == 0) return error.InvalidUrl;
+        return p;
+    }
+    var start: usize = 0;
+    if (std.mem.findScalarLast(u8, authority, '@')) |at| {
+        start = at + 1;
+        const info = authority[0..at];
+        if (std.mem.findScalar(u8, info, ':')) |colon| {
+            p.user = info[0..colon];
+            if (colon + 1 < info.len) p.password = info[colon + 1 ..];
+        } else p.user = info;
+    }
+    if (start >= authority.len) return p;
+    if (authority[start] == ']') return error.InvalidUrl;
+    var end = authority.len;
+    if (authority[start] == '[') {
+        end = (std.mem.findScalarLast(u8, authority, ']') orelse return error.InvalidUrl) + 1;
+        if (std.mem.findScalarLast(u8, authority, ':')) |colon| if (colon >= end) {
+            p.port = std.fmt.parseInt(u16, authority[colon + 1 ..], 10) catch return error.InvalidUrl;
+        };
+    } else if (std.mem.findScalarLast(u8, authority, ':')) |colon| if (colon >= start) {
+        end = colon;
+        p.port = std.fmt.parseInt(u16, authority[colon + 1 ..], 10) catch return error.InvalidUrl;
+    };
+    if (start >= end) return error.InvalidUrl;
+    if (end - start > std.Io.net.HostName.max_len) return error.InvalidUrl;
+    p.host = authority[start..end];
+    return p;
+}
+
+/// `text` with each `%` and two hex digits undone, into `out`, at least as
+/// long; a `%` without them is kept. `out` may be `text`.
+pub fn percentDecode(out: []u8, text: []const u8) []u8 {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) : (n += 1) {
+        if (text[i] == '%' and text.len - i >= 3) {
+            if (std.fmt.parseInt(u8, text[i + 1 ..][0..2], 16)) |byte| {
+                out[n] = byte;
+                i += 3;
+                continue;
+            } else |_| {}
+        }
+        out[n] = text[i];
+        i += 1;
+    }
+    return out[0..n];
+}
+
+/// A scheme: a letter, then letters, digits, `+`, `-` and `.`.
+fn validScheme(scheme: []const u8) bool {
+    if (scheme.len == 0 or !std.ascii.isAlphabetic(scheme[0])) return false;
+    for (scheme[1..]) |c| if (!std.ascii.isAlphanumeric(c) and c != '+' and c != '-' and c != '.') return false;
+    return true;
 }
 
 /// `text`, which parsed as `u`, with `host` in place of its host, into
@@ -175,46 +268,18 @@ pub fn resolve(base: []const u8, reference: []const u8, out: []u8) ResolveError!
     return out[0..w.len];
 }
 
-const Parts = struct {
-    scheme: ?[]const u8 = null,
-    authority: ?[]const u8 = null,
-    path: []const u8 = "",
-    query: ?[]const u8 = null,
-    fragment: ?[]const u8 = null,
-};
-
-/// RFC 3986 Appendix B's split of a reference into its parts.
-fn split(text: []const u8) Parts {
-    var p: Parts = .{};
-    var rest = text;
-    if (std.mem.findScalar(u8, rest, '#')) |i| {
-        p.fragment = rest[i + 1 ..];
-        rest = rest[0..i];
-    }
-    if (std.mem.findScalar(u8, rest, '?')) |i| {
-        p.query = rest[i + 1 ..];
-        rest = rest[0..i];
-    }
-    if (std.mem.findScalar(u8, rest, ':')) |colon| {
-        const scheme = rest[0..colon];
-        const slash = std.mem.findScalar(u8, rest, '/') orelse rest.len;
-        if (colon < slash and colon > 0 and std.ascii.isAlphabetic(scheme[0]) and isSchemeText(scheme)) {
-            p.scheme = scheme;
-            rest = rest[colon + 1 ..];
-        }
-    }
-    if (std.mem.startsWith(u8, rest, "//")) {
-        const end = std.mem.findScalarPos(u8, rest, 2, '/') orelse rest.len;
-        p.authority = rest[2..end];
-        rest = rest[end..];
-    }
-    p.path = rest;
+/// Appendix B's split, where a scheme that is not one is part of the path.
+fn split(text: []const u8) uri.Split {
+    var p = uri.split(text);
+    if (p.scheme) |scheme| if (!validScheme(scheme)) {
+        // The text then begins with that would-be scheme, not "//", so it
+        // has no authority: everything before the query is the path.
+        const tail = (if (p.query) |q| q.len + 1 else 0) + (if (p.fragment) |f| f.len + 1 else 0);
+        p.scheme = null;
+        p.authority = null;
+        p.path = text[0 .. text.len - tail];
+    };
     return p;
-}
-
-fn isSchemeText(text: []const u8) bool {
-    for (text) |c| if (!std.ascii.isAlphanumeric(c) and c != '+' and c != '-' and c != '.') return false;
-    return true;
 }
 
 /// Bytes into a fixed buffer, with percent-encoding where a URL needs it.
@@ -400,4 +465,108 @@ test "fuzz: any reference resolves to a URL or is refused, never past its buffer
             try testing.expect(got.len <= buf.len);
         }
     }.one, .{});
+}
+
+test "differential: parse and parts read every text as the standard library's URI reader did" {
+    const shakedown = @import("shakedown");
+    const gen = shakedown.gen;
+    const inputs = @import("../testing/inputs.zig");
+    const seeds = [_][]const u8{
+        "https://Git.Example.com:8443/team/repo.git?q=1#f", "http://u:p@[::1]:8080/a%20b",
+        "http:///path",                                     "socks5://a@b@c:+8_0",
+        "http://[v1.x]junk:1/",                             "HTTP://ex%41mple.com?x#y",
+        "http://h:/",                                       "http://]h/",
+        "x1+.-://u:@h",                                     "1a://b/c",
+        "http:h",                                           "http://?q",
+    };
+    try shakedown.check(testing.allocator, {}, struct {
+        fn one(_: void, case: *shakedown.Case) anyerror!void {
+            var raw: [96]u8 = undefined;
+            const text = if (gen.boolean(case.source)) inputs.draw(case, &raw, &seeds, 24) else urlish(case, &raw);
+            if (before(text)) |want| {
+                const got = try parse(text);
+                try testing.expectEqual(want.secure, got.secure);
+                try testing.expectEqual(want.port, got.port);
+                try testing.expectEqual(want.host.ptr, got.host.ptr);
+                try testing.expectEqual(want.host.len, got.host.len);
+                try testing.expectEqual(want.target.ptr, got.target.ptr);
+                try testing.expectEqual(want.target.len, got.target.len);
+            } else |err| try testing.expectError(err, parse(text));
+            const std_uri = std.Uri.parse(text) catch {
+                try testing.expectError(error.InvalidUrl, parts(text));
+                return;
+            };
+            const got = try parts(text);
+            try testing.expectEqual(std_uri.scheme.ptr, got.scheme.ptr);
+            try testing.expectEqual(std_uri.scheme.len, got.scheme.len);
+            try testing.expectEqual(std_uri.port, got.port);
+            try same(std_uri.user, got.user);
+            try same(std_uri.password, got.password);
+            try same(std_uri.host, got.host);
+        }
+
+        /// Text from the bytes a URL is cut at, and a few it is not.
+        fn urlish(case: *shakedown.Case, buffer: []u8) []u8 {
+            const alphabet = "hH1:/?#@[]%+_.-A9 \t\x80";
+            const len = gen.intRange(case.source, usize, 0, @min(buffer.len, 40));
+            for (buffer[0..len]) |*c| c.* = gen.oneOf(case.source, u8, alphabet);
+            return buffer[0..len];
+        }
+
+        /// The same component, as written and decoded.
+        fn same(want: ?std.Uri.Component, got: ?[]const u8) !void {
+            const w = want orelse return testing.expectEqual(null, got);
+            const written = switch (w) {
+                .raw, .percent_encoded => |s| s,
+            };
+            try testing.expectEqual(written.ptr, got.?.ptr);
+            try testing.expectEqual(written.len, got.?.len);
+            var want_buf: [96]u8 = undefined;
+            var writer: std.Io.Writer = .fixed(&want_buf);
+            try w.formatRaw(&writer);
+            var got_buf: [96]u8 = undefined;
+            try testing.expectEqualStrings(writer.buffered(), percentDecode(&got_buf, got.?));
+        }
+
+        /// `parse` as it was on the standard library's reader.
+        fn before(text: []const u8) ParseError!Url {
+            if (fields.hasControl(text) or std.mem.findAny(u8, text, " ") != null) return error.InvalidUrl;
+            const u = std.Uri.parse(text) catch return error.InvalidUrl;
+            const secure = if (std.ascii.eqlIgnoreCase(u.scheme, "https"))
+                true
+            else if (std.ascii.eqlIgnoreCase(u.scheme, "http"))
+                false
+            else
+                return error.UnsupportedScheme;
+            if (u.user != null or u.password != null) return error.InvalidUrl;
+            const host_component = u.host orelse return error.InvalidUrl;
+            const raw_host = switch (host_component) {
+                .raw, .percent_encoded => |h| h,
+            };
+            if (std.mem.findScalar(u8, raw_host, '%') != null and !(raw_host.len > 0 and raw_host[0] == '[')) return error.InvalidUrl;
+            const host = if (raw_host.len >= 2 and raw_host[0] == '[' and raw_host[raw_host.len - 1] == ']') raw_host[1 .. raw_host.len - 1] else raw_host;
+            if (host.len == 0 or std.mem.findAny(u8, host, "/@?#\\") != null) return error.InvalidUrl;
+            const after_scheme = (std.mem.find(u8, text, "://") orelse return error.InvalidUrl) + 3;
+            const path_start = std.mem.findAnyPos(u8, text, after_scheme, "/?#") orelse text.len;
+            const end = std.mem.findScalarPos(u8, text, path_start, '#') orelse text.len;
+            return .{ .secure = secure, .host = host, .port = u.port orelse @as(u16, if (secure) 443 else 80), .target = text[path_start..end] };
+        }
+    }.one, .{ .cases = 50000, .seed = 0x3986 });
+}
+
+test "parts reads a URL's userinfo, bracketed host and port as written" {
+    const p = try parts("socks5://us%65r:p@ss@[::1]junk:1080/x?y#z");
+    try testing.expectEqualStrings("socks5", p.scheme);
+    try testing.expectEqualStrings("us%65r", p.user.?);
+    try testing.expectEqualStrings("p@ss", p.password.?);
+    try testing.expectEqualStrings("[::1]", p.host.?);
+    try testing.expectEqual(@as(?u16, 1080), p.port);
+    try testing.expectEqualStrings("/x?y", p.target);
+    try testing.expectEqual(@as(?[]const u8, null), (try parts("http://u:@h")).password);
+    try testing.expectEqual(@as(?[]const u8, null), (try parts("http:///p")).host);
+    for ([_][]const u8{ "http://", "http://?q", "1a://h", "/a:b", "http://]h", "http://[::1", "http://h:x", "http://h:65536", "http://u@:1" }) |text| {
+        try testing.expectError(error.InvalidUrl, parts(text));
+    }
+    var buf: [16]u8 = undefined;
+    try testing.expectEqualStrings("a b%2%zz%", percentDecode(&buf, "a%20b%2%zz%"));
 }
