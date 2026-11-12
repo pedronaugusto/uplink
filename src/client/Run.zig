@@ -996,6 +996,9 @@ fn asciiUrl(c: *Shared, io: Io, text: []const u8, u: url_mod.Url) Error!AsciiUrl
     const failures = xenoglyph.idna.toAscii(u.host, &w, .url) catch return error.InvalidUrl;
     if (failures.any()) return error.InvalidUrl;
     const host = w.buffered();
+    // The URL Standard's host parser: no forbidden domain code point in what
+    // domain-to-ASCII gave, which its URL mode leaves to it.
+    for (host) |byte| if (url_mod.forbiddenDomainCodePoint(byte)) return error.InvalidUrl;
     if (std.mem.eql(u8, host, u.host)) return .{ .url = u, .text = text, .buffer = &.{} };
     const buffers = &c.context.buffers;
     for ([_]BufferPool.Class{ .small, .record, .large }) |class| {

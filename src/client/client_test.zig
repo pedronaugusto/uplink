@@ -10,6 +10,7 @@ const Server = @import("../testing/Server.zig");
 const Diagnostics = @import("../transport/Diagnostics.zig");
 const shakedown = @import("shakedown");
 const Proxy = @import("../transport/Proxy.zig");
+const url_mod = @import("uplink.wire").url;
 const TestProxy = @import("../testing/Proxy.zig");
 const Timeouts = @import("../transport/Context.zig").Timeouts;
 
@@ -781,6 +782,36 @@ test "a request through an HTTP proxy is sent whole, and the proxy's Digest chal
             var want_buf: [256]u8 = undefined;
             const want = try std.mem.print(&want_buf, "GET http://127.0.0.1:{d}/repo.git/info/refs HTTP/1.1 [none]\nGET http://127.0.0.1:{d}/repo.git/info/refs HTTP/1.1 [Digest]\n", .{ server.port, server.port });
             try testing.expectEqualStrings(want, log);
+        }
+    }.inSim, .{});
+}
+
+test "a host with a forbidden domain code point is refused before it reaches an HTTP proxy" {
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const io = test_io.io();
+            const proxy = try TestProxy.start(gpa, io, .{});
+            defer proxy.stop();
+            var arena: std.heap.ArenaAllocator = .init(gpa);
+            defer arena.deinit();
+            var proxy_url: [64]u8 = undefined;
+            var client: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&proxy_url, "http://127.0.0.1:{d}", .{proxy.port}), .lowercase) } });
+            defer client.deinit(io);
+            // Through a proxy no name is looked up here, so the host would go to it as written.
+            // Each of the URL Standard's forbidden domain code points is refused, by url.parse
+            // or by the check after IDNA; `/`, `?` and `#` end the authority, never in a host.
+            for (0..0x80) |i| {
+                const c: u8 = @intCast(i);
+                if (!url_mod.forbiddenDomainCodePoint(c) or std.mem.findScalar(u8, "/?#", c) != null) continue;
+                var host_url: [32]u8 = undefined;
+                const text = try std.mem.print(&host_url, "http://a{c}b.example/", .{c});
+                testing.expectError(error.InvalidUrl, client.send(io, .{ .url = text })) catch |err| {
+                    std.debug.print("host with 0x{x:0>2} taken\n", .{c});
+                    return err;
+                };
+            }
+            try testing.expectEqual(@as(u32, 0), proxy.accepted.load(.monotonic));
         }
     }.inSim, .{});
 }

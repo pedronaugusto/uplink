@@ -115,6 +115,16 @@ pub fn parse(text: []const u8) ParseError!Url {
     };
 }
 
+/// Whether `c` is one of the URL Standard's forbidden domain code points: a
+/// forbidden host code point (NUL, tab, LF, CR, space, `#` `/` `:` `<` `>`
+/// `?` `@` `[` `\` `]` `^` `|`), any other C0 control, `%` or DEL. The
+/// URL Standard's host parser refuses a host whose domain-to-ASCII result
+/// holds one; `parse` refuses some of them itself, and a client checks the
+/// rest once IDNA has given the host's ASCII form.
+pub fn forbiddenDomainCodePoint(c: u8) bool {
+    return c < 0x20 or c == 0x7f or std.mem.findScalar(u8, " #%/:<>?@[\\]^|", c) != null;
+}
+
 /// A URL's parts as `parts` reads them. Every slice points into the text;
 /// the user, password and host are as written, percent-encoded.
 pub const Parts = struct {
@@ -484,6 +494,16 @@ test "a target's bytes past ASCII are written percent-encoded, the rest as they 
     try testing.expectEqual(plain.target.ptr, (try plain.originTarget(&named)).ptr);
     try testing.expectEqualStrings("/?q", try (try parse("http://h?q")).originTarget(&named));
     try testing.expectError(error.NoSpaceLeft, u.originTarget(named[0..8]));
+}
+
+test "the forbidden domain code points are the URL Standard's set" {
+    const set = " #%/:<>?@[\\]^|\x7f";
+    for (0..0x80) |i| {
+        const c: u8 = @intCast(i);
+        const want = c < 0x20 or std.mem.findScalar(u8, set, c) != null;
+        try testing.expectEqual(want, forbiddenDomainCodePoint(c));
+    }
+    for ("az09-._~!$&'()*+,;=") |c| try testing.expect(!forbiddenDomainCodePoint(c));
 }
 
 test "a redirect keeps the request's fragment and encodes what a URL cannot hold" {
