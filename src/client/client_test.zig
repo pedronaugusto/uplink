@@ -82,6 +82,24 @@ test "a request's head is written exactly, with nothing unchecked" {
     }.inSim, .{});
 }
 
+test "a target's bytes past ASCII go on the request line percent-encoded" {
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const io = test_io.io();
+            const server = try Server.start(testing.allocator, io, Server.fixed(ok_answer));
+            defer server.stop();
+            var client: Client = .init(testing.allocator, .{ .user_agent = null });
+            defer client.deinit(io);
+            var buf: [64]u8 = undefined;
+            var response = try client.send(io, .{ .url = server.url(&buf, "/caf\xc3\xa9?q=\xc3\xa9") });
+            response.deinit(io);
+            const seen = try server.received(testing.allocator);
+            defer testing.allocator.free(seen);
+            try testing.expect(std.mem.startsWith(u8, seen, "GET /caf%C3%A9?q=%C3%A9 HTTP/1.1\r\n"));
+        }
+    }.inSim, .{});
+}
+
 test "an extended CONNECT on a connection in HTTP/1.1 is refused with nothing sent, and the connection kept" {
     try test_io.simulated(struct {
         fn inSim() !void {

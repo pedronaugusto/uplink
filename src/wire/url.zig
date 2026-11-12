@@ -35,10 +35,30 @@ pub const Url = struct {
     }
 
     /// Write the origin-form target: the path and query, `/` for an empty
-    /// path.
+    /// path, each byte past ASCII percent-encoded as browsers encode it
+    /// (RFC 9112's request target is ASCII).
     pub fn writeTarget(u: Url, w: *std.Io.Writer) std.Io.Writer.Error!void {
         if (u.target.len == 0 or u.target[0] != '/') try w.writeByte('/');
-        try w.writeAll(u.target);
+        var start: usize = 0;
+        for (u.target, 0..) |c, i| if (c >= 0x80) {
+            try w.writeAll(u.target[start..i]);
+            try w.print("%{X:0>2}", .{c});
+            start = i + 1;
+        };
+        try w.writeAll(u.target[start..]);
+    }
+
+    /// The target `writeTarget` writes, for a field that names it (a
+    /// Digest answer's `uri`): `target` itself where it is written as it
+    /// is, else written into `buffer`.
+    pub fn originTarget(u: Url, buffer: []u8) error{NoSpaceLeft}![]const u8 {
+        const ascii = for (u.target) |c| {
+            if (c >= 0x80) break false;
+        } else true;
+        if (ascii and u.target.len != 0 and u.target[0] == '/') return u.target;
+        var w: std.Io.Writer = .fixed(buffer);
+        u.writeTarget(&w) catch return error.NoSpaceLeft;
+        return w.buffered();
     }
 
     /// Write `host[:port]` as a `Host` field or an authority has it.
@@ -64,7 +84,8 @@ pub const ParseError = error{
 /// Lenient on purpose: it refuses what could put a byte on the wire that
 /// does not belong there (a control character, a space, a tab), a user and
 /// password, and a `%` or `\` in a name, and otherwise takes what RFC 3986
-/// refuses: bytes past ASCII (a host in UTF-8 is IDNA's to convert),
+/// refuses: bytes past ASCII (a host in UTF-8 is IDNA's to convert, and
+/// `writeTarget` percent-encodes them in the path and query),
 /// `"` `<` `>` `[` `]` `^` `` ` `` `{` `|` `}` anywhere;
 /// `\` and a `%` not followed by two hex digits in the path and query;
 /// anything between an IPv6 literal's brackets, and anything after them
@@ -448,6 +469,21 @@ test "references resolve as RFC 3986's examples resolve" {
             return err;
         };
     }
+}
+
+test "a target's bytes past ASCII are written percent-encoded, the rest as they are" {
+    const u = try parse("http://h/caf\xc3\xa9/%41?q=\xc3\xa9&r=[1]");
+    try testing.expectEqualStrings("/caf\xc3\xa9/%41?q=\xc3\xa9&r=[1]", u.target);
+    var buf: [64]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try u.writeTarget(&w);
+    try testing.expectEqualStrings("/caf%C3%A9/%41?q=%C3%A9&r=[1]", w.buffered());
+    var named: [64]u8 = undefined;
+    try testing.expectEqualStrings("/caf%C3%A9/%41?q=%C3%A9&r=[1]", try u.originTarget(&named));
+    const plain = try parse("http://h/a?b");
+    try testing.expectEqual(plain.target.ptr, (try plain.originTarget(&named)).ptr);
+    try testing.expectEqualStrings("/?q", try (try parse("http://h?q")).originTarget(&named));
+    try testing.expectError(error.NoSpaceLeft, u.originTarget(named[0..8]));
 }
 
 test "a redirect keeps the request's fragment and encodes what a URL cannot hold" {
