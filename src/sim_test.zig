@@ -18,7 +18,6 @@ const Client = @import("client/Client.zig");
 const Server = @import("server/Server.zig");
 const Request = @import("server/Request.zig");
 const Response = @import("server/Response.zig");
-const cloak = @import("cloak");
 const TestProxy = @import("testing/Proxy.zig");
 const Proxy = @import("transport/Proxy.zig");
 

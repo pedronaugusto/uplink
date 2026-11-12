@@ -52,7 +52,6 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/tls.zig",
     } },
     .{ .name = "net system", .patterns = &.{
-        "src/net/sys.zig",
         "src/net/stream.zig",
         "src/net/Timed.zig",
         "src/net/dns/windows.zig",
@@ -211,6 +210,7 @@ pub const references: []const gantry.rules.ReferenceRule = &.{
         "xenoglyph",
         "json_schema",
         "reactor",
+        "reactor.testing",
         "shakedown",
         "std",
         "test_io",

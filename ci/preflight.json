@@ -9,6 +9,9 @@
   "test_support": [
     "src/testing/**"
   ],
+  "test_dependencies": [
+    "reactor.testing"
+  ],
   "function_exceptions": {},
   "layout_exceptions": {},
   "docs": {
