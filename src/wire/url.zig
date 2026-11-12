@@ -52,8 +52,8 @@ pub const Url = struct {
 
 /// Why a URL was refused.
 pub const ParseError = error{
-    /// Not a URL, no host, a control character or space anywhere, or a
-    /// user and password, which go in an `Authorization` field instead.
+    /// Not a URL, no host, a control character, space or tab anywhere, or
+    /// a user and password, which go in an `Authorization` field instead.
     InvalidUrl,
     /// A scheme other than `http` or `https`.
     UnsupportedScheme,
@@ -62,16 +62,16 @@ pub const ParseError = error{
 /// Take `text` apart. The fragment is dropped: it is never sent.
 ///
 /// Lenient on purpose: it refuses what could put a byte on the wire that
-/// does not belong there (a control character other than a tab, a space),
-/// a user and password, and a `%` or `\` in a name, and otherwise takes
-/// what RFC 3986 refuses: bytes past ASCII (a host in UTF-8 is IDNA's to
-/// convert), a tab, `"` `<` `>` `[` `]` `^` `` ` `` `{` `|` `}` anywhere;
+/// does not belong there (a control character, a space, a tab), a user and
+/// password, and a `%` or `\` in a name, and otherwise takes what RFC 3986
+/// refuses: bytes past ASCII (a host in UTF-8 is IDNA's to convert),
+/// `"` `<` `>` `[` `]` `^` `` ` `` `{` `|` `}` anywhere;
 /// `\` and a `%` not followed by two hex digits in the path and query;
 /// anything between an IPv6 literal's brackets, and anything after them
 /// before the port, which is dropped; and a port written with a `+` sign
 /// or `_` between digits.
 pub fn parse(text: []const u8) ParseError!Url {
-    if (fields.hasControl(text) or std.mem.findAny(u8, text, " ") != null) return error.InvalidUrl;
+    if (fields.hasControl(text) or std.mem.findAny(u8, text, " \t") != null) return error.InvalidUrl;
     const p = try parts(text);
     const secure = if (std.ascii.eqlIgnoreCase(p.scheme, "https"))
         true
@@ -391,6 +391,17 @@ test "a URL gives its host, port and origin-form target" {
 }
 
 test "a URL that could smuggle a byte onto the wire, or names another scheme, is refused" {
+    // Every control character, space and tab, in the host, the path and the query.
+    for ([_][]const u8{ "\t", " ", "\r", "\n", "\x00", "\x0b", "\x0c", "\x7f", "\x01", "\x1f" }) |c| {
+        for ([_][]const u8{ "http://exa{s}mple.com/", "http://example.com/a{s}b", "http://example.com/?q={s}" }) |shape| {
+            const text = try std.mem.replaceOwned(u8, testing.allocator, shape, "{s}", c);
+            defer testing.allocator.free(text);
+            testing.expectError(error.InvalidUrl, parse(text)) catch |err| {
+                std.debug.print("taken: {any}\n", .{text});
+                return err;
+            };
+        }
+    }
     for ([_][]const u8{
         "http://example.com/a b",
         "http://example.com/a\r\nHost: evil",
@@ -530,7 +541,8 @@ test "differential: parse and parts read every text as the standard library's UR
 
         /// `parse` as it was on the standard library's reader.
         fn before(text: []const u8) ParseError!Url {
-            if (fields.hasControl(text) or std.mem.findAny(u8, text, " ") != null) return error.InvalidUrl;
+            // url's own checks, the tab among them, before the reader's.
+            if (fields.hasControl(text) or std.mem.findAny(u8, text, " \t") != null) return error.InvalidUrl;
             const u = std.Uri.parse(text) catch return error.InvalidUrl;
             const secure = if (std.ascii.eqlIgnoreCase(u.scheme, "https"))
                 true

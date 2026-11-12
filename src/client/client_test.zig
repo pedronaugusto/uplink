@@ -71,6 +71,11 @@ test "a request's head is written exactly, with nothing unchecked" {
             }
             try testing.expectError(error.InvalidHeader, client.send(io, .{ .url = server.url(&buf, "/"), .headers = &.{.{ .name = "Host", .value = "evil" }} }));
             try testing.expectError(error.InvalidUrl, client.send(io, .{ .url = "http://127.0.0.1/a b" }));
+            // A tab is refused in the target, and in the host before IDNA reads it (its URL
+            // mode passes a tab).
+            for ([_][]const u8{ "http://127.0.0.1/a\tb", "http://127.0.0.1/?q=\t", "http://exa\tmple.com/" }) |text| {
+                try testing.expectError(error.InvalidUrl, client.send(io, .{ .url = text }));
+            }
             try testing.expectError(error.UnsupportedScheme, client.send(io, .{ .url = "ftp://127.0.0.1/" }));
             try testing.expectEqual(@as(u32, 1), server.requests.load(.monotonic));
         }
