@@ -674,8 +674,9 @@ fn writeFields(run: *Run, io: Io, w: *Io.Writer, r: Context.Route, absolute_form
     const c = run.shared;
     const url = run.url;
     if (absolute_form) {
-        // Answered for with the path as the Digest target.
-        const path = if (url.target.len != 0 and url.target[0] == '/') url.target else "/";
+        // Answered for with the target as the request line has it.
+        var target_buf: [2048]u8 = undefined;
+        const path = url.originTarget(&target_buf) catch "/";
         const slot = r.proxy.?;
         _ = try slot.auth.writeField(io, w, slot.proxy.credential, run.method.name, path);
     }
@@ -722,8 +723,7 @@ fn writeAuthorization(run: *Run, io: Io, w: *Io.Writer) Io.Writer.Error!void {
     // The target a Digest answer names: the path and query as the request
     // line has them, `/` first.
     var target_buf: [2048]u8 = undefined;
-    const t = run.url.target;
-    const target = if (t.len != 0 and t[0] == '/') t else std.mem.print(&target_buf, "/{s}", .{t}) catch "/";
+    const target = run.url.originTarget(&target_buf) catch "/";
     run.origin_entry = try run.shared.origin_auth.writeField(io, w, run.url, run.method.name, target);
 }
 

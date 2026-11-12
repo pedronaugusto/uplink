@@ -74,6 +74,20 @@ test "a request's head is written exactly, with nothing unchecked" {
     try testing.expectEqual(@as(u32, 1), server.requests.load(.monotonic));
 }
 
+test "a target's bytes past ASCII go on the request line percent-encoded" {
+    const io = test_io.io();
+    const server = try Server.start(testing.allocator, io, Server.fixed(ok_answer));
+    defer server.stop();
+    var client: Client = .init(testing.allocator, .{ .user_agent = null });
+    defer client.deinit(io);
+    var buf: [64]u8 = undefined;
+    var response = try client.send(io, .{ .url = server.url(&buf, "/caf\xc3\xa9?q=\xc3\xa9") });
+    response.deinit(io);
+    const seen = try server.received(testing.allocator);
+    defer testing.allocator.free(seen);
+    try testing.expect(std.mem.startsWith(u8, seen, "GET /caf%C3%A9?q=%C3%A9 HTTP/1.1\r\n"));
+}
+
 /// The body of a response to `GET /` with `answer`, read whole.
 fn bodyOf(comptime answer: []const u8, options: Client.Options) ![]u8 {
     const io = test_io.io();

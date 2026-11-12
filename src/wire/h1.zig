@@ -798,6 +798,22 @@ test "a response is read leniently: bare LF, a folded value, a missing reason" {
     try testing.expectEqualStrings("spaced", parsed.head.headers.get("B").?);
 }
 
+test "a URL's target with bytes past ASCII is written as the request parser takes it" {
+    const url = @import("url.zig");
+    const u = try url.parse("http://h/caf\xc3\xa9?q=\xc3\xa9");
+    var buf: [128]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+    try w.writeAll("GET ");
+    try u.writeTarget(&w);
+    try w.writeAll(" HTTP/1.1\r\nHost: h\r\n\r\n");
+    var fields: [4]Field = undefined;
+    const parsed = (try parseRequest(w.buffered(), &fields, .{})).?;
+    try testing.expectEqualStrings("/caf%C3%A9?q=%C3%A9", parsed.head.target);
+    // Written as the URL holds it, the parser refuses the line.
+    var raw = "GET /caf\xc3\xa9 HTTP/1.1\r\nHost: h\r\n\r\n".*;
+    try testing.expectError(error.InvalidStartLine, parseRequest(&raw, &fields, .{}));
+}
+
 test "a request is read strictly: bare LF, folding and spaced names are refused" {
     var fields: [8]Field = undefined;
     var ok = "\r\nGET /a?b HTTP/1.1\r\nHost: x\r\n\r\n".*;
