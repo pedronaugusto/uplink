@@ -45,8 +45,8 @@ pub const Url = struct {
 
 /// Why a URL was refused.
 pub const ParseError = error{
-    /// Not a URL, no host, a control character or space anywhere, or a
-    /// user and password, which go in an `Authorization` field instead.
+    /// Not a URL, no host, a control character, space or tab anywhere, or
+    /// a user and password, which go in an `Authorization` field instead.
     InvalidUrl,
     /// A scheme other than `http` or `https`.
     UnsupportedScheme,
@@ -54,7 +54,7 @@ pub const ParseError = error{
 
 /// Take `text` apart. The fragment is dropped: it is never sent.
 pub fn parse(text: []const u8) ParseError!Url {
-    if (fields.hasControl(text) or std.mem.findAny(u8, text, " ") != null) return error.InvalidUrl;
+    if (fields.hasControl(text) or std.mem.findAny(u8, text, " \t") != null) return error.InvalidUrl;
     const uri = std.Uri.parse(text) catch return error.InvalidUrl;
     const secure = if (std.ascii.eqlIgnoreCase(uri.scheme, "https"))
         true
@@ -326,6 +326,17 @@ test "a URL gives its host, port and origin-form target" {
 }
 
 test "a URL that could smuggle a byte onto the wire, or names another scheme, is refused" {
+    // Every control character, space and tab, in the host, the path and the query.
+    for ([_][]const u8{ "\t", " ", "\r", "\n", "\x00", "\x0b", "\x0c", "\x7f", "\x01", "\x1f" }) |c| {
+        for ([_][]const u8{ "http://exa{s}mple.com/", "http://example.com/a{s}b", "http://example.com/?q={s}" }) |shape| {
+            const text = try std.mem.replaceOwned(u8, testing.allocator, shape, "{s}", c);
+            defer testing.allocator.free(text);
+            testing.expectError(error.InvalidUrl, parse(text)) catch |err| {
+                std.debug.print("taken: {any}\n", .{text});
+                return err;
+            };
+        }
+    }
     for ([_][]const u8{
         "http://example.com/a b",
         "http://example.com/a\r\nHost: evil",
