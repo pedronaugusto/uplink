@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.3] - 2026-11-12
+
 ### Security
 
 - `wire.url.parse` refuses a horizontal tab anywhere in a URL, as it refuses a space and every other control character. A tab in the path or query went onto the HTTP/1.1 request line (and HTTP/2's `:path`) as it was, where a server or intermediary that splits the line on any whitespace reads a different request; one in the host reached the `Host` field, since the client's IDNA conversion passes it. A URL a server supplies (an href in a JSON reply) could carry one. Every earlier release has it.
