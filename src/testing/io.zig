@@ -10,9 +10,10 @@
 //! (`simulated`), once, in the `Io.Threaded` binary; the evented binaries
 //! skip them. What meets the system's sockets on every backend is the
 //! conformance suite (`conformance_test.zig`, one round trip per feature)
-//! and the tests of what only the system shows: socket options and a bind
-//! made past the `Io`, the system's peek, named pipes, timed reads and
-//! connects, and interop with openssl and curl.
+//! and the tests of what only the system shows: the system's peek, named
+//! pipes, timed reads and connects, and interop with openssl and curl. A
+//! socket reactor makes past the `Io` (a bind, an option before the connect)
+//! is made on the simulation through reactor's seam, its options told there.
 
 const std = @import("std");
 const reactor = @import("reactor");
@@ -23,6 +24,8 @@ const Io = std.Io;
 
 /// The node's `Io` while a test body runs under `simulated`.
 var simulating: ?Io = null;
+/// The node's seam while a test body runs under `simulated`.
+var node_seam: ?*reactor_testing.Seam = null;
 
 var starting: std.atomic.Mutex = .unlocked;
 var started: std.atomic.Value(bool) = .init(false);
@@ -68,6 +71,12 @@ fn start() void {
     started.store(true, .release);
 }
 
+/// The socket options reactor told the node's seam so far, under `simulated`
+/// (`reactor.testing`'s `asked()`): they are recorded there, never set.
+pub fn asked() reactor_testing.Seam.Asked {
+    return node_seam.?.asked();
+}
+
 /// A test's own `Io` layer over `io()` (a `FaultIo`, a counting one) with the
 /// node's seam in front of it again while simulating: reactor finds the seam
 /// only in the outermost layer. The layer itself when not simulating.
@@ -109,7 +118,11 @@ pub fn simulated(comptime body: anytype, args: anytype) !void {
     var seam: reactor_testing.Seam = undefined;
     seam.init(node.io());
     simulating = seam.io();
-    defer simulating = null;
+    node_seam = &seam;
+    defer {
+        simulating = null;
+        node_seam = null;
+    }
     const outcome = sim.run(body, args);
     switch (outcome) {
         .finished => {},

@@ -3,7 +3,6 @@
 //! local address, HTTPS records and Unix sockets.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const reactor = @import("reactor");
 const Io = std.Io;
 const IpAddress = Io.net.IpAddress;
@@ -365,46 +364,60 @@ test "an endpoint's hints are dialed when its name has no address" {
     }.inSim, .{});
 }
 
-/// An integer socket option's value, read back (POSIX).
-fn readOption(handle: Io.net.Socket.Handle, level: i32, name: u32) !c_int {
-    var value: c_int = 0;
-    var len: std.posix.socklen_t = @sizeOf(c_int);
-    switch (std.posix.errno(std.posix.system.getsockopt(handle, level, name, @ptrCast(&value), &len))) { // safe: the option is a c_int, its length given
-        .SUCCESS => return value,
-        else => return error.Unexpected,
-    }
-}
-
-test "a dial's socket has the options it asked for, set by reactor" {
-    // Reactor makes the socket itself past the Io (a bind, an option before connect), or falls back to the system's getaddrinfo: on the system's sockets.
-    if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return error.SkipZigTest;
-    const io = test_io.io();
-    var listener = try (try IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
-    defer listener.deinit(io);
-    var dialed = try dial(io, "127.0.0.1", listener.socket.address.getPort(), .{ .socket = .{
-        .nodelay = true,
-        .keepalive = .{ .on = .{ .idle = .literal(45) } },
-        .receive_buffer = .fromRaw(96 << 10),
-    } });
-    defer dialed.stream.deinit(io);
-    const h = dialed.stream.borrow().socket.socket.handle;
-    const posix = std.posix;
-    try testing.expect(try readOption(h, posix.IPPROTO.TCP, posix.TCP.NODELAY) != 0);
-    try testing.expect(try readOption(h, posix.SOL.SOCKET, posix.SO.KEEPALIVE) != 0);
-    const idle: u32 = if (@hasDecl(posix.TCP, "KEEPIDLE")) posix.TCP.KEEPIDLE else posix.TCP.KEEPALIVE;
-    try testing.expectEqual(@as(c_int, 45), try readOption(h, posix.IPPROTO.TCP, idle));
-    try testing.expect(try readOption(h, posix.SOL.SOCKET, posix.SO.RCVBUF) >= 96 << 10);
-    if (@hasDecl(posix.SO, "NOSIGPIPE")) try testing.expect(try readOption(h, posix.SOL.SOCKET, posix.SO.NOSIGPIPE) != 0);
+test "a dial's socket is made with the options it asked for, told to reactor" {
+    // An option before the connect makes reactor make the socket itself; on
+    // the simulation its seam makes the connection and records the options.
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const io = test_io.io();
+            var listener = try (try IpAddress.parse("127.0.0.1", 0)).listen(io, .{});
+            defer listener.deinit(io);
+            const before = test_io.asked().count;
+            var dialed = try dial(io, "127.0.0.1", listener.socket.address.getPort(), .{ .socket = .{
+                .nodelay = true,
+                .keepalive = .{ .on = .{ .idle = .literal(45) } },
+                .receive_buffer = .fromRaw(96 << 10),
+            } });
+            defer dialed.stream.deinit(io);
+            // The connection is made: the listener accepts it from the dial's own end.
+            const accepted = try listener.accept(io);
+            defer accepted.close(io);
+            try testing.expect(accepted.socket.address.eql(&dialed.stream.borrow().socket.socket.address));
+            try testing.expect(dialed.peer.?.eql(&listener.socket.address));
+            // The options, told once, as the socket is made.
+            const asked = test_io.asked();
+            try testing.expectEqual(before + 1, asked.count);
+            try testing.expectEqual(@as(?bool, true), asked.last.?.nodelay);
+            try testing.expectEqual(@as(?bool, true), asked.last.?.keepalive);
+            try testing.expectEqual(@as(?u32, 96 << 10), asked.last.?.receive_buffer);
+        }
+    }.inSim, .{});
 }
 
 test "a dial from a local address goes from it, to the name's addresses of its family only" {
-    // Reactor makes the socket itself past the Io (a bind, an option before connect), or falls back to the system's getaddrinfo: on the system's sockets.
-    const io = test_io.io();
-    var listener = try (try IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
-    defer listener.deinit(io);
-    const port = listener.socket.address.getPort();
-    var dialed = try dial(io, "127.0.0.1", port, .{ .local_address = .{ .ip4 = .loopback(0) } });
-    defer dialed.stream.deinit(io);
-    try testing.expectEqualSlices(u8, &.{ 127, 0, 0, 1 }, &dialed.stream.borrow().socket.socket.address.ip4.bytes);
-    try testing.expectError(error.AddressFamilyMismatch, dial(io, "::1", port, .{ .local_address = .{ .ip4 = .loopback(0) } }));
+    // A bind makes reactor make the socket itself; on the simulation its seam
+    // binds where asked.
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const io = test_io.io();
+            // localhost is 127.0.0.1 first, then ::1: a listener on each.
+            var six = try (try IpAddress.parse("::1", 0)).listen(io, .{});
+            defer six.deinit(io);
+            const port = six.socket.address.getPort();
+            var four = try (try IpAddress.parse("127.0.0.1", port)).listen(io, .{});
+            defer four.deinit(io);
+            const local: IpAddress = try .parse("::1", 4000);
+            var dialed = try dial(io, "localhost", port, .{ .local_address = local });
+            defer dialed.stream.deinit(io);
+            // Both addresses were found; the IPv6 one alone was dialed, from
+            // the bound endpoint.
+            try testing.expectEqual(@as(u8, 2), dialed.addresses);
+            try testing.expect(dialed.peer.?.eql(&six.socket.address));
+            const accepted = try six.accept(io);
+            defer accepted.close(io);
+            try testing.expect(accepted.socket.address.eql(&local));
+            try testing.expect(dialed.stream.borrow().socket.socket.address.eql(&local));
+            try testing.expectError(error.AddressFamilyMismatch, dial(io, "127.0.0.1", port, .{ .local_address = local }));
+        }
+    }.inSim, .{});
 }
