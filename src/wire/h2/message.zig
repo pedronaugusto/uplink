@@ -41,7 +41,7 @@ pub const Response = struct {
 };
 
 /// The regular fields of a block, checked: names in lower case and tokens,
-/// none of a connection's own, values without controls or edge spaces,
+/// none of a connection's own, values without controls or edge whitespace,
 /// every `content-length` the same number. Null for a malformed one.
 fn checkRegular(fields: []const Field, content_length: *?u64) bool {
     for (fields) |f| {
@@ -49,7 +49,9 @@ fn checkRegular(fields: []const Field, content_length: *?u64) bool {
         for (f.name) |ch| if (ch >= 'A' and ch <= 'Z') return false;
         if (!fields_mod.isToken(f.name)) return false;
         if (connectionSpecific(f.name, f.value)) return false;
-        if (fields_mod.hasControl(f.value) or (f.value.len != 0 and (f.value[0] == ' ' or f.value[f.value.len - 1] == ' '))) return false;
+        // RFC 9113 §8.2.1: no control character, and no space or tab at
+        // either end; the test h1's writer and reader hold a value to.
+        if (!fields_mod.isFieldValue(f.value)) return false;
         if (std.mem.eql(u8, f.name, "content-length")) {
             const n = h1.parseLength(f.value) orelse return false;
             if (content_length.*) |was| if (was != n) return false;
@@ -88,7 +90,8 @@ pub fn checkRequest(fields: []const Field) ?Request {
         h.path = "";
     } else {
         h.path = path orelse return null;
-        if (h.path.len == 0 or h.scheme == null) return null;
+        // A request target's bytes, as h1's request line holds them.
+        if (!h1.isTarget(h.path) or h.scheme == null) return null;
         if (h.protocol != null and !h.method.eql(.CONNECT)) return null;
     }
     return h;
@@ -225,4 +228,23 @@ test "a block is copied into a buffer of its own" {
     try testing.expectEqualStrings("b", kept[1].value);
     var small: [8]u8 align(@alignOf(Field)) = undefined;
     try testing.expectError(error.NoSpaceLeft, copy(&small, &.{.{ .name = "abc", .value = "def" }}));
+}
+
+test "a field value HTTP/2 reads is one h1's writer sends, at either end and inside" {
+    for (0..256) |i| {
+        const c: u8 = @intCast(i);
+        for ([_][3]u8{ .{ c, 'a', 'a' }, .{ 'a', c, 'a' }, .{ 'a', 'a', c } }) |value| {
+            const written = if (h1.checkHeader(.{ .name = "x-a", .value = &value })) |_| true else |_| false;
+            var content_length: ?u64 = null;
+            try testing.expectEqual(written, checkRegular(&.{.{ .name = "x-a", .value = &value }}, &content_length));
+        }
+    }
+}
+
+test "a :path HTTP/2 reads is a target h1's request line holds" {
+    for (0..256) |i| {
+        const piece = [_]u8{ '/', @intCast(i) };
+        const block = [_]Field{ .{ .name = ":method", .value = "GET" }, .{ .name = ":scheme", .value = "https" }, .{ .name = ":path", .value = &piece } };
+        try testing.expectEqual(h1.isTarget(&piece), checkRequest(&block) != null);
+    }
 }

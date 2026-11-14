@@ -165,15 +165,30 @@ fn parseStatusLine(line: []const u8, head: *ResponseHead) ParseError!void {
     if (line.len < 12 or line[8] != ' ') return error.InvalidStartLine;
     head.version = try parseVersion(line[0..8]);
     const digits = line[9..12];
-    if (digits[0] < '1' or digits[0] > '9' or !std.ascii.isDigit(digits[1]) or !std.ascii.isDigit(digits[2])) return error.InvalidStartLine;
+    for (digits) |d| if (!std.ascii.isDigit(d)) return error.InvalidStartLine;
     const code: u10 = @intCast(@as(u16, digits[0] - '0') * 100 + @as(u16, digits[1] - '0') * 10 + (digits[2] - '0'));
+    if (!isStatusCode(code)) return error.InvalidStartLine;
     head.status = @fromBackingInt(code);
     head.reason = "";
     if (line.len > 12) {
         if (line[12] != ' ') return error.InvalidStartLine;
         head.reason = line[13..];
-        if (fields_mod.hasControl(head.reason)) return error.InvalidStartLine;
+        if (!isReason(head.reason)) return error.InvalidStartLine;
     }
+}
+
+/// Whether a status line may carry `code`: three digits, the first of them
+/// 1 to 9 (RFC 9110 §15). The one test of a status code, the status line's
+/// reader's and its writer's.
+pub fn isStatusCode(code: u10) bool {
+    return code >= 100 and code <= 999;
+}
+
+/// Whether `text` may be a status line's reason phrase (RFC 9112 §4):
+/// tabs, spaces, visible characters and `obs-text`, no control character.
+/// The one test of a reason, the reader's and the writer's.
+pub fn isReason(text: []const u8) bool {
+    return !fields_mod.hasControl(text);
 }
 
 fn parseRequestLine(line: []const u8, head: *RequestHead) ParseError!void {
@@ -182,18 +197,26 @@ fn parseRequestLine(line: []const u8, head: *RequestHead) ParseError!void {
     head.method = Method.parse(line[0..sp1]) catch return error.InvalidStartLine;
     head.target = line[sp1 + 1 .. sp2];
     if (!isTarget(head.target)) return error.InvalidStartLine;
-    // A target is ASCII and has no fragment (RFC 9112 §3.2): a raw byte
-    // past 0x7f, or a `#`, is no request's.
-    for (head.target) |c| if (c >= 0x80 or c == '#') return error.InvalidStartLine;
     head.version = try parseVersion(line[sp2 + 1 ..]);
 }
 
-/// Whether `text` may be sent as a request target: not empty, and no
-/// whitespace or control character.
+/// Whether `c` may be a byte of a request target (RFC 9112 §3.2): a
+/// target is URI characters, which are visible ASCII, and has no fragment,
+/// so no `#`; no space, tab or control character, and no byte past 0x7e.
+/// The one test of a target's bytes, the request line's reader's
+/// (`parseRequestLine`), its writer's (`checkRequestHead`) and HTTP/2's
+/// `:path` reader's: kept apart, the writer sent a byte past ASCII the
+/// reader refused (uplink's fuzz job, tape 30d40:e:0:30d40:0:0:0:30d40).
+pub fn isTargetByte(c: u8) bool {
+    return c > ' ' and c < 0x7f and c != '#';
+}
+
+/// Whether `text` may be a request target: not empty, and every byte one
+/// a target holds (`isTargetByte`).
 pub fn isTarget(text: []const u8) bool {
     if (text.len == 0) return false;
-    if (fields_mod.hasControl(text)) return false;
-    return std.mem.findAny(u8, text, " \t") == null;
+    for (text) |c| if (!isTargetByte(c)) return false;
+    return true;
 }
 
 /// The fields after the start line, which ends at `from`, up to the blank
@@ -224,8 +247,9 @@ fn parseField(line: []const u8, lenience: Lenience) ParseError!Field {
     // response, as RFC 9112 §5.1 tells a proxy to drop it.
     if (lenience == .response) name = std.mem.trimEnd(u8, name, " \t");
     if (!fields_mod.isToken(name)) return error.InvalidFieldName;
+    // Trimmed, as RFC 9112 §5 reads it, the value is one a writer may send.
     const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
-    if (fields_mod.hasControl(value)) return error.InvalidFieldValue;
+    if (!fields_mod.isFieldValue(value)) return error.InvalidFieldValue;
     return .{ .name = name, .value = value };
 }
 
@@ -238,7 +262,7 @@ fn unfold(bytes: []u8, field: *Field, line_start: usize, line: []const u8) Parse
     const line_end = line_start + line.len;
     @memset(bytes[value_end..line_start], ' ');
     const joined = std.mem.trim(u8, bytes[value_start..line_end], " \t");
-    if (fields_mod.hasControl(joined)) return error.InvalidFieldValue;
+    if (!fields_mod.isFieldValue(joined)) return error.InvalidFieldValue;
     // An empty first line leaves the value starting at the continuation.
     field.value = joined;
 }
@@ -629,8 +653,8 @@ pub const RequestHeadOut = struct {
 pub const WriteHeadError = error{
     /// The writer failed.
     WriteFailed,
-    /// A method that is not a token, or a target with whitespace or a
-    /// control character.
+    /// A method that is not a token, or a target with a byte no target
+    /// holds (`isTargetByte`), which the request line's reader refuses.
     InvalidRequestLine,
     /// A field name that is not a token, or a value with a control
     /// character or whitespace at its ends.
@@ -662,7 +686,7 @@ pub fn checkRequestHead(head: RequestHeadOut) error{ InvalidRequestLine, Invalid
     if (!fields_mod.isToken(head.method.name)) return error.InvalidRequestLine;
     var target_len: usize = 0;
     for (head.target) |piece| {
-        if (piece.len != 0 and !isTarget(piece)) return error.InvalidRequestLine;
+        for (piece) |c| if (!isTargetByte(c)) return error.InvalidRequestLine;
         target_len += piece.len;
     }
     if (target_len == 0) return error.InvalidRequestLine;
@@ -685,12 +709,25 @@ pub fn writeField(w: *Io.Writer, h: Header) Io.Writer.Error!void {
     try w.writeAll("\r\n");
 }
 
+/// Why a status line was not written.
+pub const WriteStatusError = error{
+    /// The writer failed.
+    WriteFailed,
+    /// A code that is not three digits from 100 (`isStatusCode`), which the
+    /// status line's reader refuses; nothing was written.
+    InvalidStatusLine,
+};
+
 /// Write a response's status line, its line end included: always
 /// `HTTP/1.1`, the highest version of the protocol a server speaks, and the
-/// status's reason phrase, or none for a code without one.
-pub fn writeStatusLine(w: *Io.Writer, status: Status) Io.Writer.Error!void {
+/// status's reason phrase, or none for a code without one. A code or reason
+/// the reader refuses is refused before a byte is written.
+pub fn writeStatusLine(w: *Io.Writer, status: Status) WriteStatusError!void {
+    if (!isStatusCode(@backingInt(status))) return error.InvalidStatusLine;
+    const reason = status.phrase() orelse "";
+    if (!isReason(reason)) return error.InvalidStatusLine;
     try w.print("HTTP/1.1 {d} ", .{@backingInt(status)});
-    if (status.phrase()) |reason| try w.writeAll(reason);
+    try w.writeAll(reason);
     try w.writeAll("\r\n");
 }
 
@@ -1158,4 +1195,46 @@ test "a status line names the status and its reason" {
     try writeStatusLine(&w, .not_found);
     try writeStatusLine(&w, @fromBackingInt(@intCast(299)));
     try testing.expectEqualStrings("HTTP/1.1 404 Not Found\r\nHTTP/1.1 299 \r\n", w.buffered());
+}
+
+test "a request target's writer refuses exactly the bytes its reader refuses" {
+    for (0..256) |i| {
+        const c: u8 = @intCast(i);
+        const piece = [_]u8{c};
+        var out_buffer: [64]u8 = undefined;
+        var w: Io.Writer = .fixed(&out_buffer);
+        const written = if (writeRequestHead(&w, .{ .method = .GET, .target = &.{ "/", &piece }, .host = "h" })) |_| true else |err| refused: {
+            try testing.expectEqual(error.InvalidRequestLine, err);
+            try testing.expectEqual(0, w.buffered().len);
+            break :refused false;
+        };
+        var line_buffer: [64]u8 = undefined;
+        const line = try std.fmt.bufPrint(&line_buffer, "GET /{c} HTTP/1.1\r\nHost: h\r\n\r\n", .{c});
+        var fields: [4]Field = undefined;
+        const read = if (parseRequest(line, &fields, .{})) |parsed| parsed != null else |_| false;
+        try testing.expectEqual(written, read);
+        try testing.expectEqual(written, isTargetByte(c));
+    }
+}
+
+test "a status line's writer refuses exactly the codes its reader refuses" {
+    for (0..1024) |i| {
+        const code: u10 = @intCast(i);
+        var out_buffer: [64]u8 = undefined;
+        var w: Io.Writer = .fixed(&out_buffer);
+        const written = if (writeStatusLine(&w, @fromBackingInt(code))) |_| true else |err| refused: {
+            try testing.expectEqual(error.InvalidStatusLine, err);
+            try testing.expectEqual(0, w.buffered().len);
+            break :refused false;
+        };
+        var line_buffer: [96]u8 = undefined;
+        const line = if (written)
+            try std.fmt.bufPrint(&line_buffer, "{s}\r\n", .{w.buffered()})
+        else
+            try std.fmt.bufPrint(&line_buffer, "HTTP/1.1 {d} \r\n\r\n", .{code});
+        var fields: [4]Field = undefined;
+        const parsed = parseResponse(line, &fields, .{}) catch null;
+        try testing.expectEqual(written, parsed != null);
+        if (parsed) |p| try testing.expectEqual(code, @backingInt(p.head.status));
+    }
 }

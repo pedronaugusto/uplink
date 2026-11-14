@@ -280,7 +280,14 @@ fn anyHeadOut(_: void, case: *shakedown.Case) !void {
 }
 
 test "property: a request head written is read back as the fields passed, no more" {
-    try shakedown.check(testing.allocator, {}, anyHeadOut, .{ .cases = 20000, .seed = 0x9115 });
+    try shakedown.check(testing.allocator, {}, anyHeadOut, .{
+        .cases = 20000,
+        .seed = 0x9115,
+        .regressions = &.{
+            // A target byte past ASCII the writer sent and the reader refused (the fuzz job).
+            "30d40:e:0:30d40:0:0:0:30d40",
+        },
+    });
 }
 
 // h1.ChunkedDecoder and ChunkedWriter.
