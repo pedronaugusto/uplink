@@ -573,7 +573,7 @@ fn compress(c: *Conn, w: *Writing, input: []const u8, end: bool) WriteError![]co
             w.compressed.items.len += drained.out_len;
             if (drained.done) break;
         }
-        std.debug.assert(std.mem.endsWith(u8, w.compressed.items, &sync_tail));
+        aegis.assert.invariant(std.mem.endsWith(u8, w.compressed.items, &sync_tail), "std.mem.endsWith(u8, w.compressed.items, &sync_tail)");
         w.compressed.items.len -= 4;
         // An empty message compresses to one empty stored block's byte.
         if (w.compressed.items.len == 0) try w.compressed.append(c.gpa, 0x00);

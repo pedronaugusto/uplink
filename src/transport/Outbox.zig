@@ -73,7 +73,7 @@ fn take(o: *Outbox, sending: *std.ArrayList(u8)) void {
 /// pending is dropped, and the connection is to end.
 pub fn send(io: Io, lock: anytype, held: anytype, sending: *std.ArrayList(u8), sink: anytype) bool {
     var o = &held.value().outbox;
-    std.debug.assert(!o.busy);
+    aegis.assert.invariant(!o.busy, "!o.busy");
     o.busy = true;
     while (o.backlog() != 0) {
         o.take(sending);
@@ -95,7 +95,7 @@ pub fn send(io: Io, lock: anytype, held: anytype, sending: *std.ArrayList(u8), s
 /// connection: before it is shared, or once it is torn down. False when
 /// the write failed; what was pending is dropped either way.
 pub fn sendAlone(o: *Outbox, sink: anytype) bool {
-    std.debug.assert(!o.busy);
+    aegis.assert.invariant(!o.busy, "!o.busy");
     const sent = o.backlog() == 0 or sink.transmit(o.pending.written());
     o.pending.writer.end = 0;
     return sent;

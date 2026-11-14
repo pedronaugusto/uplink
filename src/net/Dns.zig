@@ -229,7 +229,7 @@ pub fn https(d: *const Dns, io: Io, gpa: Allocator, host: []const u8) (NameError
             const target = if (s.target.len == 0) name else s.target;
             @memcpy(targets[n][0..target.len], target);
             var record: Resolver.Binding.Record = .{ .target = targets[n][0..target.len], .service = s };
-            kept.append(&record) catch unreachable; // unreachable: fewer than `max_records` were kept, checked above
+            kept.append(&record) catch unreachable; // glint-ignore: Z026 -- fewer than `max_records` were kept, checked above
             n += 1;
             // In order of priority; equal ones in the answer's order.
             const list = kept.items();
@@ -270,7 +270,7 @@ pub const max_records = 16;
 fn turnOf(turn: sync.Events, servers: usize) usize {
     // No servers is no turn: `exchange` answers that before it asks.
     const round = turn.rem(servers) catch return 0;
-    return aegis.int.cast(usize, round.raw()) catch unreachable; // unreachable: below the number of servers, a usize
+    return aegis.int.cast(usize, round.raw()) catch unreachable; // glint-ignore: Z026 -- below the number of servers, a usize
 }
 
 pub const Stub = struct {

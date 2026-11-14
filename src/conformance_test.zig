@@ -44,7 +44,7 @@ const Running = struct {
     fn stop(r: *Running) void {
         const io = test_io.io();
         r.server.shutdown(io);
-        // glint-ignore: Z026 -- serve ends with the shutdown; its result is not what the test checks
+        // serve ends with the shutdown; its result is not what the test checks
         r.task.await(io) catch {};
         r.server.deinit(io);
         r.listener.deinit(io);
@@ -362,7 +362,7 @@ test "a handler learns its client left while it computes" {
     var buf: [64]u8 = undefined;
     var sending = io.concurrent(sendOnce, .{ &client, io, running.url(&buf, "http", "/") }) catch return error.SkipZigTest;
     try Leaving.until(&Leaving.started);
-    // glint-ignore: Z026 -- the canceled send ends as it does; the handler's side is what is checked
+    // the canceled send ends as it does; the handler's side is what is checked
     sending.cancel(io) catch {};
     try Leaving.until(&Leaving.left);
 }

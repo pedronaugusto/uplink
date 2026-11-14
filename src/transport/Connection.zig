@@ -1008,7 +1008,7 @@ fn startTls(conn: *Connection, slot: usize, host: []const u8, offer: Offer) (Ope
 fn ticketNamespace(conn: *const Connection, slot: usize, buf: []u8) []const u8 {
     if (slot == 0) return "";
     const p = (conn.route.proxy orelse return "").proxy;
-    return std.mem.print(buf, "via {t} {s}:{d}", .{ p.kind, p.host, p.port }) catch unreachable; // unreachable: the buffer holds a host name and 32 bytes more, past the longest kind and port
+    return std.mem.print(buf, "via {t} {s}:{d}", .{ p.kind, p.host, p.port }) catch unreachable; // glint-ignore: Z026 -- the buffer holds a host name and 32 bytes more, past the longest kind and port
 }
 
 /// The authorities a session in `slot` checks its server against, or null

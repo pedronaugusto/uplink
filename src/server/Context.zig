@@ -249,7 +249,7 @@ pub fn init(gpa: Allocator, options: Options) Context {
         .deadlines = .init(span.toIo(options.timeouts.shortest())),
         .windows = .init(options.max_zstd_window, options.max_brotli_window),
         .encoders = if (options.compression) |c| .init(gpa, c.settings, options.max_free_buffers) else null,
-        .tickets = if (own) |r| cloak.tls.TicketKeys.init(gpa, .{ .lifetime = span.toIo(r.lifetime), .rotation = span.toIo(r.rotation) }) catch unreachable else null, // unreachable: both spans were checked above
+        .tickets = if (own) |r| cloak.tls.TicketKeys.init(gpa, .{ .lifetime = span.toIo(r.lifetime), .rotation = span.toIo(r.rotation) }) catch unreachable else null, // glint-ignore: Z026 -- both spans were checked above
         .key_log = if (options.tls) |t| if (t.key_log) |w| .init(w) else null else null,
         .live = .init(.{}),
     };

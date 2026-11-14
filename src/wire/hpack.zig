@@ -86,8 +86,8 @@ pub const Table = struct {
     }
 
     pub fn init(bytes: []u8, entries: []Entry, max_size: usize) Table {
-        std.debug.assert(bytes.len >= bytesFor(max_size));
-        std.debug.assert(entries.len >= entriesFor(max_size));
+        aegis.assert.invariant(bytes.len >= bytesFor(max_size), "bytes.len >= bytesFor(max_size)");
+        aegis.assert.invariant(entries.len >= entriesFor(max_size), "entries.len >= entriesFor(max_size)");
         return .{ .bytes = bytes, .entries = entries, .max_size = max_size };
     }
 
@@ -441,7 +441,7 @@ const testing = std.testing;
 
 fn fromHex(comptime hex: []const u8) [hex.len / 2]u8 {
     var out: [hex.len / 2]u8 = undefined;
-    _ = std.fmt.hexToBytes(&out, hex) catch unreachable; // unreachable: the tests' hex is well formed
+    _ = std.fmt.hexToBytes(&out, hex) catch unreachable; // glint-ignore: Z026 -- the tests' hex is well formed
     return out;
 }
 
@@ -540,7 +540,7 @@ test "fuzz: any block decodes or is refused, and what the encoder writes decodes
             var out: [1024]u8 = undefined;
             var fields: [32]Field = undefined;
             // Twice: a block that changed the table is read against it.
-            // glint-ignore: Z026 -- refusing the block is a right answer; the property is that nothing breaks
+            // refusing the block is a right answer; the property is that nothing breaks
             for (0..2) |_| _ = d.decode(block, &out, &fields) catch {};
             var eb: [Table.bytesFor(256)]u8 = undefined;
             var ee: [Table.entriesFor(256)]Table.Entry = undefined;

@@ -92,7 +92,7 @@ pub fn init(in: *Io.Reader, framing: h1.Framing, buffer: []u8) Body {
 
 /// End the body as `how` says. It ends once.
 fn end(b: *Body, how: Ending) void {
-    _ = b.state.step(how) catch unreachable; // unreachable: every ending is taken from reading, and reading stops at it
+    _ = b.state.step(how) catch unreachable; // glint-ignore: Z026 -- every ending is taken from reading, and reading stops at it
 }
 
 /// A request's body, read as a server reads one: its chunk framing

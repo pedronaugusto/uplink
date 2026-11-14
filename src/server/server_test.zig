@@ -39,7 +39,7 @@ const Running = struct {
     fn halt(r: *Running) void {
         const io = test_io.io();
         r.server.shutdown(io);
-        // glint-ignore: Z026 -- serve ends with the shutdown; its result is not what the test checks
+        // serve ends with the shutdown; its result is not what the test checks
         r.task.await(io) catch {};
     }
 
@@ -764,7 +764,7 @@ test "a head sent a byte at a time is cut off at the head timeout, whatever its 
                 }
             };
             var trickle = io.concurrent(Trickle.run, .{stream}) catch return error.SkipZigTest;
-            // glint-ignore: Z026 -- the trickle ends canceled; its result is not what the test checks
+            // the trickle ends canceled; its result is not what the test checks
             defer trickle.cancel(io) catch {};
             const got, const took = try readToEnd(stream, gpa);
             defer gpa.free(got);
@@ -797,7 +797,7 @@ test "a request body left unread that does not end within the drain closes the c
                 }
             };
             var trickle = io.concurrent(Trickle.run, .{stream}) catch return error.SkipZigTest;
-            // glint-ignore: Z026 -- the trickle ends canceled; its result is not what the test checks
+            // the trickle ends canceled; its result is not what the test checks
             defer trickle.cancel(io) catch {};
             // The answer, then the connection's end at the drain's time (100 ms),
             // where the body would never end.
@@ -1461,7 +1461,7 @@ test "a query goes as an HTTP POST and its answer comes back with the query's id
             var serving = io.concurrent(Server.serve, .{ &server, io, &listener }) catch return error.SkipZigTest;
             defer {
                 server.shutdown(io);
-                // glint-ignore: Z026 -- serve ends with the shutdown; its result is not what the test checks
+                // serve ends with the shutdown; its result is not what the test checks
                 serving.await(io) catch {};
             }
             var client: Client = .init(testing.allocator, .{});
@@ -1908,7 +1908,7 @@ test "a handler learns its client left while it computes: a canceled request, ov
                 var sending = io.concurrent(sendTo, .{ &client, url }) catch return error.SkipZigTest;
                 try Leaving.until(&Leaving.started, true);
                 // The client gives up on the request while its handler computes.
-                // glint-ignore: Z026 -- a canceled send ends as it does; what the test checks is the handler's side
+                // a canceled send ends as it does; what the test checks is the handler's side
                 _ = sending.cancel(io) catch {};
                 try Leaving.until(&Leaving.seen, @as(u8, 1));
             }

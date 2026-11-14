@@ -155,7 +155,7 @@ pub const Signer = struct {
         cw.print("{s}/", .{s.key.access_key}) catch return error.RequestTooLarge;
         s.writeScope(&cw, &date) catch return error.RequestTooLarge;
         var expires_buffer: [16]u8 = undefined;
-        const expires_text = std.mem.print(&expires_buffer, "{d}", .{expires}) catch unreachable; // unreachable: a u32 is ten digits
+        const expires_text = std.mem.print(&expires_buffer, "{d}", .{expires}) catch unreachable; // glint-ignore: Z026 -- a u32 is ten digits
 
         var canonical: Canonical = .{};
         try canonical.addFields(request, &.{});
@@ -357,9 +357,9 @@ const Canonical = struct {
     fn hash(c: *const Canonical, method: []const u8, target: []const u8, path: PathEncoding, payload: []const u8) [32]u8 {
         var buffer: [256]u8 = undefined;
         var hashing: Writer.Hashing(Sha256) = .init(&buffer);
-        // unreachable: a hashing writer does not fail
+        // glint-ignore: Z026 -- a hashing writer does not fail
         c.writeCanonical(&hashing.writer, method, target, path, payload) catch unreachable;
-        hashing.writer.flush() catch unreachable; // unreachable: as above
+        hashing.writer.flush() catch unreachable; // glint-ignore: Z026 -- as above
         var out: [32]u8 = undefined;
         hashing.hasher.final(&out);
         return out;
@@ -385,7 +385,7 @@ const Canonical = struct {
                 .twice => {
                     var once: [3]u8 = undefined;
                     var ow: Writer = .fixed(&once);
-                    encodeByte(&ow, byte, .path) catch unreachable; // unreachable: one byte encodes to three at most
+                    encodeByte(&ow, byte, .path) catch unreachable; // glint-ignore: Z026 -- one byte encodes to three at most
                     try encode(w, ow.buffered(), .path);
                 },
             }
@@ -465,7 +465,7 @@ pub fn formatDate(time: i64, out: *[16]u8) ?[]const u8 {
     const month_day = day.calculateMonthDay();
     const clock = epoch.getDaySeconds();
     const parts = .{ day.year, month_day.month.numeric(), month_day.day_index + 1, clock.getHoursIntoDay(), clock.getMinutesIntoHour(), clock.getSecondsIntoMinute() };
-    // unreachable: sixteen bytes hold the date while the year has four digits, as it has up to `max_time`
+    // glint-ignore: Z026 -- sixteen bytes hold the date while the year has four digits, as it has up to `max_time`
     return std.mem.print(out, "{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}Z", parts) catch unreachable;
 }
 

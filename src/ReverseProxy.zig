@@ -428,7 +428,7 @@ fn forwardedElement(arena: Allocator, request: *const Request) error{OutOfMemory
         if (request.remote) |remote| {
             var buf: [64]u8 = undefined;
             var node: Io.Writer = .fixed(&buf);
-            remote.format(&node) catch unreachable; // unreachable: an address and port fit 64 bytes
+            remote.format(&node) catch unreachable; // glint-ignore: Z026 -- an address and port fit 64 bytes
             writeValue(&w.writer, node.buffered()) catch break :write;
         } else w.writer.writeAll("unknown") catch break :write;
         w.writer.writeAll(";host=") catch break :write;

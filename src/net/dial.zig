@@ -421,7 +421,7 @@ const Failures = struct {
 };
 
 fn connectAny(io: Io, addresses: []const IpAddress, delay: Io.Duration, deadline: Io.Timeout, local: Local) DialError!Won {
-    std.debug.assert(addresses.len <= max_addresses);
+    aegis.assert.invariant(addresses.len <= max_addresses, "addresses.len <= max_addresses");
     var failures: Failures = .{};
     if (addresses.len == 1) return connectOne(io, addresses[0], deadline, local) catch |err| return failures.add(err) orelse failures.result();
     const Event = Attempts.Event;

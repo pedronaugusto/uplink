@@ -43,7 +43,7 @@ test "a client and a server speak HTTP over a named pipe, the connection kept" {
     var serving = io.concurrent(Server.servePipe, .{ &server, io, &listener }) catch return error.SkipZigTest;
     defer {
         server.shutdown(io);
-        // glint-ignore: Z026 -- serve ends with the shutdown; its result is not what the test checks
+        // serve ends with the shutdown; its result is not what the test checks
         serving.await(io) catch {};
     }
     var client: Client = .init(gpa, .{ .dial = .{ .named_pipe = name } });

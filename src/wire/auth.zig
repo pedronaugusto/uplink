@@ -308,7 +308,7 @@ pub const Digest = struct {
     pub fn writeAnswer(d: *Digest, w: *Writer, user: []const u8, password: []const u8, method: []const u8, uri: []const u8) Writer.Error!void {
         d.nc += 1;
         var nc_buf: [8]u8 = undefined;
-        // unreachable: a u32 is at most eight hex digits
+        // glint-ignore: Z026 -- a u32 is at most eight hex digits
         const nc = std.mem.print(&nc_buf, "{x:0>8}", .{d.nc}) catch unreachable;
 
         // HA1 stands for the password to a server that knows it: wiped.

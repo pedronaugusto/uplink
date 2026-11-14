@@ -234,7 +234,7 @@ pub fn start(c: *Connection, w: *Io.Writer) Io.Writer.Error!void {
     if (c.role == .client) try w.writeAll(h2.preface);
     var buf: [64]u8 = undefined;
     var sw: Io.Writer = .fixed(&buf);
-    c.local_pending.?.write(&sw) catch unreachable; // unreachable: the settings are under 64 bytes
+    c.local_pending.?.write(&sw) catch unreachable; // glint-ignore: Z026 -- the settings are under 64 bytes
     try h2.writeFrame(w, .{ .len = @intCast(sw.end), .type = .settings, .flags = 0, .stream = 0 }, &.{sw.buffered()});
     const raise = @as(i64, c.limits.connection_window.raw()) - c.recv_window;
     if (raise > 0) {
@@ -603,7 +603,7 @@ fn localSettings(c: *const Connection) h2.Settings {
 pub fn giveBack(c: *Connection, w: *Io.Writer, id: ?u31, n: usize) Error!void {
     c.recv_unacked += n;
     // Twice what is owed fits: it is within a window, under 2^31 bytes.
-    const owed_twice = aegis.units.Bytes(u64).fromRaw(c.recv_unacked).mul(2) catch unreachable; // unreachable: see above
+    const owed_twice = aegis.units.Bytes(u64).fromRaw(c.recv_unacked).mul(2) catch unreachable; // glint-ignore: Z026 -- see above
     if (owed_twice.compare(c.limits.connection_window.convert(u64)) != .lt) {
         windowUpdate(w, 0, @intCast(c.recv_unacked)) catch return error.WriteFailed;
         c.recv_window += @intCast(c.recv_unacked);

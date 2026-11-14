@@ -146,8 +146,8 @@ pub fn format(at: Second, out: *[formatted_len]u8) []const u8 {
     const s: Second = if (at.compare(lowest) == .lt) lowest else if (at.compare(highest) == .gt) highest else at;
     const since = epoch.saturatingDurationTo(s);
     const days = since.convert(.day, i64, .down).raw();
-    const midnight = Days.fromRaw(days).convert(.second, i64, .exact) catch unreachable; // unreachable: a day of a year from 1 to 9999 in seconds
-    const in_day = aegis.int.cast(u32, since.saturatingSub(midnight).raw()) catch unreachable; // unreachable: a second of one day, from 0 to 86399
+    const midnight = Days.fromRaw(days).convert(.second, i64, .exact) catch unreachable; // glint-ignore: Z026 -- a day of a year from 1 to 9999 in seconds
+    const in_day = aegis.int.cast(u32, since.saturatingSub(midnight).raw()) catch unreachable; // glint-ignore: Z026 -- a second of one day, from 0 to 86399
     // civil_from_days, Howard Hinnant's inverse.
     const z = days + 719468;
     const era = @divFloor(z, 146097);
@@ -162,7 +162,7 @@ pub fn format(at: Second, out: *[formatted_len]u8) []const u8 {
     const weekday: usize = @intCast(@mod(days + 3, 7));
     return std.mem.print(out, "{s}, {d:0>2} {s} {d:0>4} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
         short_days[weekday], day, months[month - 1], year, in_day / 3600, (in_day / 60) % 60, in_day % 60,
-    }) catch unreachable; // unreachable: every field has its fixed width, 29 bytes in all
+    }) catch unreachable; // glint-ignore: Z026 -- every field has its fixed width, 29 bytes in all
 }
 
 const testing = std.testing;

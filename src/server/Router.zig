@@ -25,6 +25,7 @@ const Pattern = @import("Pattern.zig");
 const Handler = @import("Handler.zig");
 const Request = @import("Request.zig");
 const Response = @import("Response.zig");
+const aegis = @import("aegis");
 
 const Router = @This();
 
@@ -204,8 +205,8 @@ pub const Match = struct {
 /// sent, escapes in), or null; `allowed` gathers the methods of patterns
 /// that matched the path under another method.
 pub fn match(r: *const Router, method: Method, host: []const u8, path: []const u8, allowed: *Allowed) ?Match {
-    std.debug.assert(path.len != 0);
-    std.debug.assert(path[0] == '/');
+    aegis.assert.invariant(path.len != 0, "path.len != 0");
+    aegis.assert.invariant(path[0] == '/', "path[0] == '/'");
     const name = hostName(host);
     for (r.hosts.items) |*t| if (std.ascii.eqlIgnoreCase(t.host, name)) {
         var found: Match = undefined;

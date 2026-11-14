@@ -109,7 +109,7 @@ pub fn accept(out: *Accepted, gpa: Allocator, io: Io, request: *ServerRequest, r
         if (agreed) |d| {
             var buf: [256]u8 = undefined;
             var w: Io.Writer = .fixed(&buf);
-            d.write(&w) catch unreachable; // unreachable: the parameters are under 256 bytes
+            d.write(&w) catch unreachable; // glint-ignore: Z026 -- the parameters are under 256 bytes
             response.header("Sec-WebSocket-Extensions", w.buffered()) catch break :headers;
         }
     }
@@ -276,7 +276,7 @@ fn open(out: *Opened, client: *Client, gpa: Allocator, io: Io, http_url: []const
             .client_bits_offered = c.window_bits == 15,
             .client_max_window_bits = if (c.window_bits < 15) c.window_bits else null,
         };
-        offer.write(&w) catch unreachable; // unreachable: an offer is under 128 bytes
+        offer.write(&w) catch unreachable; // glint-ignore: Z026 -- an offer is under 128 bytes
         headers[n] = .{ .name = "Sec-WebSocket-Extensions", .value = w.buffered() };
         n += 1;
     }

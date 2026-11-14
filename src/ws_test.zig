@@ -39,7 +39,7 @@ const Running = struct {
     fn stop(r: *Running) void {
         const io = test_io.io();
         r.server.shutdown(io);
-        // glint-ignore: Z026 -- serve ends with the shutdown; its result is not what the test checks
+        // serve ends with the shutdown; its result is not what the test checks
         r.task.await(io) catch {};
         r.server.deinit(io);
         r.listener.deinit(io);

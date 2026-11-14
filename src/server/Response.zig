@@ -118,7 +118,7 @@ const Stages = aegis.state.Machine(State, Event, .{ .initial = .open, .terminal 
 
 /// Take `event`'s edge; every caller is at a state it leaves from.
 fn advance(r: *Response, event: Event) void {
-    _ = r.state.step(event) catch unreachable; // unreachable: each caller is open or streaming, as its event needs
+    _ = r.state.step(event) catch unreachable; // glint-ignore: Z026 -- each caller is open or streaming, as its event needs
 }
 
 const Framing = enum {
@@ -183,7 +183,7 @@ fn appendField(r: *Response, buffer: *BufferPool.Buffer, len: *usize, name: []co
     const need = name.len + 2 + value.len + 2;
     try r.reserve(buffer, len.*, need);
     var w: Io.Writer = .fixed(buffer.*[len.*..]);
-    h1.writeField(&w, .{ .name = name, .value = value }) catch unreachable; // unreachable: room was reserved for the line
+    h1.writeField(&w, .{ .name = name, .value = value }) catch unreachable; // glint-ignore: Z026 -- room was reserved for the line
     len.* += need;
 }
 
@@ -482,7 +482,7 @@ pub fn release(r: *Response, io: Io) void {
 /// Forget everything set, for an answer the server writes in its place
 /// (a 500 after a handler failed before its head went out).
 pub fn reset(r: *Response, io: Io) void {
-    std.debug.assert(r.state.current() == .open);
+    aegis.assert.invariant(r.state.current() == .open, "r.state.current() == .open");
     r.release(io);
     const kept = r.*;
     r.* = .init(kept.socket, kept.head_only, kept.http1_0, kept.accept_encoding);
@@ -565,7 +565,7 @@ fn framingFor(r: *const Response, want: Framing, streamed: ?Encoder.Coding) Fram
 /// length is known (`declared`), `chunked` while streaming, `none` for a
 /// head alone. `coded` is the coding a whole body was put under.
 fn sendHead(r: *Response, want: Framing, coded: ?Encoder.Coding) Error!void {
-    std.debug.assert(r.state.current() == .open);
+    aegis.assert.invariant(r.state.current() == .open, "r.state.current() == .open");
     // A body streamed under a coding is chunked, whatever its length.
     const streamed = if (want == .chunked) r.coding(r.declared) else null;
     r.framing = r.framingFor(want, streamed);

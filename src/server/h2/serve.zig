@@ -261,7 +261,7 @@ fn startStream(session: *Session, shared: *Session.Shared, id: u31, fields: []co
     };
     const buffer = try pool.acquire(io, class);
     errdefer pool.release(io, buffer);
-    const kept = h2.message.copy(buffer, fields) catch unreachable; // unreachable: the class fits the fields
+    const kept = h2.message.copy(buffer, fields) catch unreachable; // glint-ignore: Z026 -- the class fits the fields
     // A malformed request is a stream error at once (RFC 9113 §8.1.1), and a
     // declared length is checked against the data as it comes.
     const head = h2.message.checkRequest(kept) orelse {

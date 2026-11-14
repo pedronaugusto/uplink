@@ -87,7 +87,7 @@ const settings: h2.Settings = .{
 pub fn upgradeSettings(out: *[upgrade_settings_len]u8) []const u8 {
     var buf: [64]u8 = undefined;
     var w: Io.Writer = .fixed(&buf);
-    settings.write(&w) catch unreachable; // unreachable: the settings are under 64 bytes
+    settings.write(&w) catch unreachable; // glint-ignore: Z026 -- the settings are under 64 bytes
     return std.base64.url_safe_no_pad.Encoder.encode(out, w.buffered());
 }
 
@@ -612,7 +612,7 @@ fn dispatch(h: *H2, io: Io, shared: *Shared, event: h2.Connection.Event) Allocat
             const st = find(shared, hd.stream) orelse return;
             const class = BufferPool.Class.fitting(h2.message.copySize(hd.fields)) orelse return h.malformed(shared, st);
             const buffer = h.ctx.buffers.acquire(io, class) catch return error.OutOfMemory;
-            const kept = h2.message.copy(buffer, hd.fields) catch unreachable; // unreachable: the class fits the fields
+            const kept = h2.message.copy(buffer, hd.fields) catch unreachable; // glint-ignore: Z026 -- the class fits the fields
             if (st.status == null) {
                 const head = h2.message.checkResponse(kept) orelse {
                     h.ctx.buffers.release(io, buffer);

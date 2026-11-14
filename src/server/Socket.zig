@@ -97,7 +97,7 @@ const phase_edges = edges: {
 
 /// Begin the phase `start` starts.
 pub fn enter(c: *Socket, start: Start) void {
-    _ = c.phase.step(start) catch unreachable; // unreachable: the handshake starts first, and nothing follows a takeover
+    _ = c.phase.step(start) catch unreachable; // glint-ignore: Z026 -- the handshake starts first, and nothing follows a takeover
 }
 
 /// Why an operation failed.
