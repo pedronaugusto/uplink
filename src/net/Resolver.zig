@@ -126,7 +126,7 @@ pub fn service(r: Resolver, io: Io, gpa: Allocator, host: []const u8, port: u16)
 /// `host`'s addresses on `port`: the address itself when `host` is one,
 /// else the resolver's answer.
 pub fn lookup(r: Resolver, io: Io, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress) LookupError![]IpAddress {
-    std.debug.assert(out.len != 0);
+    aegis.assert.invariant(out.len != 0, "out.len != 0");
     if (reactor.net.literal(host, port)) |address| {
         if (family) |f| if (address != f) return error.NameNotResolved;
         out[0] = address;

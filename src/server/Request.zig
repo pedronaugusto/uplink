@@ -19,6 +19,7 @@ const BufferPool = @import("../transport/BufferPool.zig");
 const Decoder = @import("../coding/Decoder.zig");
 const Socket = @import("Socket.zig");
 const Session = @import("h2/Session.zig");
+const aegis = @import("aegis");
 
 const Request = @This();
 
@@ -94,7 +95,7 @@ pub const Params = struct {
 
     /// Add a capture; past `max`, the router refused the pattern already.
     pub fn put(p: *Params, name: []const u8, value: []const u8) void {
-        std.debug.assert(p.len < max);
+        aegis.assert.invariant(p.len < max, "p.len < max");
         p.names[p.len] = name;
         p.values[p.len] = value;
         p.len += 1;
@@ -185,7 +186,7 @@ fn open(r: *Request, io: Io, decode: bool) *Io.Reader {
             r.decoded = d.start(raw, &r.socket.context.windows);
         };
     }
-    std.debug.assert(r.raw == !decode);
+    aegis.assert.invariant(r.raw == !decode, "r.raw == !decode");
     return r.decoded orelse raw;
 }
 
@@ -407,12 +408,12 @@ test "fuzz: any target is read or refused, and one read names a path, a query or
             const text = buf[0..len];
             const methods = [_]Method{ .GET, .CONNECT, .OPTIONS };
             const method = gen.oneOf(s, Method, &methods);
-            // glint-ignore: Z026 -- a generated target may parse or not; the property checks only one that does
+            // a generated target may parse or not; the property checks only one that does
             if (Target.parse(method, text)) |t| {
                 if (t.path.len != 0) try std.testing.expect(t.path[0] == '/');
                 if (t.query) |q| try std.testing.expect(std.mem.findScalar(u8, q, '?') == null or std.mem.findScalar(u8, text, '?') != null);
             } else |_| {}
-            // glint-ignore: Z026 -- a generated target may parse or not; the property checks only one that does
+            // a generated target may parse or not; the property checks only one that does
             if (Target.parseExtended(text)) |t| {
                 try std.testing.expect(t.path.len != 0 and t.path[0] == '/');
             } else |_| {}

@@ -70,7 +70,7 @@ pub fn start(gpa: Allocator, io: Io, options: Options) !*Proxy {
 pub fn stop(p: *Proxy) void {
     const io = p.io;
     p.stopping.store(true, .release);
-    // glint-ignore: Z026 -- a wake that cannot connect finds the proxy already gone, which is what the stop waits for
+    // a wake that cannot connect finds the proxy already gone, which is what the stop waits for
     if (p.address.connect(io, .{ .mode = .stream })) |stream| stream.close(io) else |_| {}
     p.task.await(io);
     p.group.cancel(io);
@@ -295,6 +295,6 @@ fn pump(io: Io, r: *Io.Reader, to: Io.net.Stream) void {
     // more, and `stop` waiting on both.
     const protection = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(protection);
-    // glint-ignore: Z026 -- either side ending ends the tunnel; there is nothing to report
+    // either side ending ends the tunnel; there is nothing to report
     to.shutdown(io, .send) catch {};
 }

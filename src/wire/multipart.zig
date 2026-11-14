@@ -68,7 +68,7 @@ pub const Writer = struct {
 
     /// A body between `boundary`s, which `isBoundary` must accept.
     pub fn init(out: *Io.Writer, boundary: []const u8) Writer {
-        std.debug.assert(isBoundary(boundary));
+        aegis.assert.invariant(isBoundary(boundary), "isBoundary(boundary)");
         return .{ .out = out, .boundary = boundary };
     }
 
@@ -230,8 +230,8 @@ pub const Reader = struct {
     /// own reads. `in`'s buffer must hold at least a boundary and its
     /// delimiter, 74 bytes, more to read in larger steps.
     pub fn init(in: *Io.Reader, boundary: []const u8, head_buffer: []u8, buffer: []u8) Reader {
-        std.debug.assert(isBoundary(boundary));
-        std.debug.assert(in.buffer.len >= boundary.len + 4);
+        aegis.assert.invariant(isBoundary(boundary), "isBoundary(boundary)");
+        aegis.assert.invariant(in.buffer.len >= boundary.len + 4, "in.buffer.len >= boundary.len + 4");
         var r: Reader = .{
             .in = in,
             .delimiter_buffer = undefined,
@@ -269,7 +269,7 @@ pub const Reader = struct {
         const after = try r.peek(2);
         if (std.mem.eql(u8, after, "--")) {
             r.in.toss(2);
-            _ = r.state.step(.closed) catch unreachable; // unreachable: at a boundary, before a part or between two
+            _ = r.state.step(.closed) catch unreachable; // glint-ignore: Z026 -- at a boundary, before a part or between two
             return null;
         }
         while (true) {
@@ -280,7 +280,7 @@ pub const Reader = struct {
         if (!std.mem.eql(u8, try r.peek(2), "\r\n")) return error.Malformed;
         r.in.toss(2);
         const head = try r.readHead();
-        _ = r.state.step(.part) catch unreachable; // unreachable: at a boundary, before a part or between two
+        _ = r.state.step(.part) catch unreachable; // glint-ignore: Z026 -- at a boundary, before a part or between two
         return head;
     }
 
@@ -306,7 +306,7 @@ pub const Reader = struct {
             }
         }
         // A preamble: the boundary follows a CRLF.
-        _ = r.state.step(.skip) catch unreachable; // unreachable: only the preamble is skipped
+        _ = r.state.step(.skip) catch unreachable; // glint-ignore: Z026 -- only the preamble is skipped
         while (r.state.current() == .body) _ = try r.dataSlice(std.math.maxInt(usize));
     }
 
@@ -358,7 +358,7 @@ pub const Reader = struct {
             if (std.mem.find(u8, buffered, d)) |at| {
                 if (at == 0) {
                     r.in.toss(d.len);
-                    _ = r.state.step(.delimiter) catch unreachable; // unreachable: only a part's data is read
+                    _ = r.state.step(.delimiter) catch unreachable; // glint-ignore: Z026 -- only a part's data is read
                     return &.{};
                 }
                 const n = @min(at, limit);

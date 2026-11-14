@@ -101,9 +101,9 @@ pub fn deinit(t: *Timed, io: Io, keeper: Keeper) void {
         .unwatched => {},
         .deadlines => {
             keeper.deadlines.remove(io, &side.watch);
-            _ = side.mode.step(.released) catch unreachable; // unreachable: watched until now
+            _ = side.mode.step(.released) catch unreachable; // glint-ignore: Z026 -- watched until now
         },
-        .operate, .unenforced => _ = side.mode.step(.released) catch unreachable, // unreachable: kept until now
+        .operate, .unenforced => _ = side.mode.step(.released) catch unreachable, // glint-ignore: Z026 -- kept until now
     };
 }
 
@@ -125,7 +125,7 @@ pub fn perform(t: *Timed, io: Io, keeper: Keeper, op: Io.Operation, deadline: ?I
     if (at.nanoseconds <= Io.Clock.awake.now(io).nanoseconds) return error.TimedOut;
     // A deadline that fired on the other side has aborted the socket.
     if (t.fired()) return error.TimedOut;
-    if (side.mode.current() == .unwatched) _ = side.mode.step(if (keeper.deadlines.add(io, &side.watch)) .watched else .unwatchable) catch unreachable; // unreachable: unwatched until now
+    if (side.mode.current() == .unwatched) _ = side.mode.step(if (keeper.deadlines.add(io, &side.watch)) .watched else .unwatchable) catch unreachable; // glint-ignore: Z026 -- unwatched until now
     switch (side.mode.current()) {
         .deadlines => return keeper.deadlines.operate(io, &side.watch, op, .{ .raw = at, .clock = .awake }) catch |err| switch (err) {
             error.Timeout => error.TimedOut,
@@ -137,7 +137,7 @@ pub fn perform(t: *Timed, io: Io, keeper: Keeper, op: Io.Operation, deadline: ?I
             error.ConcurrencyUnavailable => {
                 // This `Io` cannot bound a socket operation: from here on
                 // this side runs unbounded, the socket counted once.
-                _ = side.mode.step(.unbounded) catch unreachable; // unreachable: the Io kept them until now
+                _ = side.mode.step(.unbounded) catch unreachable; // glint-ignore: Z026 -- the Io kept them until now
                 if (t.counted.swap(.set, .monotonic) == .clear) sync.bump(keeper.unenforced);
                 return io.operate(op);
             },
@@ -240,7 +240,7 @@ test "a read and a write under way at once each end at their own deadline" {
     var waited: u32 = 0;
     while (done.load(.acquire) == .no and waited < 300) : (waited += 1) try io.sleep(.fromMilliseconds(10), .awake);
     if (done.load(.acquire) == .no) {
-        // glint-ignore: Z026 -- the read is stopped only so the test ends; it has failed already
+        // the read is stopped only so the test ends; it has failed already
         _ = reading.cancel(io) catch {};
         return error.TestUnexpectedResult;
     }

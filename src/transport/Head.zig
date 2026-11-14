@@ -35,7 +35,7 @@ pub const min_body_buffer = 1024;
 pub const field_limit: u16 = 256;
 
 comptime {
-    std.debug.assert(fieldsBytes(field_limit) + min_body_buffer + @alignOf(Field) < BufferPool.Class.large.len());
+    aegis.assert.invariant(fieldsBytes(field_limit) + min_body_buffer + @alignOf(Field) < BufferPool.Class.large.len(), "fieldsBytes(field_limit) + min_body_buffer + @alignOf(Field) < BufferPool.Class.large.len()");
 }
 
 /// Why no head was gathered.

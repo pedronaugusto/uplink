@@ -381,7 +381,7 @@ const Context = struct {
                     .cache_hit => .{ &c.cached, "127.0.0.1", "cached" },
                     .cache_revalidated => .{ &c.cached, "127.0.0.1", "tagged" },
                 };
-                const url = std.mem.print(&url_buf, "http://{s}:{d}/{s}", .{ host, c.server.port, path }) catch unreachable; // unreachable: the longest URL is 36 bytes
+                const url = std.mem.print(&url_buf, "http://{s}:{d}/{s}", .{ host, c.server.port, path }) catch unreachable; // glint-ignore: Z026 -- the longest URL is 36 bytes
                 for (0..units) |_| try exchange(client, c.io, url);
             }
         }.run;
@@ -392,7 +392,7 @@ const Context = struct {
             fn run(c: *Context, units: u64) WorkloadError!void {
                 const tasks = task_counts[which];
                 var url_buf: [64]u8 = undefined;
-                const url = std.mem.print(&url_buf, "http://127.0.0.1:{d}/0", .{c.server.port}) catch unreachable; // unreachable: the URL is under 30 bytes
+                const url = std.mem.print(&url_buf, "http://127.0.0.1:{d}/0", .{c.server.port}) catch unreachable; // glint-ignore: Z026 -- the URL is under 30 bytes
                 var failed: std.atomic.Value(bool) = .init(false);
                 var group: Io.Group = .init;
                 errdefer group.cancel(c.io);
@@ -416,19 +416,19 @@ const Context = struct {
     /// with the chain verified, one empty response, a close.
     fn handshake(c: *Context, units: u64) WorkloadError!void {
         var url_buf: [64]u8 = undefined;
-        const url = std.mem.print(&url_buf, "https://{s}:{d}/0", .{ secure_host, c.secure.port }) catch unreachable; // unreachable: the URL is under 40 bytes
+        const url = std.mem.print(&url_buf, "https://{s}:{d}/0", .{ secure_host, c.secure.port }) catch unreachable; // glint-ignore: Z026 -- the URL is under 40 bytes
         for (0..units) |_| try exchange(&c.fresh, c.io, url);
     }
 
     fn secureKept(c: *Context, units: u64) WorkloadError!void {
         var url_buf: [64]u8 = undefined;
-        const url = std.mem.print(&url_buf, "https://{s}:{d}/1k", .{ secure_host, c.secure.port }) catch unreachable; // unreachable: the URL is under 40 bytes
+        const url = std.mem.print(&url_buf, "https://{s}:{d}/1k", .{ secure_host, c.secure.port }) catch unreachable; // glint-ignore: Z026 -- the URL is under 40 bytes
         for (0..units) |_| try exchange(&c.kept, c.io, url);
     }
 
     fn secureDownload(c: *Context, units: u64) WorkloadError!void {
         var url_buf: [64]u8 = undefined;
-        const url = std.mem.print(&url_buf, "https://{s}:{d}/big", .{ secure_host, c.secure.port }) catch unreachable; // unreachable: the URL is under 40 bytes
+        const url = std.mem.print(&url_buf, "https://{s}:{d}/big", .{ secure_host, c.secure.port }) catch unreachable; // glint-ignore: Z026 -- the URL is under 40 bytes
         for (0..units) |_| {
             var response = try c.kept.send(c.io, .{ .url = url });
             defer response.deinit(c.io);
@@ -441,7 +441,7 @@ const Context = struct {
         return struct {
             fn run(c: *Context, units: u64) WorkloadError!void {
                 var url_buf: [64]u8 = undefined;
-                const url = std.mem.print(&url_buf, "http://127.0.0.1:{d}/{t}", .{ c.server.port, which }) catch unreachable; // unreachable: the URL is under 40 bytes
+                const url = std.mem.print(&url_buf, "http://127.0.0.1:{d}/{t}", .{ c.server.port, which }) catch unreachable; // glint-ignore: Z026 -- the URL is under 40 bytes
                 for (0..units) |_| {
                     var response = try c.downloads.send(c.io, .{ .url = url });
                     defer response.deinit(c.io);

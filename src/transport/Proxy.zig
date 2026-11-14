@@ -147,14 +147,14 @@ pub fn parseKept(gpa: Allocator, arena: Allocator, credential: *?aegis.SecretByt
     const room = text.len * 4 + 64;
     var scratch: aegis.SecretBytes = try .init(gpa, room);
     defer scratch.deinit(gpa);
-    scratch.resizeWithinCapacity(room) catch unreachable; // unreachable: `room` is the capacity just made
+    scratch.resizeWithinCapacity(room) catch unreachable; // glint-ignore: Z026 -- `room` is the capacity just made
     var fixed: std.heap.FixedBufferAllocator = .init(scratch.exposeMut());
     var proxy = try parse(fixed.allocator(), text, rules);
     proxy.host = try arena.dupe(u8, proxy.host);
     if (proxy.credential) |c| {
         var kept: aegis.SecretBytes = try .init(gpa, c.user.len + c.password.len);
         errdefer kept.deinit(gpa);
-        kept.resizeWithinCapacity(c.user.len + c.password.len) catch unreachable; // unreachable: the capacity just made
+        kept.resizeWithinCapacity(c.user.len + c.password.len) catch unreachable; // glint-ignore: Z026 -- the capacity just made
         const bytes = kept.exposeMut();
         @memcpy(bytes[0..c.user.len], c.user);
         @memcpy(bytes[c.user.len..], c.password);
@@ -292,7 +292,7 @@ fn uppercaseBypassed(list: []const u8, host: []const u8, port: u16) bool {
     const ip: ?IpAddress = IpAddress.parse(host, 0) catch null;
     if (ip) |a| if (isLoopback(a)) return true;
     var port_buf: [8]u8 = undefined;
-    const port_text = std.mem.print(&port_buf, "{d}", .{port}) catch unreachable; // unreachable: a u16 is at most five digits
+    const port_text = std.mem.print(&port_buf, "{d}", .{port}) catch unreachable; // glint-ignore: Z026 -- a u16 is at most five digits
     var it = std.mem.splitScalar(u8, list, ',');
     while (it.next()) |raw| {
         const entry = std.mem.trim(u8, raw, " \t\r\n");

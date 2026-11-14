@@ -623,7 +623,7 @@ const testing = std.testing;
 /// is a pointer to the question's name) in its answer section.
 fn testResponse(out: []u8, query: []const u8, rcode: u4, records: []const []const u8) []u8 {
     // The question, without the OPT record the query carries.
-    const question_end = skipName(query, header_len) catch unreachable; // unreachable: the tests' own query
+    const question_end = skipName(query, header_len) catch unreachable; // glint-ignore: Z026 -- the tests' own query
     const q_len = question_end + 4;
     @memcpy(out[0..q_len], query[0..q_len]);
     std.mem.writeInt(u16, out[2..4], 0x8180 | @as(u16, rcode), .big);

@@ -685,7 +685,7 @@ const WaitingLog = struct {
     }
 
     fn releaseLater(log: *WaitingLog, io: Io) void {
-        io.sleep(.fromMilliseconds(150), .awake) catch {}; // glint-ignore: Z026 -- the release comes either way
+        io.sleep(.fromMilliseconds(150), .awake) catch {}; // the release comes either way
         log.release.set(io);
     }
 };

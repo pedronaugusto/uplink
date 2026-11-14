@@ -148,7 +148,7 @@ pub const Pool = struct {
             const len = blockLen(p.settings, @fromBackingInt(@intCast(i)));
             while (head.*) |node| {
                 head.* = node.next;
-                std.debug.assert(node.block.len == len);
+                aegis.assert.invariant(node.block.len == len, "node.block.len == len");
                 p.free(node.block, @fromBackingInt(@intCast(i)));
             }
         }
@@ -174,7 +174,7 @@ pub const Pool = struct {
             if (lists.free[i]) |node| {
                 lists.free[i] = node.next;
                 lists.counts[i] -= 1;
-                std.debug.assert(node.block.len == len);
+                aegis.assert.invariant(node.block.len == len, "node.block.len == len");
                 break :taken node.block;
             }
             break :taken null;

@@ -187,7 +187,7 @@ fn multipart(io: Io, response: *Response, file: Io.File, list: []const range.Spa
     var boundary_bytes: [12]u8 = undefined;
     io.random(&boundary_bytes);
     var boundary_buf: [24]u8 = undefined;
-    const boundary = std.mem.print(&boundary_buf, "{x}", .{&boundary_bytes}) catch unreachable; // unreachable: 12 bytes are 24 hex digits
+    const boundary = std.mem.print(&boundary_buf, "{x}", .{&boundary_bytes}) catch unreachable; // glint-ignore: Z026 -- 12 bytes are 24 hex digits
     var type_buf: [128]u8 = undefined;
     try response.header("Content-Type", try std.mem.print(&type_buf, "multipart/byteranges; boundary={s}", .{boundary}));
     var total: u64 = 0;
@@ -210,7 +210,7 @@ fn multipart(io: Io, response: *Response, file: Io.File, list: []const range.Spa
 
 /// A part's head, in `buf`.
 fn partHead(buf: *[256]u8, boundary: []const u8, content_type: []const u8, span: range.Span, size: u64) []const u8 {
-    return std.mem.print(buf, "--{s}\r\nContent-Type: {s}\r\nContent-Range: bytes {d}-{d}/{d}\r\n\r\n", .{ boundary, content_type, span.first, span.last, size }) catch unreachable; // unreachable: a part's head is under 256 bytes: a 24-byte boundary, a type of our table and three numbers
+    return std.mem.print(buf, "--{s}\r\nContent-Type: {s}\r\nContent-Range: bytes {d}-{d}/{d}\r\n\r\n", .{ boundary, content_type, span.first, span.last, size }) catch unreachable; // glint-ignore: Z026 -- a part's head is under 256 bytes: a 24-byte boundary, a type of our table and three numbers
 }
 
 fn copy(io: Io, response: *Response, file: Io.File, offset: u64, len: u64) anyerror!void {

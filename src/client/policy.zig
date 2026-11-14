@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const wire = @import("uplink.wire");
+const aegis = @import("aegis");
 const date = wire.date;
 const url_mod = wire.url;
 const Duration = @import("../span.zig").Duration;
@@ -97,7 +98,7 @@ pub const Retries = struct {
     /// time up to `base` doubled each attempt, at most `cap`. `random` is
     /// a fresh random number.
     pub fn backoff(r: Retries, next: u8, random: u64) Duration {
-        std.debug.assert(next >= 2);
+        aegis.assert.invariant(next >= 2, "next >= 2");
         const shift: u6 = @intCast(@min(next - 2, 40));
         // Past what a Duration holds is past any cap.
         const grown = r.base.mul(@as(u64, 1) << shift) catch r.cap;
@@ -113,7 +114,7 @@ pub const Retries = struct {
 pub fn retryAfter(value: []const u8, now: date.Second) ?Duration {
     const text = std.mem.trim(u8, value, " \t");
     // glint-ignore: Z026 -- a value that is no count of seconds is read as an HTTP date below
-    if (std.fmt.parseUnsigned(u32, text, 10)) |n| return date.Seconds.fromRaw(n).convert(.nanosecond, u64, .exact) catch unreachable else |_| {} // unreachable: a u32 of seconds is 136 years of nanoseconds
+    if (std.fmt.parseUnsigned(u32, text, 10)) |n| return date.Seconds.fromRaw(n).convert(.nanosecond, u64, .exact) catch unreachable else |_| {} // glint-ignore: Z026 -- a u32 of seconds is 136 years of nanoseconds
     const at = date.parse(text) orelse return null;
     const ahead = now.saturatingDurationTo(at);
     if (ahead.compare(.fromRaw(0)) != .gt) return .fromRaw(0);

@@ -2,6 +2,7 @@
 //! representation's length, and the `Content-Range` that answers one.
 
 const std = @import("std");
+const aegis = @import("aegis");
 
 /// One range of bytes, `first` to `last` inclusive, as RFC 9110 writes it.
 pub const Span = struct {
@@ -34,7 +35,7 @@ pub const max_ranges = 16;
 /// Read `value`, a `Range` field, against a representation `length` bytes
 /// long, the satisfiable ranges into `out` (at least `max_ranges` long).
 pub fn parse(value: []const u8, length: u64, out: []Span) Ranges {
-    std.debug.assert(out.len >= max_ranges);
+    aegis.assert.invariant(out.len >= max_ranges, "out.len >= max_ranges");
     const v = std.mem.trim(u8, value, " \t");
     if (!std.ascii.startsWithIgnoreCase(v, "bytes=")) return .whole;
     var n: usize = 0;

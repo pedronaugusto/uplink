@@ -158,7 +158,7 @@ pub const Memory = struct {
             var item: ?*Item = first.*;
             while (item) |i| {
                 item = i.next;
-                std.debug.assert(i.holders == 0);
+                aegis.assert.invariant(i.holders == 0, "i.holders == 0");
                 m.free(i);
             }
         }

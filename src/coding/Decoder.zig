@@ -67,7 +67,7 @@ fn flateSplit(len: usize) FlateSplit {
 comptime {
     // A flate layer's history, a whole 32 KiB window and the room the
     // reader decodes ahead into, fits beside its state in a large buffer.
-    std.debug.assert(flateSplit(BufferPool.Class.large.len()).history >= (32 << 10) + 4096);
+    aegis.assert.invariant(flateSplit(BufferPool.Class.large.len()).history >= (32 << 10) + 4096, "flateSplit(BufferPool.Class.large.len()).history >= (32 << 10) + 4096");
 }
 
 /// Whether every one of `codings` is one warp decodes: gzip, deflate, zstd
@@ -84,8 +84,8 @@ pub fn decodes(codings: []const ContentCoding) bool {
 /// taken: from `buffers` for gzip and deflate, from `windows` for zstd and
 /// Brotli.
 pub fn init(io: Io, gpa: Allocator, buffers: *BufferPool, windows: *Windows, codings: []const ContentCoding) Allocator.Error!Decoder {
-    std.debug.assert(decodes(codings));
-    std.debug.assert(codings.len <= Codings.max);
+    aegis.assert.invariant(decodes(codings), "decodes(codings)");
+    aegis.assert.invariant(codings.len <= Codings.max, "codings.len <= Codings.max");
     var d: Decoder = .{};
     errdefer d.deinit(io, gpa, buffers, windows);
     for (codings) |c| {

@@ -173,7 +173,7 @@ fn copy(oa: *OriginAuth, query: Credentials.Query, secret: Credentials.Secret) A
     errdefer oa.gpa.destroy(e);
     e.bytes = try .init(oa.gpa, len);
     errdefer e.bytes.deinit(oa.gpa);
-    e.bytes.resizeWithinCapacity(len) catch unreachable; // unreachable: `len` is the capacity just made
+    e.bytes.resizeWithinCapacity(len) catch unreachable; // glint-ignore: Z026 -- `len` is the capacity just made
     const bytes = e.bytes.exposeMut();
     var at: usize = 0;
     const host = put(bytes, &at, query.host);
@@ -242,7 +242,7 @@ pub fn settle(oa: *OriginAuth, io: Io, e: *Entry, credentials: ?*Credentials, ac
             _ = entries.swapRemove(i);
             break;
         };
-        oa.live.store(.fromRaw(aegis.int.cast(u32, entries.items.len) catch unreachable), .release); // unreachable: the list was counted into a u32 when it grew
+        oa.live.store(.fromRaw(aegis.int.cast(u32, entries.items.len) catch unreachable), .release); // glint-ignore: Z026 -- the list was counted into a u32 when it grew
         oa.unlist(e);
     }
     held.deinit(io);

@@ -426,16 +426,16 @@ pub const StoredOptions = struct {
 /// at `deinit` when it ended whole, and a store that fails then told to
 /// `observer` (`cache_failed`). Before the first `reader`.
 pub fn storeInto(r: *Response, cache: *Cache, writing: Cache.Writing, observer: ?*Observer) void {
-    std.debug.assert(!r.started);
-    std.debug.assert(r.tee == null);
-    std.debug.assert(r.stored == null);
+    aegis.assert.invariant(!r.started, "!r.started");
+    aegis.assert.invariant(r.tee == null, "r.tee == null");
+    aegis.assert.invariant(r.stored == null, "r.stored == null");
     r.tee = .{ .cache = cache, .writing = writing, .observer = observer };
 }
 
 /// Release an interim response's head and nothing else: the connection
 /// stays with the request that waits on it.
 pub fn releaseHead(r: *Response, io: Io) void {
-    std.debug.assert(r.decoder == null);
+    aegis.assert.invariant(r.decoder == null, "r.decoder == null");
     r.ctx.buffers.release(io, r.head_buffer);
     r.* = undefined;
 }
@@ -602,6 +602,6 @@ fn receiveHead(io: Io, ctx: *Context, conn: *Connection, options: ReceiveOptions
     errdefer head.release(io, &ctx.buffers);
     const parsed = (h1.parseResponse(head.bytes(), head.fields(), options.limits) catch return error.HttpProtocolError) orelse
         return error.HttpProtocolError;
-    std.debug.assert(parsed.len == head.len);
+    aegis.assert.invariant(parsed.len == head.len, "parsed.len == head.len");
     return .{ .buffer = head.buffer, .head = parsed.head, .body_buffer = head.bodyBuffer() };
 }

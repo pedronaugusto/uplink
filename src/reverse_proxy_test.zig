@@ -34,7 +34,7 @@ const Running = struct {
     fn stop(r: *Running) void {
         const io = test_io.io();
         r.server.shutdown(io);
-        // glint-ignore: Z026 -- serve ends with the shutdown; its result is not what the test checks
+        // serve ends with the shutdown; its result is not what the test checks
         r.task.await(io) catch {};
         r.server.deinit(io);
         r.listener.deinit(io);
@@ -396,7 +396,7 @@ test "a proxy whose task is canceled while it reaches the upstream ends with no 
             r.task = base.concurrent(Server.serve, .{ &r.server, seamed.over(fio.io()), &r.listener }) catch return error.SkipZigTest;
             defer {
                 r.server.shutdown(base);
-                // glint-ignore: Z026 -- serve ends with the shutdown; its result is not what the test checks
+                // serve ends with the shutdown; its result is not what the test checks
                 r.task.await(base) catch {};
             }
             const canceled = try r.raw(gpa, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
@@ -505,7 +505,7 @@ test "a tunnel whose read is canceled ends its exchange as canceled, both sides 
             r.task = base.concurrent(Server.serve, .{ &r.server, seamed.over(fio.io()), &r.listener }) catch return error.SkipZigTest;
             defer {
                 r.server.shutdown(base);
-                // glint-ignore: Z026 -- serve ends with the shutdown; its result is not what the test checks
+                // serve ends with the shutdown; its result is not what the test checks
                 r.task.await(base) catch {};
             }
             const got = try r.raw(gpa, "GET / HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n");

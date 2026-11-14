@@ -418,7 +418,7 @@ pub fn switches(r: Context.Route, response: *const Response) bool {
 /// HTTP/1.1 one still while it is not.
 pub fn switchToH2(run: *Run, io: Io, switched: *Response, lease: *Lease) H2Error!Response {
     const c = run.shared;
-    // unreachable: `switches` took a 101 whose body nobody read
+    // glint-ignore: Z026 -- `switches` took a 101 whose body nobody read
     const conn = (switched.upgrade(io) catch unreachable).carrier.conn;
     switched.deinit(io);
     const up = H2.upgraded(&c.context, io, conn, run.method.eql(.HEAD)) catch |err| return switch (err) {

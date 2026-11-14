@@ -146,7 +146,7 @@ const Exchange = struct {
 
     fn serve(server: *Server, io: Io, listener: *Io.net.Server) void {
         // A serve that ends with the shutdown has nothing to say.
-        server.serve(io, listener) catch {}; // glint-ignore: Z026 -- serve ends with the test's shutdown
+        server.serve(io, listener) catch {}; // serve ends with the test's shutdown
     }
 
     fn run(e: *Exchange) !void {
