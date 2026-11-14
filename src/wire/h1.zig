@@ -420,7 +420,7 @@ pub const ChunkedDecoder = struct {
 
     /// The grammar of a chunk extension, read strictly (RFC 9112 §7.1.1):
     /// `*( BWS ";" BWS name [ BWS "=" BWS ( token / quoted-string ) ] )`.
-    const Extension = enum { name_start, name, after_name, value_start, token, quoted, escaped, quoted_end, after_value };
+    pub const Extension = enum { name_start, name, after_name, value_start, token, quoted, escaped, quoted_end, after_value };
 
     /// The longest chunk extension skipped, and the most trailer bytes.
     pub const max_extension = 4 << 10;
@@ -428,7 +428,7 @@ pub const ChunkedDecoder = struct {
 
     /// The states `feed` stops at come last, so one compare per byte tells
     /// it to go on.
-    const State = enum { size, size_space, extension, size_lf, data_cr, data_lf, trailer_line, end_lf, data, trailer_start, done };
+    pub const State = enum { size, size_space, extension, size_lf, data_cr, data_lf, trailer_line, end_lf, data, trailer_start, done };
 
     /// Why a chunked body is malformed.
     pub const Error = error{

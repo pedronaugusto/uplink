@@ -56,6 +56,7 @@ fn run(context: *Context, handler: *Handler, socket: *Socket, upgrade: ?Upgrade)
     socket.multiplex();
     var tasks: Io.Group = .init;
     const concurrent = probeConcurrency(io);
+    // glint-ignore: Z026 -- a connection with no memory for its session closes
     var session = Session.init(context, socket, if (concurrent) 100 else 1) catch return;
     defer session.deinit();
     defer tasks.cancel(io);
@@ -161,12 +162,14 @@ fn readFrames(session: *Session, handler: *Handler, tasks: *Io.Group, concurrent
             }
             if (shared.streams.items.len == 0) return;
         }
+        // glint-ignore: Z026 -- a connection that ends or fails between frames ends the session; the socket keeps why
         const head_bytes = in.peek(h2.head_len) catch return;
         const head = h2.Head.parse(head_bytes[0..h2.head_len]);
         socket.startH2();
         // A frame past the read buffer is past any size this end allows;
         // the protocol state answers it from its head.
         const whole = h2.head_len + @as(usize, head.len);
+        // glint-ignore: Z026 -- a connection that ends or fails within a frame ends the session; the socket keeps why
         const payload: []const u8 = if (whole <= in.buffer.len) (in.peek(whole) catch return)[h2.head_len..] else &.{};
         var spawn: ?*Stream = null;
         const handled = blk: {

@@ -1371,7 +1371,9 @@ fn invalidate(run: *Run, io: Io, cache: *Cache, r: *const Response) void {
     for ([_][]const u8{ "location", "content-location" }) |name| {
         const reference = r.headers.get(name) orelse continue;
         var buffer: [2048]u8 = undefined;
+        // glint-ignore: Z026 -- a reference that does not resolve names no stored response to remove
         const target = url_mod.resolve(run.url_text, reference, &buffer) catch continue;
+        // glint-ignore: Z026 -- a reference that does not parse names no stored response to remove
         const parsed = url_mod.parse(target) catch continue;
         if (!sameOrigin(run.url, parsed)) continue;
         cache.store.remove(io, target) catch |err| run.cacheFailed(err);

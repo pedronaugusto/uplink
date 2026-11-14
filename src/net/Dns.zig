@@ -218,6 +218,7 @@ pub fn https(d: *const Dns, io: Io, gpa: Allocator, host: []const u8) (NameError
         while (records.next() catch return error.NoAnswer) |r| {
             if (r.kind != .https or r.class != dns.class_in) continue;
             var target_buf: [dns.max_name]u8 = undefined;
+            // glint-ignore: Z026 -- a malformed HTTPS record is skipped; the answer's others are read
             const s = dns.Service.parse(r, &target_buf) catch continue;
             if (s.priority == 0) {
                 @memcpy(alias_buf[0..s.target.len], s.target);
@@ -336,6 +337,7 @@ pub const Stub = struct {
                 error.Canceled => return error.Canceled,
                 error.Failed => continue,
             };
+            // glint-ignore: Z026 -- an answer that does not parse is no answer; the next server is asked
             if (!(dns.Message.parse(got) catch continue).flags.truncated) return got;
             return s.overTcp(io, server, query, answer) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
@@ -642,26 +644,34 @@ const FakeServer = struct {
         var buf: [512]u8 = undefined;
         var out: [dns.max_message]u8 = undefined;
         while (true) {
+            // glint-ignore: Z026 -- the test's fake server ends with its socket
             const message = f.udp.receive(io, &buf) catch return;
             const reply = answer(message.data, &out, true) orelse continue;
+            // glint-ignore: Z026 -- the test's fake server ends with its socket
             f.udp.send(io, &message.from, reply) catch return;
         }
     }
 
     fn serveTcp(f: *FakeServer, io: Io) void {
         while (true) {
+            // glint-ignore: Z026 -- the test's fake server ends with its listener
             const stream = f.tcp.borrowMut().accept(io) catch return;
             defer stream.close(io);
             var rbuf: [1024]u8 = undefined;
             var r = stream.reader(io, &rbuf);
             var wbuf: [4096]u8 = undefined;
             var w = stream.writer(io, &wbuf);
+            // glint-ignore: Z026 -- a query cut short gets no answer; the fake takes the next connection
             const len = r.interface.takeInt(u16, .big) catch continue;
+            // glint-ignore: Z026 -- a query cut short gets no answer; the fake takes the next connection
             const query = r.interface.take(len) catch continue;
             var out: [dns.max_message]u8 = undefined;
             const reply = answer(query, &out, false) orelse continue;
+            // glint-ignore: Z026 -- a client gone before its answer goes unanswered; the fake takes the next connection
             w.interface.writeInt(u16, @intCast(reply.len), .big) catch continue; // safe: the fake's answers are small
+            // glint-ignore: Z026 -- a client gone before its answer goes unanswered; the fake takes the next connection
             w.interface.writeAll(reply) catch continue;
+            // glint-ignore: Z026 -- a client gone before its answer goes unanswered; the fake takes the next connection
             w.interface.flush() catch continue;
         }
     }

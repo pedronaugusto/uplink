@@ -481,6 +481,7 @@ fn loadLine(jar: *CookieJar, io: Io, line: []const u8, now: i64) Allocator.Error
     if (fields.hasControl(name) or fields.hasControl(value) or std.mem.findScalar(u8, name, ';') != null or std.mem.findScalar(u8, value, ';') != null) return;
     const path = parts[2];
     if (path.len == 0 or path[0] != '/') return;
+    // glint-ignore: Z026 -- a line whose expiry is no number is not a cookie; the file's other lines are read
     const expires_n = std.fmt.parseInt(i64, parts[4], 10) catch return;
     const expires: ?i64 = if (expires_n == 0) null else expires_n;
     if (expires) |e| if (e <= now) return;

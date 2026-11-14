@@ -67,8 +67,8 @@ pub const Parser = struct {
     /// Private: whether a `data` field was seen since the last dispatch.
     has_data: bool = false,
 
-    const State = enum { bom, line_start, name, value_start, value, comment };
-    const Field = enum { data, event, id, retry, ignored };
+    pub const State = enum { bom, line_start, name, value_start, value, comment };
+    pub const Field = enum { data, event, id, retry, ignored };
 
     /// A parser gathering data in `data_buffer`, which bounds an event.
     pub fn init(data_buffer: []u8) Parser {

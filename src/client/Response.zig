@@ -101,7 +101,7 @@ pub const CacheStatus = enum {
 };
 
 /// A stored variant being read.
-const Stored = struct {
+pub const Stored = struct {
     cache: *Cache,
     entry: Cache.Entry,
     bytes: Io.Reader = undefined,
@@ -111,7 +111,7 @@ const Stored = struct {
 /// A response from the network on its way into the store: the body's
 /// bytes as they came (still content-coded), handed to the store as the
 /// reader passes them on.
-const Tee = struct {
+pub const Tee = struct {
     cache: *Cache,
     writing: Cache.Writing,
     /// Told of a store that fails at `deinit`, as of every other.
@@ -579,6 +579,7 @@ pub fn receive(io: Io, ctx: *Context, pool: *Pool, conn: *Connection, options: R
 /// it came, `Content-Encoding` and all.
 fn planDecoding(r: *Response, io: Io) Allocator.Error!void {
     if (r.body.state.current() == .done) return;
+    // glint-ignore: Z026 -- codings uplink cannot read leave the body as it came, Content-Encoding and all
     const codings = coding.Codings.of(&r.headers) catch return;
     if (codings.len == 0 or !Decoder.decodes(codings.slice())) return;
     r.decoder = try .init(io, r.ctx.gpa, &r.ctx.buffers, &r.ctx.windows, codings.slice());

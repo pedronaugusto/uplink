@@ -181,6 +181,7 @@ pub fn sendFrames(s: *Session) void {
             continue;
         }
         if (held.value().closed) return;
+        // glint-ignore: Z026 -- a cancel ends the sending task with its connection
         held.wait(&s.changed, io, .none) catch return;
     }
 }
@@ -189,6 +190,7 @@ pub fn sendFrames(s: *Session) void {
 /// any stream's task. With no task to spare, whoever adds frames writes
 /// them.
 pub fn startSending(s: *Session, group: *Io.Group) void {
+    // glint-ignore: Z026 -- with no task to spare, whoever adds frames writes them
     group.concurrent(s.socket.io, sendFrames, .{s}) catch return;
     s.sender = true;
 }

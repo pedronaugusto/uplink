@@ -267,7 +267,7 @@ fn anyHeadOut(_: void, case: *shakedown.Case) !void {
     const p = parsed.head;
     try testing.expectEqualStrings(head.method.name, p.method.name);
     var joined: [64]u8 = undefined;
-    try testing.expectEqualStrings(try std.fmt.bufPrint(&joined, "{s}{s}", .{ target[0], target[1] }), p.target);
+    try testing.expectEqualStrings(try std.mem.print(&joined, "{s}{s}", .{ target[0], target[1] }), p.target);
     const extra: usize = if (head.framing == .length) 1 else 0;
     try testing.expectEqual(1 + own.len + headers.len + extra, p.headers.count());
     try testing.expectEqualStrings(head.host, p.headers.fields[0].value);

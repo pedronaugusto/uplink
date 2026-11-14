@@ -394,6 +394,7 @@ pub const Cache = struct {
     /// kept for want of memory is simply not kept.
     fn keepService(c: *Cache, io: Io, key: []const u8, now: Io.Timestamp, binding: ?Binding) void {
         var entry: ServiceEntry = .{ .binding = null, .expires = now.addDuration(span.toIo(c.options.ttl)) };
+        // glint-ignore: Z026 -- a binding that cannot be kept for want of memory is not kept; the next lookup asks again
         if (binding) |b| entry.binding = b.clone(c.gpa) catch return;
         var held = c.services.acquireUncancelable(io);
         defer held.deinit(io);
@@ -491,6 +492,7 @@ pub const Cache = struct {
         }
         if (entries.count() >= c.options.max_entries) c.evict(entries, now);
         if (entries.count() >= c.options.max_entries) return;
+        // glint-ignore: Z026 -- an entry that cannot be kept for want of memory is not kept; the next lookup asks again
         const owned = c.gpa.dupe(u8, key) catch return;
         entries.put(c.gpa, owned, entry) catch c.gpa.free(owned);
     }

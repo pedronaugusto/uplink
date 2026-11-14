@@ -72,7 +72,7 @@ test "every RFC 3986 IPv6 form, and near misses" {
     };
     for (valid) |v| {
         var buffer: [64]u8 = undefined;
-        const text = try std.fmt.bufPrint(&buffer, "http://[{s}]/", .{v});
+        const text = try std.mem.print(&buffer, "http://[{s}]/", .{v});
         errdefer std.debug.print("refused {s}\n", .{v});
         _ = try parse(text, .uri, .uri);
     }
@@ -83,7 +83,7 @@ test "every RFC 3986 IPv6 form, and near misses" {
     };
     for (invalid) |v| {
         var buffer: [64]u8 = undefined;
-        const text = try std.fmt.bufPrint(&buffer, "http://[{s}]/", .{v});
+        const text = try std.mem.print(&buffer, "http://[{s}]/", .{v});
         errdefer std.debug.print("accepted {s}\n", .{v});
         try testing.expectError(error.Invalid, parse(text, .uri, .uri));
     }

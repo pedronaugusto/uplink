@@ -47,10 +47,15 @@ pub fn dev(b: *std.Build, tools: type) void {
     const aegis_package = p.dependency("aegis", .{ .target = target, .optimize = optimize });
     const aegis = aegis_package.module("aegis");
     // reactor, cloak and warp are lazy: their error ends this configure pass until they are fetched.
+    // glint-ignore: Z026 -- a lazy dependency not fetched yet ends this configure pass; the build fetches it and configures again
     const reactor_package = p.dependencyLazy("reactor", .{ .target = target, .optimize = optimize }) catch return;
+    // glint-ignore: Z026 -- a lazy dependency not fetched yet ends this configure pass; the build fetches it and configures again
     const cloak_package = p.dependencyLazy("cloak", .{ .target = target, .optimize = optimize }) catch return;
+    // glint-ignore: Z026 -- a lazy dependency not fetched yet ends this configure pass; the build fetches it and configures again
     const warp_package = p.dependencyLazy("warp", .{ .target = target, .optimize = optimize }) catch return;
+    // glint-ignore: Z026 -- a lazy dependency not fetched yet ends this configure pass; the build fetches it and configures again
     const xenoglyph_package = p.dependencyLazy("xenoglyph", .{ .target = target, .optimize = optimize }) catch return;
+    // glint-ignore: Z026 -- a lazy dependency not fetched yet ends this configure pass; the build fetches it and configures again
     const airlock_package = p.dependencyLazy("airlock", .{ .target = target, .optimize = optimize }) catch return;
     const reactor = reactor_package.module("reactor");
     const cloak = cloak_package.module("cloak");

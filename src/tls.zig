@@ -259,7 +259,7 @@ pub const KeyLogWriter = struct {
         defer if (io) |task| {
             _ = task.swapCancelProtection(held.?);
         };
-        // A capture that cannot be written is the caller's to notice; it must not fail the handshake it describes.
+        // glint-ignore: Z026 -- a capture that cannot be written is the caller's to notice; it must not fail the handshake it describes
         sink.writer.writeAll(line) catch return;
     }
 };

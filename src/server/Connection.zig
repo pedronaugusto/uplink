@@ -35,7 +35,9 @@ pub fn serve(context: *Context, handler: *Handler, io: Io, endpoint: Endpoint) v
     defer context.leave(io, &c.socket.entry);
     defer c.socket.close();
     const in_class: BufferPool.Class = if (context.options.tls != null) .record else .small;
+    // glint-ignore: Z026 -- a connection no buffer is left for closes; the pool counts the refusal
     c.socket.input.give(context.buffers.acquire(io, in_class) catch return);
+    // glint-ignore: Z026 -- a failed handshake ends its connection; the socket keeps why
     if (context.options.tls) |options| c.socket.handshake(options) catch return;
     if (std.mem.eql(u8, c.socket.alpn(), "h2")) return h2_serve.serve(context, handler, &c.socket);
     if (!c.socket.secure) switch (context.options.h2c) {

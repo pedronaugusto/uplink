@@ -90,7 +90,8 @@ fn echoCookies(io: Io, request: *uplink.server.Request, response: *uplink.server
 fn say(io: Io, comptime format: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
     var w = std.Io.File.stdout().writerStreaming(io, &buf);
-    // A report that cannot be written changes nothing the run decides.
+    // glint-ignore: Z026 -- a report that cannot be written changes nothing the run decides
     w.interface.print(format, args) catch return;
+    // glint-ignore: Z026 -- a report that cannot be written changes nothing the run decides
     w.interface.flush() catch return;
 }

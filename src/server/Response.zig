@@ -121,7 +121,7 @@ fn advance(r: *Response, event: Event) void {
     _ = r.state.step(event) catch unreachable; // glint-ignore: Z026 -- each caller is open or streaming, as its event needs
 }
 
-const Framing = enum {
+pub const Framing = enum {
     none,
     length,
     chunked,
@@ -342,21 +342,28 @@ fn finishShort(r: *Response) Error {
     return error.BodyIncomplete;
 }
 
+/// `body` compressed with `c` into `out_buffer`.
+fn compressWhole(r: *Response, io: Io, c: Encoder.Coding, body: []const u8, out_buffer: []u8) ![]const u8 {
+    var sink: Io.Writer = .fixed(out_buffer);
+    const encoders = &r.socket.context.encoders.?;
+    const e = try encoders.acquire(io, c, &sink);
+    defer encoders.release(io, e);
+    try e.writer().writeAll(body);
+    try e.finish();
+    return sink.buffered();
+}
+
 /// A body known whole: its own length, or compressed and the length of
 /// that, when compressing makes it smaller.
 fn sendWhole(r: *Response, body: []const u8) Error!void {
     if (r.coding(body.len)) |c| compressed: {
         const pool = &r.socket.context.buffers;
         const io = r.socket.io;
+        // glint-ignore: Z026 -- compressing is optional: with no large buffer free, the body goes as it is
         const out_buffer = pool.acquire(io, .large) catch break :compressed;
         defer pool.release(io, out_buffer);
-        var sink: Io.Writer = .fixed(out_buffer);
-        const encoders = &r.socket.context.encoders.?;
-        const e = encoders.acquire(io, c, &sink) catch break :compressed;
-        defer encoders.release(io, e);
-        e.writer().writeAll(body) catch break :compressed;
-        e.finish() catch break :compressed;
-        const coded = sink.buffered();
+        // glint-ignore: Z026 -- a body that does not compress into the buffer, or finds no encoder free, goes as it is
+        const coded = r.compressWhole(io, c, body, out_buffer) catch break :compressed;
         if (coded.len >= body.len) break :compressed;
         r.declared = coded.len;
         try r.sendHead(.length, c);

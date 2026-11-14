@@ -36,7 +36,7 @@ body: Writer,
 /// Private: the server's answer before the body, which it refused.
 early: ?Response = null,
 
-const Writer = union(enum) {
+pub const Writer = union(enum) {
     length: h1.LengthWriter,
     chunked: h1.ChunkedWriter,
     /// The server answered before the body: it goes nowhere.
