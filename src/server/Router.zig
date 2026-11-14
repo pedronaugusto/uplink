@@ -48,12 +48,12 @@ conflict: ?[]const u8 = null,
 
 const HostTree = struct { host: []const u8, root: Node };
 
-const Route = struct {
+pub const Route = struct {
     pattern: Pattern,
     handler: *Handler,
 };
 
-const Node = struct {
+pub const Node = struct {
     /// Children by literal segment, sorted.
     literals: std.ArrayList(Child) = .empty,
     wildcard: ?*Node = null,
@@ -369,7 +369,9 @@ pub fn dispatch(table: anytype, io: Io, request: *Request, response: *Response) 
         var list_buf: [256]u8 = undefined;
         var w: Io.Writer = .fixed(&list_buf);
         for (allowed.sorted(), 0..) |m, i| {
+            // glint-ignore: Z026 -- the Allow list holds the methods that fit its 256 bytes
             if (i != 0) w.writeAll(", ") catch break;
+            // glint-ignore: Z026 -- the Allow list holds the methods that fit its 256 bytes
             w.writeAll(m) catch break;
         }
         try response.header("Allow", w.buffered());

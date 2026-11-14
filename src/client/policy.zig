@@ -105,7 +105,8 @@ pub const Retries = struct {
         const ceiling = if (grown.compare(r.cap) == .gt) r.cap else grown;
         // A wait of up to every Duration is any random one.
         const choices = ceiling.add(.fromRaw(1)) catch return .fromRaw(random);
-        return .fromRaw(random % choices.raw());
+        const drawn = aegis.int.Checked(u64).init(random).rem(choices.raw()) catch unreachable; // glint-ignore: Z026 -- `choices` is the ceiling and one, never zero
+        return .fromRaw(drawn.raw());
     }
 };
 
@@ -114,7 +115,9 @@ pub const Retries = struct {
 pub fn retryAfter(value: []const u8, now: date.Second) ?Duration {
     const text = std.mem.trim(u8, value, " \t");
     // glint-ignore: Z026 -- a value that is no count of seconds is read as an HTTP date below
-    if (std.fmt.parseUnsigned(u32, text, 10)) |n| return date.Seconds.fromRaw(n).convert(.nanosecond, u64, .exact) catch unreachable else |_| {} // glint-ignore: Z026 -- a u32 of seconds is 136 years of nanoseconds
+    if (std.fmt.parseUnsigned(u32, text, 10)) |n| {
+        return date.Seconds.fromRaw(n).convert(.nanosecond, u64, .exact) catch unreachable; // glint-ignore: Z026 -- a u32 of seconds is 136 years of nanoseconds
+    } else |_| {}
     const at = date.parse(text) orelse return null;
     const ahead = now.saturatingDurationTo(at);
     if (ahead.compare(.fromRaw(0)) != .gt) return .fromRaw(0);

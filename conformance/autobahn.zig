@@ -46,6 +46,7 @@ fn echo(io: Io, request: *uplink.server.Request, response: *uplink.server.Respon
         .conn = .{ .max_message = .literal("64MiB"), .max_frame = .literal("64MiB") },
         // Context takeover kept both ways, so every case of 12 and 13 runs.
         .compression = .{},
+        // glint-ignore: Z026 -- a case whose upgrade fails is one the fuzzing server reports failed
     }) catch return;
     defer accepted.deinit();
     pump(io, &accepted.conn);
@@ -53,9 +54,11 @@ fn echo(io: Io, request: *uplink.server.Request, response: *uplink.server.Respon
 
 fn pump(io: Io, conn: *ws.Conn) void {
     while (true) {
+        // glint-ignore: Z026 -- the case ends when the fuzzing server closes or breaks the connection; its report says how
         const message = conn.readMessage(io, std.heap.smp_allocator, .limited(64 << 20)) catch return;
         const kind, const bytes = message orelse return;
         defer std.heap.smp_allocator.free(bytes);
+        // glint-ignore: Z026 -- the case ends when the fuzzing server closes or breaks the connection; its report says how
         conn.send(io, kind, bytes) catch return;
     }
 }
@@ -103,6 +106,7 @@ fn againstClient(gpa: std.mem.Allocator, io: Io, wstest: []const u8, work: Io.Di
         var opened: ws.Opened = undefined;
         ws.connect(&opened, &client, gpa, io, try std.mem.print(&url_buf, "ws://127.0.0.1:{d}/runCase?case={d}&agent=uplink", .{ port, i }), .{
             .conn = .{ .max_message = .literal("64MiB"), .max_frame = .literal("64MiB") },
+            // glint-ignore: Z026 -- a case the client cannot open is one the fuzzing server reports failed; the next runs
         }) catch continue;
         defer opened.deinit(io);
         pump(io, &opened.conn);
@@ -157,7 +161,8 @@ fn summarize(gpa: std.mem.Allocator, io: Io, work: Io.Dir, index: []const u8) !v
 fn say(io: Io, comptime format: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
     var w = std.Io.File.stdout().writerStreaming(io, &buf);
-    // A report that cannot be written changes nothing the run decides.
+    // glint-ignore: Z026 -- a report that cannot be written changes nothing the run decides
     w.interface.print(format, args) catch return;
+    // glint-ignore: Z026 -- a report that cannot be written changes nothing the run decides
     w.interface.flush() catch return;
 }

@@ -388,6 +388,7 @@ pub fn stop(c: *Context, io: Io) void {
 fn drain(c: *Context, io: Io, grace: Io.Timeout) void {
     var held = c.live.acquireUncancelable(io);
     defer held.deinit(io);
+    // glint-ignore: Z026 -- the grace ending, or a cancel of the caller, ends the wait: what is left ends now
     while (held.value().count != 0) held.wait(&c.changed, io, grace) catch return;
 }
 

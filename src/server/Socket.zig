@@ -322,15 +322,16 @@ fn linger(c: *Socket) void {
     // A pipe has no half close; what was written stays for the client to
     // read after the close.
     const stream = c.stream.borrow().socketStream() orelse return;
+    // glint-ignore: Z026 -- a socket that cannot half close has nothing left to linger for
     stream.shutdown(io, .send) catch return;
     const until = Io.Clock.awake.now(io).addDuration(span.toIo(time));
     var buf: [4096]u8 = undefined;
     // the kernel writes what each read takes into `buf`, which the drain never reads
     var data: [1][]u8 = .{&buf};
     while (true) {
-        // A deadline that ends the wait aborts the socket, which is
-        // closing anyway.
+        // glint-ignore: Z026 -- a deadline that ends the wait aborts the socket, which is closing anyway
         const result = c.timed.perform(io, c.context.keeper(), .{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } }, until) catch return;
+        // glint-ignore: Z026 -- a read that fails ends the linger: the client is gone
         const n = (result.net_read catch return).data_len;
         if (n == 0) return;
     }
@@ -403,9 +404,9 @@ pub fn park(c: *Socket) void {
 /// Send `100 Continue` to a client waiting for it before its body.
 pub fn sendContinue(c: *Socket) void {
     const w = c.writer();
-    // A client that cannot hear it sends the body after its own wait, or
-    // the read that follows fails and says why.
+    // glint-ignore: Z026 -- a client that cannot hear it sends the body after its own wait, or the read that follows fails and says why
     w.writeAll("HTTP/1.1 100 Continue\r\n\r\n") catch return;
+    // glint-ignore: Z026 -- a client that cannot hear it sends the body after its own wait, or the read that follows fails and says why
     c.flush() catch return;
 }
 

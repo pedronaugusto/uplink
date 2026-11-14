@@ -129,7 +129,7 @@ pub const WriteError = error{
     OutOfMemory,
 };
 
-const Reading = struct {
+pub const Reading = struct {
     /// The frame being read.
     header: ws.Header = .{ .opcode = .continuation, .len = 0 },
     /// Its payload bytes still to come, and how many have.
@@ -654,6 +654,7 @@ fn fragment(c: *Conn, io: Io, mw: *MessageWriter, parts: []const []const u8, spl
 /// `close_timeout` for the peer's, skipping what comes before it. Call it
 /// while no other task reads.
 pub fn close(c: *Conn, io: Io, code: u16, reason: []const u8) void {
+    // glint-ignore: Z026 -- a close already sent waits for the peer's; a stream gone has nothing to wait for
     c.sendClose(io, code, reason) catch |err| switch (err) {
         error.Closed => {},
         // The stream is gone: there is nothing to wait for.
@@ -664,8 +665,10 @@ pub fn close(c: *Conn, io: Io, code: u16, reason: []const u8) void {
     while (c.peer_close == null and c.failure == null) {
         const left = Io.Clock.awake.now(io).durationTo(until);
         if (left.nanoseconds <= 0) return;
+        // glint-ignore: Z026 -- a close that cannot wait for the peer's ends without it
         const ready = c.transport.readableFn(&c.transport, io, left) catch return;
         if (ready == .timed_out) return;
+        // glint-ignore: Z026 -- a close that cannot read the peer's ends without it
         _ = c.next(io, &buffer) catch return;
     }
 }

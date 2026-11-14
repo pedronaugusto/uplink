@@ -35,7 +35,7 @@ counted: sync.Latch = .init(.clear),
 /// One direction's operations: the deadline `Deadlines` keeps for the one
 /// under way, and how deadlines are kept. Only the task doing that
 /// direction's operation touches it.
-const Side = struct {
+pub const Side = struct {
     watch: Deadlines.Watch,
     mode: Modes.Runtime(void) = .init({}),
 };

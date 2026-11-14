@@ -169,7 +169,9 @@ pub fn pick(challenges: []const Challenge, method: Method, offered: *Writer) Pic
         for (challenges) |c| if (c.scheme == .basic) return .basic;
     }
     for (challenges, 0..) |c, n| {
+        // glint-ignore: Z026 -- `offered` holds as many names as fit
         if (n != 0) offered.writeAll(", ") catch break;
+        // glint-ignore: Z026 -- `offered` holds as many names as fit
         offered.writeAll(c.name) catch break;
     }
     return .unsupported;

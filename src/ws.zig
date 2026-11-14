@@ -98,20 +98,20 @@ pub fn accept(out: *Accepted, gpa: Allocator, io: Io, request: *ServerRequest, r
     };
     const agreed = if (options.compression) |c| agreeDeflate(h, c) else null;
     response.status = if (over_h2) .ok else .switching_protocols;
-    headers: {
-        if (!over_h2) {
-            const accept_key = ws.acceptKey(key);
-            response.header("Upgrade", "websocket") catch break :headers;
-            response.header("Connection", "Upgrade") catch break :headers;
-            response.header("Sec-WebSocket-Accept", &accept_key) catch break :headers;
-        }
-        if (protocol) |p| response.header("Sec-WebSocket-Protocol", p) catch break :headers;
-        if (agreed) |d| {
-            var buf: [256]u8 = undefined;
-            var w: Io.Writer = .fixed(&buf);
-            d.write(&w) catch unreachable; // glint-ignore: Z026 -- the parameters are under 256 bytes
-            response.header("Sec-WebSocket-Extensions", w.buffered()) catch break :headers;
-        }
+    // A header the upgrade needs that cannot be set refuses it: an answer without one is no
+    // handshake the client can take.
+    if (!over_h2) {
+        const accept_key = ws.acceptKey(key);
+        response.header("Upgrade", "websocket") catch |err| return answerFailed(err);
+        response.header("Connection", "Upgrade") catch |err| return answerFailed(err);
+        response.header("Sec-WebSocket-Accept", &accept_key) catch |err| return answerFailed(err);
+    }
+    if (protocol) |p| response.header("Sec-WebSocket-Protocol", p) catch |err| return answerFailed(err);
+    if (agreed) |d| {
+        var buf: [256]u8 = undefined;
+        var w: Io.Writer = .fixed(&buf);
+        d.write(&w) catch unreachable; // glint-ignore: Z026 -- the parameters are under 256 bytes
+        response.header("Sec-WebSocket-Extensions", w.buffered()) catch |err| return answerFailed(err);
     }
     const stream = response.hijack(io) catch |err| return answerFailed(err);
     out.* = .{ .stream = stream, .protocol = protocol, .conn = undefined };
@@ -165,6 +165,7 @@ fn agreeDeflate(h: *const fields.Headers, c: Compression) ?ws.Deflate {
     while (lines.next()) |element| {
         const semi = std.mem.findScalar(u8, element, ';') orelse element.len;
         if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, element[0..semi], " \t"), "permessage-deflate")) continue;
+        // glint-ignore: Z026 -- an offer this end cannot read is passed over for the client's next
         const offer = ws.Deflate.parse(element[semi..]) catch continue;
         var answer: ws.Deflate = .{
             .server_no_context_takeover = offer.server_no_context_takeover or c.no_context_takeover,

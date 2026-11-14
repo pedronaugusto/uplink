@@ -86,7 +86,7 @@ pub const Diagnostic = struct {
 
 // Character classes.
 
-const Set = std.StaticBitSet(128);
+const Set = std.bit_set.Static(128);
 
 fn set(comptime chars: []const u8) Set {
     var s: Set = .empty;
@@ -165,7 +165,7 @@ const Reader = struct {
             if (r.charset == .uri) return r.fail(start + i, "ASCII: a URI has no other characters");
             const len = std.unicode.utf8ByteSequenceLength(c) catch return r.fail(start + i, "UTF-8");
             if (i + len > s.len) return r.fail(start + i, "UTF-8");
-            const cp = std.unicode.utf8Decode(s[i..][0..len]) catch return r.fail(start + i, "UTF-8");
+            const cp = decodeUtf8(s[i..][0..len]) catch return r.fail(start + i, "UTF-8");
             if (bidiFormatting(cp)) return r.fail(start + i, "no bidi formatting character");
             if (!(ucschar(cp) or (private and iprivate(cp)))) return r.fail(start + i, if (private) "ucschar or iprivate" else "ucschar");
             i += len;
@@ -500,10 +500,20 @@ fn removeDotSegments(path: []u8) usize {
         } else {
             // The first segment, its '/' with it, moves to the output.
             const next = std.mem.findScalarPos(u8, path[0..len], in + 1, '/') orelse len;
-            std.mem.copyForwards(u8, path[out..][0 .. next - in], path[in..next]);
+            @memmove(path[out..][0 .. next - in], path[in..next]);
             out += next - in;
             in = next;
         }
     }
     return out;
+}
+
+/// The code point of a sequence of two to four bytes, as `utf8ByteSequenceLength` measured it.
+fn decodeUtf8(bytes: []const u8) !u21 {
+    return switch (bytes.len) {
+        2 => std.unicode.utf8Decode2(bytes[0..2].*),
+        3 => std.unicode.utf8Decode3(bytes[0..3].*),
+        4 => std.unicode.utf8Decode4(bytes[0..4].*),
+        else => error.Utf8InvalidStartByte,
+    };
 }

@@ -49,6 +49,7 @@ pub fn stop(s: *Server) void {
 
 fn serve(s: *Server) void {
     while (true) {
+        // glint-ignore: Z026 -- the bench's server serves until its listener closes
         const stream = s.listener.accept(s.io) catch return;
         s.group.concurrent(s.io, handle, .{ s, stream }) catch stream.close(s.io);
     }
@@ -75,6 +76,7 @@ fn handle(s: *Server, stream: Io.net.Stream) void {
     var session: cloak.tls.Session = undefined;
     var plain_in: [16 << 10]u8 = undefined;
     var plain_out: [64 << 10]u8 = undefined;
+    // glint-ignore: Z026 -- a handshake the bench's client broke off ends that connection only
     session.accept(s.gpa, s.io, .fromStream(&r), .fromStream(&w), &plain_in, &plain_out, .{ .credentials = credentials, .eof = .allow }) catch return;
     defer session.deinit();
     s.requests(session.reader(), session.writer());
@@ -83,6 +85,7 @@ fn handle(s: *Server, stream: Io.net.Stream) void {
 /// Requests read from `r` and answered on `w` until either ends.
 fn requests(s: *Server, r: *Io.Reader, w: *Io.Writer) void {
     while (true) {
+        // glint-ignore: Z026 -- the client closing its connection ends the bench's requests on it
         while (std.mem.find(u8, r.buffered(), "\r\n\r\n") == null) r.fillMore() catch return;
         const end = std.mem.find(u8, r.buffered(), "\r\n\r\n").? + 4;
         const head = r.buffered()[0..end];
@@ -92,7 +95,9 @@ fn requests(s: *Server, r: *Io.Reader, w: *Io.Writer) void {
         if (reply == .private and std.mem.find(u8, head, "\r\nAuthorization: ") != null) reply = .authorized;
         if (reply == .tagged and std.mem.find(u8, head, "\r\nIf-None-Match: \"t\"") != null) reply = .not_modified;
         r.toss(end);
+        // glint-ignore: Z026 -- an answer the client no longer reads ends that connection only
         s.answer(w, reply) catch return;
+        // glint-ignore: Z026 -- an answer the client no longer reads ends that connection only
         w.flush() catch return;
     }
 }

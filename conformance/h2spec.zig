@@ -87,6 +87,7 @@ fn answer(io: Io, request: *uplink.server.Request, response: *uplink.server.Resp
     var buf: [4096]u8 = undefined;
     const r = request.reader(io);
     while (true) {
+        // glint-ignore: Z026 -- a body the tester breaks off is answered with what was read
         const n = r.readSliceShort(&buf) catch break;
         if (n == 0) break;
     }
@@ -98,7 +99,8 @@ fn answer(io: Io, request: *uplink.server.Request, response: *uplink.server.Resp
 fn say(io: Io, comptime format: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
     var w = std.Io.File.stdout().writerStreaming(io, &buf);
-    // A report that cannot be written changes nothing the run decides.
+    // glint-ignore: Z026 -- a report that cannot be written changes nothing the run decides
     w.interface.print(format, args) catch return;
+    // glint-ignore: Z026 -- a report that cannot be written changes nothing the run decides
     w.interface.flush() catch return;
 }

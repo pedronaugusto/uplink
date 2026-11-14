@@ -364,19 +364,21 @@ fn join(p: *const ReverseProxy, arena: Allocator, request: *const Request) error
     const query_at = std.mem.findScalar(u8, u.target, '?') orelse u.target.len;
     const base_path = std.mem.trimEnd(u8, u.target[0..query_at], "/");
     const base_query: ?[]const u8 = if (query_at < u.target.len) u.target[query_at + 1 ..] else null;
-    write: {
-        w.writer.writeAll(if (u.secure) "https://" else "http://") catch break :write;
-        u.writeAuthority(&w.writer, false) catch break :write;
-        w.writer.writeAll(base_path) catch break :write;
-        if (request.path.len == 0 or request.path[0] != '/') w.writer.writeByte('/') catch break :write;
-        w.writer.writeAll(request.path) catch break :write;
-        if (base_query != null or request.query != null) w.writer.writeByte('?') catch break :write;
-        if (base_query) |q| w.writer.writeAll(q) catch break :write;
-        if (base_query != null and request.query != null) w.writer.writeByte('&') catch break :write;
-        if (request.query) |q| w.writer.writeAll(q) catch break :write;
-        return w.written();
-    }
-    return error.OutOfMemory;
+    // An allocating writer fails only for want of memory.
+    writeJoined(&w.writer, u, base_path, base_query, request) catch return error.OutOfMemory;
+    return w.written();
+}
+
+fn writeJoined(w: *Io.Writer, u: Url, base_path: []const u8, base_query: ?[]const u8, request: *const Request) Io.Writer.Error!void {
+    try w.writeAll(if (u.secure) "https://" else "http://");
+    try u.writeAuthority(w, false);
+    try w.writeAll(base_path);
+    if (request.path.len == 0 or request.path[0] != '/') try w.writeByte('/');
+    try w.writeAll(request.path);
+    if (base_query != null or request.query != null) try w.writeByte('?');
+    if (base_query) |q| try w.writeAll(q);
+    if (base_query != null and request.query != null) try w.writeByte('&');
+    if (request.query) |q| try w.writeAll(q);
 }
 
 /// The request's fields but its connection's, `Host` and its length,
@@ -423,20 +425,22 @@ fn upgradeAsked(request: *const Request) ?[]const u8 {
 /// `for`, `host` and `proto` of RFC 7239 for this hop.
 fn forwardedElement(arena: Allocator, request: *const Request) error{OutOfMemory}![]const u8 {
     var w: Io.Writer.Allocating = .init(arena);
-    write: {
-        w.writer.writeAll("for=") catch break :write;
-        if (request.remote) |remote| {
-            var buf: [64]u8 = undefined;
-            var node: Io.Writer = .fixed(&buf);
-            remote.format(&node) catch unreachable; // glint-ignore: Z026 -- an address and port fit 64 bytes
-            writeValue(&w.writer, node.buffered()) catch break :write;
-        } else w.writer.writeAll("unknown") catch break :write;
-        w.writer.writeAll(";host=") catch break :write;
-        writeValue(&w.writer, request.host) catch break :write;
-        w.writer.writeAll(if (request.secure) ";proto=https" else ";proto=http") catch break :write;
-        return w.written();
-    }
-    return error.OutOfMemory;
+    // An allocating writer fails only for want of memory.
+    writeForwarded(&w.writer, request) catch return error.OutOfMemory;
+    return w.written();
+}
+
+fn writeForwarded(w: *Io.Writer, request: *const Request) Io.Writer.Error!void {
+    try w.writeAll("for=");
+    if (request.remote) |remote| {
+        var buf: [64]u8 = undefined;
+        var node: Io.Writer = .fixed(&buf);
+        remote.format(&node) catch unreachable; // glint-ignore: Z026 -- an address and port fit 64 bytes
+        try writeValue(w, node.buffered());
+    } else try w.writeAll("unknown");
+    try w.writeAll(";host=");
+    try writeValue(w, request.host);
+    try w.writeAll(if (request.secure) ";proto=https" else ";proto=http");
 }
 
 /// A token as it is, anything else as a quoted string.
