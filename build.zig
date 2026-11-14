@@ -268,18 +268,19 @@ const Lazy = struct {
 /// The modules, one set of source files per module: `uplink` imports `uplink.wire`
 /// rather than its files, so a type is one declaration whichever a user names.
 fn uplinkModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, aegis: *std.Build.Module, client: bool, lazy: Lazy) Modules {
-    const wire_options: std.Build.Module.CreateOptions = .{
+    // Each module named and rooted by literals: preflight's release check reads what the
+    // package exports from this text.
+    const wire = b.addModule("uplink.wire", .{
         .root_source_file = b.path("src/wire.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{.{ .name = "aegis", .module = aegis }},
-    };
-    const wire = b.addModule("uplink.wire", wire_options);
+    });
     if (!client) return .{ .wire = wire, .root = null };
     // Declared before reactor and cloak are fetched: a consumer's first pass
     // must find the module it asks for, and only learns here what to fetch.
     // They are imported once they are there.
-    const root_options: std.Build.Module.CreateOptions = .{
+    const root = b.addModule("uplink", .{
         .root_source_file = b.path("src/uplink.zig"),
         .target = target,
         .optimize = optimize,
@@ -287,8 +288,7 @@ fn uplinkModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
             .{ .name = "aegis", .module = aegis },
             .{ .name = "uplink.wire", .module = wire },
         },
-    };
-    const root = b.addModule("uplink", root_options);
+    });
     if (lazy.reactor) |module| root.addImport("reactor", module);
     if (lazy.cloak) |module| root.addImport("cloak", module);
     if (lazy.warp) |module| root.addImport("warp", module);
