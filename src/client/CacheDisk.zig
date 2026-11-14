@@ -18,6 +18,7 @@
 //! goes, so the next asks the network.
 
 const std = @import("std");
+const span = @import("../span.zig");
 const aegis = @import("aegis");
 const airlock = @import("airlock");
 const Allocator = std.mem.Allocator;
@@ -34,7 +35,8 @@ const Error = Cache.Error;
 const Disk = @This();
 
 gpa: Allocator,
-dir: Io.Dir,
+/// The directory the cache is kept in; its opener keeps it open.
+dir: aegis.own.Unowned(Io.Dir),
 options: Options,
 state: aegis.BlockingGuarded(State),
 /// Private: the store's functions.
@@ -84,11 +86,11 @@ pub fn open(gpa: Allocator, io: Io, dir: Io.Dir, options: Options) OpenError!Dis
     // used end of the order, so the newest ends first and last to go.
     std.mem.sort(Found, found.items, {}, struct {
         fn older(_: void, a: Found, b: Found) bool {
-            return a.written.nanoseconds < b.written.nanoseconds;
+            return span.before(a.written, b.written);
         }
     }.older);
     for (found.items) |f| _ = try insert(gpa, &index, f.name, f.size);
-    return .{ .gpa = gpa, .dir = dir, .options = options, .state = .init(index) };
+    return .{ .gpa = gpa, .dir = .of(dir), .options = options, .state = .init(index) };
 }
 
 /// Frees the index. The files stay for the next `open`. No variant may be
@@ -372,7 +374,7 @@ fn freeIndex(gpa: Allocator, s: *State) void {
 /// Removes a variant's file. Already gone is what was asked.
 fn unlinkFile(d: *Disk, io: Io, name: Name) Error!void {
     const text = name.text();
-    _ = airlock.remove(io, d.dir, &text, .{ .sync = .{ .level = d.options.level, .blocking = d.options.blocking } }) catch |err| return switch (err) {
+    _ = airlock.remove(io, d.dir.get(), &text, .{ .sync = .{ .level = d.options.level, .blocking = d.options.blocking } }) catch |err| return switch (err) {
         error.FileNotFound => {},
         error.Canceled => error.Canceled,
         else => error.StoreFailed,
@@ -410,7 +412,7 @@ fn lookup(iface: *Store, io: Io, key: []const u8, out: []Entry) Error!usize {
 /// that is not one fails the lookup by name and is removed.
 fn read(d: *Disk, io: Io, key: []const u8, name: Name) Error!?Entry {
     const text_name = name.text();
-    var file: aegis.own.OwnedIo(Io.File, closeFile) = .init(d.dir.openFile(io, &text_name, .{}) catch |err| return switch (err) {
+    var file: aegis.own.OwnedIo(Io.File, closeFile) = .init(d.dir.get().openFile(io, &text_name, .{}) catch |err| return switch (err) {
         error.FileNotFound => null,
         error.Canceled => error.Canceled,
         else => error.StoreFailed,
@@ -440,7 +442,7 @@ fn read(d: *Disk, io: Io, key: []const u8, name: Name) Error!?Entry {
         .handle = &held.handle,
         .meta = .{ .requested = .fromRaw(framing.requested), .received = .fromRaw(framing.received), .vary = text[framing.key_len..][0..framing.vary_len] },
         .head = text[framing.key_len + framing.vary_len ..],
-        .body = .{ .file = .{ .file = open_file, .offset = framing.bodyOffset(), .length = framing.body.raw() } },
+        .body = .{ .file = .{ .file = .of(open_file), .offset = framing.bodyOffset(), .length = framing.body.raw() } },
     };
 }
 
@@ -496,7 +498,7 @@ fn begin(iface: *Store, io: Io, key: []const u8, meta: Meta, head: []const u8) E
     const name: Name = .{ .key = Name.hash(key), .vary = Name.hash(meta.vary) };
     w.* = .{ .handle = .{ .store = &d.storing }, .pending = undefined, .name = name, .text_name = name.text(), .buffer = buffer, .writer = undefined, .framing = framing };
     // The temp's name is drawn from `temp_prefix`, beside the variant.
-    w.pending = airlock.create(io, d.dir, &w.text_name, .{ .temp = .{ .random = temp_prefix } }) catch |err| return ioError(err);
+    w.pending = airlock.create(io, d.dir.get(), &w.text_name, .{ .temp = .{ .random = temp_prefix } }) catch |err| return ioError(err);
     errdefer w.pending.discard(io);
     w.writer = w.pending.writer(io, buffer);
     var header: [layout.header_len]u8 = undefined;

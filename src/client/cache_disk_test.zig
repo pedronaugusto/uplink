@@ -27,7 +27,7 @@ fn put(store: *Cache.Store, io: Io, key: []const u8, vary: []const u8, body: []c
 /// The body of a held variant, read as a response reads it.
 fn bodyOf(io: Io, entry: Cache.Entry) ![]u8 {
     const f = entry.body.file;
-    var reader = f.file.reader(io, &.{});
+    var reader = f.file.get().reader(io, &.{});
     try reader.seekTo(f.offset);
     return reader.interface.readAllocAll(testing.allocator, @intCast(f.length));
 }

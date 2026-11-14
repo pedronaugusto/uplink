@@ -14,9 +14,11 @@ const reactor = @import("reactor");
 
 /// What a connection's bytes go over.
 pub const Endpoint = union(enum) {
+    // glint-ignore: A015 -- the endpoint is the handle itself, as Io.File is: `Owned` (OwnedIo(Endpoint, close)) owns and closes it, and a copy lends it
     socket: Io.net.Stream,
     /// A named pipe's end, opened for overlapped calls (reactor's
     /// `connectPipe`, or a `PipeListener`'s accept).
+    // glint-ignore: A015 -- as `socket`: `Owned` owns and closes the pipe, and a copy lends it
     pipe: Io.File,
 
     /// A read into `data`.

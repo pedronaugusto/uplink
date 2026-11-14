@@ -24,7 +24,7 @@ const Pattern = @import("Pattern.zig");
 const Files = @This();
 
 /// The directory served; the caller keeps it open.
-root: Io.Dir,
+root: aegis.own.Unowned(Io.Dir),
 options: Options,
 /// Private: the file server as a handler.
 handling: Handler = .{ .handleFn = handled },
@@ -41,7 +41,7 @@ pub const Options = struct {
 
 /// Files under `root`.
 pub fn init(root: Io.Dir, options: Options) Files {
-    return .{ .root = root, .options = options };
+    return .{ .root = .of(root), .options = options };
 }
 
 /// The file server as the server's handler.
@@ -67,7 +67,7 @@ pub fn serve(f: *const Files, io: Io, request: *Request, response: *Response) an
     const name = Pattern.unescape(rest, scratch) orelse return Router.plain(io, response, .bad_request, "bad request\n");
     if (!safe(name)) return Router.plain(io, response, .not_found, "not found\n");
     const relative = if (name.len == 0) "." else std.mem.trimEnd(u8, name, "/");
-    const stat = f.root.statFile(io, if (relative.len == 0) "." else relative, .{}) catch |err| switch (err) {
+    const stat = f.root.get().statFile(io, if (relative.len == 0) "." else relative, .{}) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => return Router.plain(io, response, .not_found, "not found\n"),
     };
@@ -115,7 +115,7 @@ fn redirectTo(io: Io, request: *const Request, response: *Response, suffix: []co
 const Mtime = aegis.units.Instant(.real, .nanosecond, i96);
 
 fn serveFile(f: *const Files, io: Io, request: *Request, response: *Response, relative: []const u8) anyerror!void {
-    const file = f.root.openFile(io, relative, .{}) catch |err| switch (err) {
+    const file = f.root.get().openFile(io, relative, .{}) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => return Router.plain(io, response, .not_found, "not found\n"),
     };

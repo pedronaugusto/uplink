@@ -3,6 +3,7 @@
 //! `Cache.zig` so that a store in a file of its own imports it alone.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const wire = @import("uplink.wire");
 
@@ -22,7 +23,7 @@ pub const Meta = struct {
 /// `offset` in a file it keeps open for the holder.
 pub const Body = union(enum) {
     bytes: []const u8,
-    file: struct { file: Io.File, offset: u64, length: u64 },
+    file: struct { file: aegis.own.Unowned(Io.File), offset: u64, length: u64 },
 
     pub fn len(b: Body) u64 {
         return switch (b) {
