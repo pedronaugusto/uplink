@@ -611,7 +611,10 @@ const FakeServer = struct {
         // is asked for until both are free. The listener asks for no address
         // reuse: on Windows a reusing bind over a port another socket holds
         // is refused as access denied, which std reports as Unexpected, where
-        // a plain one is AddressInUse.
+        // a plain one is AddressInUse. Windows also refuses, as access denied
+        // (Unexpected again), a TCP listen on a port in one of the system's
+        // excluded port ranges, which a UDP port may fall in: another port is
+        // asked for then too (the Windows runners, 3 tests failing at random).
         var tries: u8 = 0;
         while (true) : (tries += 1) {
             f.udp = try loopback.bind(io, .{ .mode = .dgram });
@@ -620,6 +623,11 @@ const FakeServer = struct {
                 error.AddressInUse => {
                     f.udp.close(io);
                     if (tries == 16) return err;
+                    continue;
+                },
+                error.Unexpected => {
+                    f.udp.close(io);
+                    if (@import("builtin").os.tag != .windows or tries == 16) return err;
                     continue;
                 },
                 else => |e| {
