@@ -251,7 +251,7 @@ fn awaitPipeEnd(c: *Socket, io: Io, until: Io.Timeout) Io.Cancelable!bool {
         }
         if (r.end == r.buffer.len) return waitOut(io, until);
         const left = until.toDurationFromNow(io) orelse Io.Clock.Duration{ .raw = aegis.units.Duration(.second, u32).fromRaw(std.math.maxInt(u32)).toIoDuration(), .clock = .awake };
-        if (left.raw.nanoseconds <= 0) return false;
+        if (span.spent(left.raw)) return false;
         const found = reactor.net.pipe.readPipeWithin(io, c.stream.borrow().pipe, r.buffer[r.end..], left.raw) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => return true,
@@ -268,7 +268,7 @@ fn awaitPipeEnd(c: *Socket, io: Io, until: Io.Timeout) Io.Cancelable!bool {
 
 fn expired(io: Io, until: Io.Timeout) bool {
     const left = until.toDurationFromNow(io) orelse return false;
-    return left.raw.nanoseconds <= 0;
+    return span.spent(left.raw);
 }
 
 /// Wait out `until`, which nothing ends sooner but a cancelation.

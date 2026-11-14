@@ -227,7 +227,7 @@ fn openOnce(ctx: *Context, io: Io, route: Context.Route, options: OpenOptions, a
     var limit_kind: Diagnostics.Timeout = .connect;
     if (options.deadline) |d| {
         const left = started.durationTo(d);
-        if (left.nanoseconds <= 0) return timedOutBeforeOpen(diagnostics);
+        if (span.spent(left)) return timedOutBeforeOpen(diagnostics);
         if (limit == null or span.of(left).compare(limit.?) == .lt) {
             limit = span.of(left);
             limit_kind = .deadline;
@@ -486,7 +486,7 @@ pub fn alive(conn: *Connection, io: Io) Io.Cancelable!bool {
         .readable => secure,
         .closed => false,
     };
-    return switch (try Timed.awaitReadable(io, stream_end.borrow().*, r, .fromNanoseconds(0))) {
+    return switch (try Timed.awaitReadable(io, stream_end.borrow().*, r, .zero)) {
         .timed_out, .unbounded => true,
         // Nothing read is the stream's end, or its failure.
         .ready => r.end != 0 and secure,
@@ -520,7 +520,7 @@ pub fn awaitReadable(conn: *Connection, io: Io, timeout: Io.Duration) Io.Cancela
 /// the drain meets is no longer the exchange's to hear of.
 pub fn drainBy(conn: *Connection, until: Io.Timestamp) void {
     conn.diagnostics = null;
-    if (conn.deadline == null or until.nanoseconds < conn.deadline.?.nanoseconds) conn.deadline = until;
+    if (conn.deadline == null or span.before(until, conn.deadline.?)) conn.deadline = until;
 }
 
 /// Bound no read or write by a timeout any more: what the connection
@@ -754,7 +754,7 @@ fn operationLimit(conn: *Connection, io: Io, reading: bool) ?Limit {
 }
 
 fn nearer(best: *?Limit, candidate: Limit) void {
-    if (best.* == null or candidate.at.nanoseconds < best.*.?.at.nanoseconds) best.* = candidate;
+    if (best.* == null or span.before(candidate.at, best.*.?.at)) best.* = candidate;
 }
 
 /// Perform one socket operation within the connection's deadline. A failure
@@ -811,7 +811,7 @@ const Speed = struct {
 
     /// When an operation starting `now` gives up for want of speed.
     fn deadline(s: *Speed, now: Io.Timestamp, l: Context.Timeouts.LowSpeed) Io.Timestamp {
-        const over = if (s.start) |start| now.nanoseconds >= start.addDuration(span.toIo(l.window)).nanoseconds else true;
+        const over = if (s.start) |start| !span.before(now, start.addDuration(span.toIo(l.window))) else true;
         if (over) {
             s.start = now;
             s.bytes = .fromRaw(0);
@@ -1139,12 +1139,12 @@ fn socksTunnel(conn: *Connection, proxy: Proxy, started: Io.Timestamp) OpenError
     if (ctx.timeouts.connect) |limit| until = started.addDuration(span.toIo(limit));
     if (ctx.timeouts.handshake) |limit| {
         const h = Io.Clock.awake.now(io).addDuration(span.toIo(limit));
-        if (until == null or h.nanoseconds < until.?.nanoseconds) {
+        if (until == null or span.before(h, until.?)) {
             until = h;
             bound = .handshake;
         }
     }
-    if (conn.deadline) |d| if (until == null or d.nanoseconds < until.?.nanoseconds) {
+    if (conn.deadline) |d| if (until == null or span.before(d, until.?)) {
         until = d;
         bound = .deadline;
     };
@@ -1189,7 +1189,7 @@ fn socksLookup(conn: *Connection, ipv4: bool, until: ?Io.Timestamp) OpenError!Io
     const io = conn.io;
     var storage: [reactor.net.max_addresses]Io.net.IpAddress = undefined;
     const timeout: ?Io.Duration = if (until) |u| Io.Clock.awake.now(io).durationTo(u) else null;
-    if (timeout) |t| if (t.nanoseconds <= 0) return conn.timedOutOpen();
+    if (timeout) |t| if (span.spent(t)) return conn.timedOutOpen();
     var bounded = true;
     // Resolver.lookupWithin's contract returns the part of `out` it wrote; a resolver is any implementor's, behind a function pointer
     const addresses = conn.ctx.resolve().lookupWithin(io, conn.route.host(), conn.route.port, if (ipv4) .ip4 else null, &storage, if (timeout) |t| span.of(t) else null, &bounded) catch |err| return switch (err) {

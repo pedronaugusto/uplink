@@ -379,7 +379,7 @@ pub const Cache = struct {
         {
             var held = c.services.acquireUncancelable(io);
             defer held.deinit(io);
-            if (held.value().getPtr(key)) |e| if (now.nanoseconds < e.expires.nanoseconds) {
+            if (held.value().getPtr(key)) |e| if (span.before(now, e.expires)) {
                 const b = e.binding orelse return null;
                 return try b.clone(gpa);
             };
@@ -462,7 +462,7 @@ pub const Cache = struct {
         var held = c.entries.acquireUncancelable(io);
         defer held.deinit(io);
         const e = held.value().getPtr(key) orelse return null;
-        if (now.nanoseconds >= e.expires.nanoseconds) return null;
+        if (!span.before(now, e.expires)) return null;
         return pick(e.addresses[0..e.len], port, family, out);
     }
 
@@ -565,7 +565,7 @@ const Slow = struct {
     }
 
     fn answer(io: Io, _: *Interface, _: []const u8, port: u16, _: ?IpAddress.Family, out: []IpAddress) LookupError![]IpAddress {
-        try io.sleep(.fromMilliseconds(20), .awake);
+        try io.sleep(span.toIo(.literal("20ms")), .awake);
         out[0] = .{ .ip4 = .{ .bytes = .{ 10, 0, 0, 1 }, .port = port } };
         return out[0..1];
     }

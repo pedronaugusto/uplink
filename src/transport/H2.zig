@@ -69,7 +69,7 @@ pub const Failure = union(enum) {
 };
 
 /// How long a reader without a deadline waits for a frame at a time.
-const idle_wait: Io.Duration = .fromSeconds(3600);
+const idle_wait = span.toIo(.literal("1h"));
 
 /// The receive window each stream gets: what its buffer may hold.
 pub const stream_window: h2.Connection.Limits.Bytes = .literal("1MiB");
@@ -514,7 +514,7 @@ fn waitUntil(h: *const H2, io: Io, deadline: ?Io.Timestamp) ?Io.Timestamp {
     const activity = h.ctx.timeouts.activity orelse return deadline;
     const by_activity = Io.Clock.awake.now(io).addDuration(span.toIo(activity));
     const d = deadline orelse return by_activity;
-    return if (by_activity.nanoseconds < d.nanoseconds) by_activity else d;
+    return if (span.before(by_activity, d)) by_activity else d;
 }
 
 /// Wait for a stream's state, the outbox or the reading token to change,
@@ -522,7 +522,7 @@ fn waitUntil(h: *const H2, io: Io, deadline: ?Io.Timestamp) ?Io.Timestamp {
 fn awaitChange(h: *H2, io: Io, held: anytype, deadline: ?Io.Timestamp) Error!void {
     const timeout: Io.Timeout = if (deadline) |d| .{ .deadline = .{ .raw = d, .clock = .awake } } else .none;
     held.wait(&h.changed, io, timeout) catch |err| return switch (err) {
-        error.Timeout => if (deadline != null and Io.Clock.awake.now(io).nanoseconds >= deadline.?.nanoseconds) error.TimedOut else {},
+        error.Timeout => if (deadline != null and !span.before(Io.Clock.awake.now(io), deadline.?)) error.TimedOut else {},
         error.Canceled => error.Canceled,
         error.WaiterLimit => error.ConnectionFailed,
     };
@@ -572,7 +572,7 @@ fn readFrame(h: *H2, io: Io, deadline: ?Io.Timestamp) Error!struct { h2.Head, []
     // other streams.
     while (r.bufferedLen() < h2.head_len) {
         const left: Io.Duration = if (deadline) |d| Io.Clock.awake.now(io).durationTo(d) else idle_wait;
-        if (left.nanoseconds <= 0) return error.TimedOut;
+        if (span.spent(left)) return error.TimedOut;
         switch (conn.awaitReadable(io, left) catch return error.Canceled) {
             .ready, .unbounded => break,
             .timed_out => if (deadline != null) return error.TimedOut,

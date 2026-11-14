@@ -40,6 +40,26 @@ pub fn of(d: Io.Duration) Duration {
 /// std's span, as aegis holds it: the same nanoseconds, signed.
 const IoSpan = aegis.units.Duration(.nanosecond, i96);
 
+/// A moment as std's timestamps hold it, on the clock it was read from: what
+/// two timestamps of one clock compare as.
+const Moment = aegis.units.Instant(.any, .nanosecond, i96);
+
+/// How `a` and `b`, two timestamps of one clock, are ordered.
+pub fn order(a: Io.Timestamp, b: Io.Timestamp) std.math.Order {
+    return Moment.fromTimestamp(a, .exact).compare(.fromTimestamp(b, .exact));
+}
+
+/// Whether `a` comes before `b`, two timestamps of one clock.
+pub fn before(a: Io.Timestamp, b: Io.Timestamp) bool {
+    return order(a, b) == .lt;
+}
+
+/// Whether what is left of a wait is nothing: none, or less, its deadline
+/// passed.
+pub fn spent(left: Io.Duration) bool {
+    return IoSpan.fromIoDuration(left, .exact).compare(.fromRaw(0)) != .gt;
+}
+
 /// The shorter of two optional spans; null is no limit.
 pub fn shorter(a: ?Duration, b: ?Duration) ?Duration {
     const x = a orelse return b;
@@ -54,4 +74,14 @@ test "spans meet std's: negative is zero, and every span converts back" {
     try std.testing.expectEqual(Duration.literal("1s"), shorter(.literal("1s"), .literal("2s")).?);
     try std.testing.expectEqual(Duration.literal("2s"), shorter(null, .literal("2s")).?);
     try std.testing.expectEqual(null, shorter(null, null));
+}
+
+test "timestamps order as their clock's moments, and a span left is spent at zero or less" {
+    const one: Io.Timestamp = .fromNanoseconds(1);
+    try std.testing.expect(before(.zero, one));
+    try std.testing.expect(!before(one, one));
+    try std.testing.expectEqual(std.math.Order.gt, order(one, .fromNanoseconds(-1)));
+    try std.testing.expect(spent(.zero));
+    try std.testing.expect(spent(.fromSeconds(-1)));
+    try std.testing.expect(!spent(.fromNanoseconds(1)));
 }

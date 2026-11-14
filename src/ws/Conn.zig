@@ -664,7 +664,7 @@ pub fn close(c: *Conn, io: Io, code: u16, reason: []const u8) void {
     var buffer: [512]u8 = undefined;
     while (c.peer_close == null and c.failure == null) {
         const left = Io.Clock.awake.now(io).durationTo(until);
-        if (left.nanoseconds <= 0) return;
+        if (span.spent(left)) return;
         // glint-ignore: Z026 -- a close that cannot wait for the peer's ends without it
         const ready = c.transport.readableFn(&c.transport, io, left) catch return;
         if (ready == .timed_out) return;

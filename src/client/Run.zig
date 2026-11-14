@@ -521,7 +521,7 @@ const max_fields = 256;
 pub fn h2Failure(run: *Run, io: Io, err: H2.Error) H2Error {
     return switch (err) {
         error.TimedOut => {
-            if (run.diagnostics()) |d| d.timeout = if (run.deadline) |t| (if (Io.Clock.awake.now(io).nanoseconds >= t.nanoseconds) .deadline else .activity) else .activity;
+            if (run.diagnostics()) |d| d.timeout = if (run.deadline) |t| (if (!span.before(Io.Clock.awake.now(io), t)) .deadline else .activity) else .activity;
             return error.TimedOut;
         },
         error.Refused => error.Refused,
@@ -1064,7 +1064,7 @@ fn retryFailure(run: *Run, io: Io, err: Error) Error!bool {
 
 fn withinDeadline(run: *const Run, io: Io, wait: Duration) bool {
     const d = run.deadline orelse return true;
-    return Io.Clock.awake.now(io).addDuration(span.toIo(wait)).nanoseconds < d.nanoseconds;
+    return span.before(Io.Clock.awake.now(io).addDuration(span.toIo(wait)), d);
 }
 
 /// Wait before the next try, counting it.

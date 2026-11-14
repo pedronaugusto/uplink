@@ -15,6 +15,7 @@
 //! writes, are not allowed.
 
 const std = @import("std");
+const span = @import("../span.zig");
 const aegis = @import("aegis");
 const sync = @import("../sync.zig");
 const reactor = @import("reactor");
@@ -122,7 +123,7 @@ pub fn perform(t: *Timed, io: Io, keeper: Keeper, op: Io.Operation, deadline: ?I
         else => &t.writes,
     };
     if (side.mode.current() == .unenforced) return io.operate(op);
-    if (at.nanoseconds <= Io.Clock.awake.now(io).nanoseconds) return error.TimedOut;
+    if (!span.before(Io.Clock.awake.now(io), at)) return error.TimedOut;
     // A deadline that fired on the other side has aborted the socket.
     if (t.fired()) return error.TimedOut;
     if (side.mode.current() == .unwatched) _ = side.mode.step(if (keeper.deadlines.add(io, &side.watch)) .watched else .unwatchable) catch unreachable; // glint-ignore: Z026 -- unwatched until now

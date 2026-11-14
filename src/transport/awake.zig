@@ -4,6 +4,7 @@
 //! meet one, and a span between two is checked.
 
 const std = @import("std");
+const span = @import("../span.zig");
 const aegis = @import("aegis");
 const Io = std.Io;
 
@@ -20,7 +21,7 @@ pub fn now(io: Io) Instant {
 /// instant, as a deadline that far off never comes.
 pub fn of(t: Io.Timestamp) Instant {
     return Instant.fromIoTimestamp(t.withClock(.awake), .exact) catch |err| switch (err) {
-        error.Overflow => .fromRaw(if (t.nanoseconds < 0) std.math.minInt(i64) else std.math.maxInt(i64)),
+        error.Overflow => .fromRaw(if (span.before(t, .zero)) std.math.minInt(i64) else std.math.maxInt(i64)),
         error.ClockMismatch => unreachable, // unreachable: the timestamp was given the awake clock just above
     };
 }

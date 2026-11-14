@@ -123,7 +123,7 @@ fn connect(ctx: *Context, io: Io, h: *H2, route: Context.Route, slot: *Context.P
     var until = options.deadline;
     if (ctx.timeouts.handshake) |limit| {
         const bound = Io.Clock.awake.now(io).addDuration(span.toIo(limit));
-        if (until == null or bound.nanoseconds < until.?.nanoseconds) until = bound;
+        if (until == null or span.before(bound, until.?)) until = bound;
     }
     const st = h.open(io, list[0..n], false, false) catch |err| return streamError(err);
     errdefer h.finish(io, st);

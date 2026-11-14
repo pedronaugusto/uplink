@@ -16,6 +16,7 @@
 //! connection given back is handed straight to the first waiter.
 
 const std = @import("std");
+const span = @import("../span.zig");
 const sync = @import("../sync.zig");
 const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
@@ -570,7 +571,7 @@ fn waitForWaiters(p: *Pool, route: *const Route, n: usize) !void {
         const have = if (findState(held.value(), route)) |state| state.waiters.len() else 0;
         held.deinit(test_io.io());
         if (have == n) return;
-        try test_io.io().sleep(.fromMilliseconds(1), .awake);
+        try test_io.io().sleep(span.toIo(.literal("1ms")), .awake);
     }
     return error.TestUnexpectedResult;
 }
