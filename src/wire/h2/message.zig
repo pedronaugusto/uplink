@@ -154,7 +154,8 @@ pub fn copy(buffer: []align(@alignOf(Field)) u8, fields: []const hpack.Field) er
     for (fields) |f| bytes += f.name.len + f.value.len;
     const fields_at = std.mem.alignForward(usize, bytes, @alignOf(Field));
     if (fields_at + fields.len * @sizeOf(Field) > buffer.len) return error.NoSpaceLeft;
-    const out: [*]Field = @ptrCast(@alignCast(buffer.ptr + fields_at)); // glint-ignore: P007 -- internal: `buffer` is declared aligned for a Field, `fields_at` keeps that, and the check above leaves room for every field
+    const room: []align(@alignOf(Field)) u8 = @alignCast(buffer[fields_at..][0 .. fields.len * @sizeOf(Field)]); // glint-ignore: P007 -- internal: `buffer` is declared aligned for a Field and `fields_at` keeps that
+    const out = std.mem.bytesAsSlice(Field, room); // glint-ignore: P007 -- internal: the check above leaves room for every field, and a Field holds only slices
     var at: usize = 0;
     for (fields, 0..) |f, i| {
         @memcpy(buffer[at..][0..f.name.len], f.name);
@@ -162,7 +163,7 @@ pub fn copy(buffer: []align(@alignOf(Field)) u8, fields: []const hpack.Field) er
         out[i] = .{ .name = buffer[at..][0..f.name.len], .value = buffer[at + f.name.len ..][0..f.value.len] };
         at += f.name.len + f.value.len;
     }
-    return out[0..fields.len];
+    return out;
 }
 
 const testing = std.testing;

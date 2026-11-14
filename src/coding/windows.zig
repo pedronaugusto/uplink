@@ -52,7 +52,7 @@ fn Windowed(comptime State_: type, comptime beside: usize) type {
         const Self = @This();
 
         /// Private: the buffer kept for the next body.
-        kept: aegis.Guarded(?[*]align(64) u8) = .init(null),
+        kept: aegis.Guarded(?Buffer) = .init(null),
         /// The largest window a body may ask for.
         max_window: aegis.units.Bytes(u32),
         /// Private: the length of every buffer, the decoder's state included.
@@ -100,7 +100,7 @@ fn Windowed(comptime State_: type, comptime beside: usize) type {
                 defer held.deinit();
                 if (held.value().*) |b| {
                     held.value().* = null;
-                    return b[0..z.len];
+                    return b;
                 }
             }
             return gpa.alignedAlloc(u8, .@"64", z.len);
@@ -113,7 +113,7 @@ fn Windowed(comptime State_: type, comptime beside: usize) type {
                 var held = z.kept.acquire();
                 defer held.deinit();
                 if (held.value().* == null) {
-                    held.value().* = buffer.ptr;
+                    held.value().* = buffer;
                     return;
                 }
             }
@@ -122,7 +122,7 @@ fn Windowed(comptime State_: type, comptime beside: usize) type {
 
         /// Free the kept buffer.
         pub fn deinit(z: *Self, gpa: Allocator) void {
-            if (z.kept.teardown().*) |b| gpa.free(b[0..z.len]);
+            if (z.kept.teardown().*) |b| gpa.free(b);
             z.* = undefined;
         }
     };
