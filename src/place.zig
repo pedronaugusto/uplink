@@ -15,7 +15,7 @@ pub fn many(comptime T: type, bytes: anytype, offset: usize, count: usize) []T {
     comptime aegis.assert.invariant(declared(@TypeOf(bytes)) >= @alignOf(T), "declared(@TypeOf(bytes)) >= @alignOf(T)");
     aegis.assert.invariant(std.mem.isAligned(offset, @alignOf(T)), "std.mem.isAligned(offset, @alignOf(T))");
     const part = bytes[offset..][0 .. count * @sizeOf(T)];
-    const typed: []align(@alignOf(T)) u8 = @alignCast(part); // glint-ignore: P007 -- internal: `bytes` is declared aligned for a `T` and `offset` is checked to keep that
+    const typed: []align(@alignOf(T)) u8 = @alignCast(part); // `bytes` is declared aligned for a `T` and `offset` is checked to keep that
     return std.mem.bytesAsSlice(T, typed);
 }
 

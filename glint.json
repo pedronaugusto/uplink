@@ -1,0 +1,67 @@
+{
+  "seams": [
+    {
+      "file": "src/net/stream.zig",
+      "rules": [
+        "A009"
+      ],
+      "reason": "a connection's endpoint: the read operation every socket and named pipe uplink speaks over is made here, for the event loop to run"
+    },
+    {
+      "file": "src/net/Timed.zig",
+      "rules": [
+        "A009"
+      ],
+      "reason": "reads and receives under a deadline: each operation a connection's or the resolver's bytes come in by, run against its timer"
+    },
+    {
+      "file": "src/server/Socket.zig",
+      "rules": [
+        "A009"
+      ],
+      "reason": "the server's reads of an accepted connection: a request's bytes, read under the connection's deadlines and handed to the HTTP/1.1 and HTTP/2 readers"
+    },
+    {
+      "file": "src/net/Dns.zig",
+      "rules": [
+        "A009"
+      ],
+      "reason": "the resolver's own transport and configuration: a name server's datagrams and TCP answers, /etc/resolv.conf, and the tests' loopback name server; wire.dns reads each"
+    },
+    {
+      "file": "src/client/CacheDisk.zig",
+      "rules": [
+        "A009"
+      ],
+      "reason": "the client's disk cache: the entries it reads back, each checked against its framing before it is used"
+    },
+    {
+      "file": "src/client/Response.zig",
+      "rules": [
+        "A009"
+      ],
+      "reason": "a cached response's body, read from the file the disk cache keeps open for it, as long as its framing says"
+    },
+    {
+      "file": "src/server/Files.zig",
+      "rules": [
+        "A009"
+      ],
+      "reason": "the file server: the files it serves, sent as they are and never parsed"
+    },
+    {
+      "file": "src/net/dns/windows.zig",
+      "rules": [
+        "P007"
+      ],
+      "reason": "the DNS servers Windows gives its adapters: GetAdaptersAddresses' linked records and socket addresses, laid out as Windows documents them"
+    },
+    {
+      "file": "src/place.zig",
+      "rules": [
+        "P007"
+      ],
+      "reason": "the one place bytes are viewed as typed values: each view asserted aligned and in bounds"
+    }
+  ]
+}
