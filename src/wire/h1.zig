@@ -1209,7 +1209,7 @@ test "a request target's writer refuses exactly the bytes its reader refuses" {
             break :refused false;
         };
         var line_buffer: [64]u8 = undefined;
-        const line = try std.fmt.bufPrint(&line_buffer, "GET /{c} HTTP/1.1\r\nHost: h\r\n\r\n", .{c});
+        const line = try std.mem.print(&line_buffer, "GET /{c} HTTP/1.1\r\nHost: h\r\n\r\n", .{c});
         var fields: [4]Field = undefined;
         const read = if (parseRequest(line, &fields, .{})) |parsed| parsed != null else |_| false;
         try testing.expectEqual(written, read);
@@ -1229,9 +1229,9 @@ test "a status line's writer refuses exactly the codes its reader refuses" {
         };
         var line_buffer: [96]u8 = undefined;
         const line = if (written)
-            try std.fmt.bufPrint(&line_buffer, "{s}\r\n", .{w.buffered()})
+            try std.mem.print(&line_buffer, "{s}\r\n", .{w.buffered()})
         else
-            try std.fmt.bufPrint(&line_buffer, "HTTP/1.1 {d} \r\n\r\n", .{code});
+            try std.mem.print(&line_buffer, "HTTP/1.1 {d} \r\n\r\n", .{code});
         var fields: [4]Field = undefined;
         const parsed = parseResponse(line, &fields, .{}) catch null;
         try testing.expectEqual(written, parsed != null);
