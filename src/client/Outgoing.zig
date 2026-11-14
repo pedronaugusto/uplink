@@ -46,7 +46,7 @@ pub const Writer = union(enum) {
 };
 
 /// A body written as an HTTP/2 stream's data, held to a declared length.
-const DataWriter = struct {
+pub const DataWriter = struct {
     h2: *H2,
     stream: *H2.Stream,
     io: Io,

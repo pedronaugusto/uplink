@@ -149,7 +149,9 @@ pub const Reading = struct {
     inflate: ?*Inflater = null,
 };
 
-const Inflater = struct {
+/// A compressed message's decoder (permessage-deflate, RFC 7692) and its
+/// 32 KiB window, kept across the message's frames.
+pub const Inflater = struct {
     state: warp.Inflate,
     window: [32 << 10]u8,
 };
