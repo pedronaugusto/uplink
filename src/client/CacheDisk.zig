@@ -256,17 +256,18 @@ const Framing = struct {
     head_len: usize,
     body: Size,
 
-    /// A file's first and last bytes and its length, as nothing has read
-    /// them yet.
-    const Unread = aegis.input.Untrusted(struct {
+    /// A file's first and last bytes and its length.
+    const Ends = struct {
         header: [layout.header_len]u8,
         trailer: [layout.trailer_len]u8,
         size: u64,
-    });
+    };
+    /// The ends as nothing has read them yet.
+    const Unread = aegis.input.Untrusted(Ends);
 
     const NotAVariant = error{NotAVariant};
 
-    fn parse(key_len: usize, raw: @FieldType(Unread, "value")) NotAVariant!Framing {
+    fn parse(key_len: usize, raw: Ends) NotAVariant!Framing {
         const h = &raw.header;
         if (!std.mem.eql(u8, h[0..layout.magic.len], layout.magic)) return error.NotAVariant;
         if (!std.mem.eql(u8, raw.trailer[8..], layout.trailer_magic)) return error.NotAVariant;
@@ -448,7 +449,7 @@ fn frame(d: *Disk, io: Io, file: Io.File, key: []const u8) (Error || Framing.Not
     _ = d;
     const size = file.length(io) catch |err| return ioError(err);
     if (size < layout.header_len + layout.trailer_len) return error.NotAVariant;
-    var ends: @FieldType(Framing.Unread, "value") = .{ .header = undefined, .trailer = undefined, .size = size };
+    var ends: Framing.Ends = .{ .header = undefined, .trailer = undefined, .size = size };
     try readAt(io, file, &ends.header, 0);
     try readAt(io, file, &ends.trailer, size - layout.trailer_len);
     return Framing.Unread.init(ends).parse(key.len, Framing.parse);
