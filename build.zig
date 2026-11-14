@@ -39,6 +39,9 @@ pub fn build(b: *std.Build) void {
 /// uplink's development: its tests, example, checks and benchmarks, under
 /// preflight's gate. Run through bay.
 pub fn dev(b: *std.Build, tools: type) void {
+    // std's lazyImport compares every package of the tree at comptime: the tree passes the
+    // default branch quota (preflight's lazy-import check).
+    @setEvalBranchQuota(10_000);
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const preflight = tools.preflight;
@@ -354,7 +357,9 @@ fn addWireConsumerCheck(b: *std.Build, p: *std.Build, aegis: *std.Build.Dependen
     run.addDirectoryArg2(p.path("."), .{});
     run.addFileArg(p.path("ci/wire_program.zig"));
     run.has_side_effects = true;
-    b.step("check-wire-consumer", "Build a project that asks for uplink.wire alone, with only aegis to fetch").dependOn(&run.step);
+    const step = b.step("check-wire-consumer", "Build a project that asks for uplink.wire alone, with only aegis to fetch");
+    step.dependOn(&run.step);
+    step.dependOn(&inGraph(b, p, "wire_program", "uplink.wire").step);
 }
 
 /// aegis for the programs the build runs on the machine it runs on.
@@ -381,7 +386,19 @@ fn addColdConsumerCheck(b: *std.Build, p: *std.Build) void {
     run.addFileArg(p.path("ci/cold_program.zig"));
     run.addArg("cold");
     run.has_side_effects = true;
-    b.step("check-cold-consumer", "Build a client project from an empty package cache").dependOn(&run.step);
+    const step = b.step("check-cold-consumer", "Build a client project from an empty package cache");
+    step.dependOn(&run.step);
+    step.dependOn(&inGraph(b, p, "cold_program", "uplink").step);
+}
+
+/// A consumer's program compiled against the package's own module in this build, an object
+/// nothing installs, as preflight's `addConsumerCheck` does for `ci/consumer.zig`: lint reads
+/// only the configured graph, and the consumer's project is written only when its check runs,
+/// so this is what tells lint what the program's import is.
+fn inGraph(b: *std.Build, p: *std.Build, comptime program: []const u8, module: []const u8) *std.Build.Step.Compile {
+    const root = b.createModule(.{ .root_source_file = p.path("ci/" ++ program ++ ".zig"), .target = b.graph.host, .optimize = .debug });
+    root.addImport(module, p.modules.get(module).?);
+    return b.addObject(.{ .name = program, .root_module = root });
 }
 
 /// JSON-Schema-Test-Suite's URI format cases (testdata/json-schema, release 23.2.0, MIT), as a module.
