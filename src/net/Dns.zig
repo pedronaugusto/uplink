@@ -368,7 +368,7 @@ pub const Stub = struct {
             error.Canceled => error.Canceled,
             else => error.Failed,
         };
-        var timed: Timed = .init(.{ .socket = .{ .socket = socket } });
+        var timed: Timed = .init(.ofSocket(.{ .socket = socket }));
         defer timed.deinit(io, s.keeper());
         const deadline = Io.Clock.awake.now(io).addDuration(span.toIo(s.timeout));
         while (true) {
@@ -399,7 +399,7 @@ pub const Stub = struct {
         };
         defer connected.stream.deinit(io);
         const stream = connected.stream.borrow().*;
-        var timed: Timed = .init(.{ .socket = stream });
+        var timed: Timed = .init(.ofSocket(stream));
         defer timed.deinit(io, s.keeper());
         var length: [2]u8 = undefined;
         std.mem.writeInt(u16, &length, @intCast(query.len), .big); // safe: a query is far below 64 KiB

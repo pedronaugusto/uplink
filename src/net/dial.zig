@@ -326,7 +326,7 @@ pub fn dialPipe(io: Io, path: []const u8, options: Options) DialError!Dialed {
     };
     var pipe: Io.File = undefined;
     file.take(&pipe);
-    return .{ .stream = .init(.{ .pipe = pipe }) };
+    return .{ .stream = .init(.ofPipe(pipe)) };
 }
 
 fn unixNow(io: Io, path: []const u8) DialError!Dialed {
@@ -336,7 +336,7 @@ fn unixNow(io: Io, path: []const u8) DialError!Dialed {
         error.FileNotFound, error.NotDir => error.NameNotResolved,
         else => error.ConnectionFailed,
     };
-    return .{ .stream = .init(.{ .socket = stream }) };
+    return .{ .stream = .init(.ofSocket(stream)) };
 }
 
 /// The addresses of `local`'s family, in their order.
@@ -505,7 +505,7 @@ fn connectOne(io: Io, address: IpAddress, deadline: Io.Timeout, local: Local) re
     var c = try reactor.net.connect(io, &address, .{ .timeout = deadline, .socket = local.socket, .local_address = local.address, .interface = local.interface });
     var stream: Io.net.Stream = undefined;
     c.stream.take(&stream);
-    return .{ .stream = .init(.{ .socket = stream }), .address = address, .timeout_enforced = c.timeout_enforced };
+    return .{ .stream = .init(.ofSocket(stream)), .address = address, .timeout_enforced = c.timeout_enforced };
 }
 
 const testing = std.testing;

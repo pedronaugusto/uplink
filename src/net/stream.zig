@@ -12,28 +12,37 @@ const Io = std.Io;
 const aegis = @import("aegis");
 const reactor = @import("reactor");
 
-/// What a connection's bytes go over.
+/// What a connection's bytes go over, as a view: every endpoint names a
+/// handle its one `Owned` keeps and closes, and a copy lends it.
 pub const Endpoint = union(enum) {
-    // glint-ignore: A015 -- the endpoint is the handle itself, as Io.File is: `Owned` (OwnedIo(Endpoint, close)) owns and closes it, and a copy lends it
-    socket: Io.net.Stream,
+    socket: aegis.own.Unowned(Io.net.Stream),
     /// A named pipe's end, opened for overlapped calls (reactor's
     /// `connectPipe`, or a `PipeListener`'s accept).
-    // glint-ignore: A015 -- as `socket`: `Owned` owns and closes the pipe, and a copy lends it
-    pipe: Io.File,
+    pipe: aegis.own.Unowned(Io.File),
+
+    /// The endpoint naming `stream`, which an `Owned` is to keep.
+    pub fn ofSocket(stream: Io.net.Stream) Endpoint {
+        return .{ .socket = .of(stream) };
+    }
+
+    /// The endpoint naming `file`, a pipe's end, which an `Owned` is to keep.
+    pub fn ofPipe(file: Io.File) Endpoint {
+        return .{ .pipe = .of(file) };
+    }
 
     /// A read into `data`.
     pub fn readOp(e: Endpoint, data: [][]u8) Io.Operation {
         return switch (e) {
-            .socket => |s| .{ .net_read = .{ .socket_handle = s.socket.handle, .data = data } },
-            .pipe => |f| .{ .file_read_streaming = .{ .file = f, .data = data } },
+            .socket => |s| .{ .net_read = .{ .socket_handle = s.get().socket.handle, .data = data } },
+            .pipe => |f| .{ .file_read_streaming = .{ .file = f.get(), .data = data } },
         };
     }
 
     /// A write of `header`, then `data`, the last of it `splat` times.
     pub fn writeOp(e: Endpoint, header: []const u8, data: []const []const u8, splat: usize) Io.Operation {
         return switch (e) {
-            .socket => |s| .{ .net_write = .{ .socket_handle = s.socket.handle, .header = header, .data = data, .splat = splat } },
-            .pipe => |f| .{ .file_write_streaming = .{ .file = f, .header = header, .data = data, .splat = splat } },
+            .socket => |s| .{ .net_write = .{ .socket_handle = s.get().socket.handle, .header = header, .data = data, .splat = splat } },
+            .pipe => |f| .{ .file_write_streaming = .{ .file = f.get(), .header = header, .data = data, .splat = splat } },
         };
     }
 
@@ -61,8 +70,8 @@ pub const Endpoint = union(enum) {
     /// The deadline watch for its operations.
     pub fn watch(e: Endpoint) reactor.net.Deadlines.Watch {
         return switch (e) {
-            .socket => |s| .init(s.socket.handle),
-            .pipe => |f| .initPipe(f),
+            .socket => |s| .init(s.get().socket.handle),
+            .pipe => |f| .initPipe(f.get()),
         };
     }
 
@@ -70,18 +79,19 @@ pub const Endpoint = union(enum) {
     /// half close; null for a pipe. The endpoint's owner closes it.
     pub fn socketStream(e: Endpoint) ?Io.net.Stream {
         return switch (e) {
-            .socket => |s| s,
+            .socket => |s| s.get(),
             .pipe => null,
         };
     }
 };
 
-/// The owner of a connected stream, closed by its `deinit(io)`.
+/// The owner of a connected stream, closed by its `deinit(io)`: the one
+/// holder that closes what its endpoint names.
 pub const Owned = aegis.own.OwnedIo(Endpoint, close);
 
 fn close(e: *Endpoint, io: Io) void {
     switch (e.*) {
-        .socket => |s| s.close(io),
-        .pipe => |f| f.close(io),
+        .socket => |s| s.get().close(io),
+        .pipe => |f| f.get().close(io),
     }
 }

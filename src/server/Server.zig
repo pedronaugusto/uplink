@@ -185,8 +185,8 @@ fn acceptLoop(s: *Server, io: Io, listener: Listener, result: *ServeError!void) 
             return;
         };
         const endpoint: Endpoint = switch (listener) {
-            .socket => |l| .{
-                .socket = l.accept(io) catch |err| switch (err) {
+            .socket => |l| .ofSocket(
+                l.accept(io) catch |err| switch (err) {
                     error.Canceled => {
                         if (!s.context.isStopping()) result.* = error.Canceled;
                         return;
@@ -199,9 +199,9 @@ fn acceptLoop(s: *Server, io: Io, listener: Listener, result: *ServeError!void) 
                         return;
                     },
                 },
-            },
-            .pipe => |l| .{
-                .pipe = pipe: {
+            ),
+            .pipe => |l| .ofPipe(
+                pipe: {
                     var accepted = l.accept(io) catch |err| switch (err) {
                         error.Canceled => {
                             if (!s.context.isStopping()) result.* = error.Canceled;
@@ -218,7 +218,7 @@ fn acceptLoop(s: *Server, io: Io, listener: Listener, result: *ServeError!void) 
                     accepted.take(&file);
                     break :pipe file;
                 },
-            },
+            ),
         };
         if (s.context.isStopping()) {
             var owned: OwnedEndpoint = .init(endpoint);
@@ -240,7 +240,7 @@ fn acceptLoop(s: *Server, io: Io, listener: Listener, result: *ServeError!void) 
 /// answer that closes it, or `shutdown`.
 pub fn serveConnection(s: *Server, io: Io, stream: Io.net.Stream) void {
     s.opened(io);
-    s.serveOpened(io, .{ .socket = stream });
+    s.serveOpened(io, .ofSocket(stream));
 }
 
 fn opened(s: *Server, io: Io) void {

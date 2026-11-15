@@ -382,7 +382,7 @@ test "a dial's socket is made with the options it asked for, told to reactor" {
             // The connection is made: the listener accepts it from the dial's own end.
             const accepted = try listener.accept(io);
             defer accepted.close(io);
-            try testing.expect(accepted.socket.address.eql(&dialed.stream.borrow().socket.socket.address));
+            try testing.expect(accepted.socket.address.eql(&dialed.stream.borrow().socket.get().socket.address));
             try testing.expect(dialed.peer.?.eql(&listener.socket.address));
             // The options, told once, as the socket is made.
             const asked = test_io.asked();
@@ -416,7 +416,7 @@ test "a dial from a local address goes from it, to the name's addresses of its f
             const accepted = try six.accept(io);
             defer accepted.close(io);
             try testing.expect(accepted.socket.address.eql(&local));
-            try testing.expect(dialed.stream.borrow().socket.socket.address.eql(&local));
+            try testing.expect(dialed.stream.borrow().socket.get().socket.address.eql(&local));
             try testing.expectError(error.AddressFamilyMismatch, dial(io, "127.0.0.1", port, .{ .local_address = local }));
         }
     }.inSim, .{});

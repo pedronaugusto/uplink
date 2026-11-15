@@ -409,8 +409,8 @@ fn abort(c: *Context, io: Io, which: enum { idle, all }) void {
         const entry: *Entry = @fieldParentPtr("node", node);
         if (entry.closed) continue;
         if (which == .all or entry.idle) switch (entry.endpoint) {
-            .socket => |stream| reactor.net.abort(io, stream.socket.handle),
-            .pipe => |file| reactor.net.pipe.disconnect(io, file),
+            .socket => |stream| reactor.net.abort(io, stream.get().socket.handle),
+            .pipe => |file| reactor.net.pipe.disconnect(io, file.get()),
         };
     }
 }

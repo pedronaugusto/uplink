@@ -166,9 +166,9 @@ pub fn awaitReadable(io: Io, endpoint: Endpoint, r: *Io.Reader, timeout: Io.Dura
     r.seek = 0;
     r.end = 0;
     const handle = switch (endpoint) {
-        .socket => |s| s.socket.handle,
+        .socket => |s| s.get().socket.handle,
         .pipe => |f| {
-            const found = reactor.net.pipe.readPipeWithin(io, f, r.buffer, timeout) catch |err| switch (err) {
+            const found = reactor.net.pipe.readPipeWithin(io, f.get(), r.buffer, timeout) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
                 // A failure is for the reader to find and name.
                 else => return .ready,
@@ -223,7 +223,7 @@ test "a read and a write under way at once each end at their own deadline" {
     defer deadlines.deinit(io);
     var unenforced: sync.Counter = .init(.fromRaw(0));
     const keeper: Keeper = .{ .deadlines = &deadlines, .unenforced = &unenforced };
-    var timed: Timed = .init(.{ .socket = client });
+    var timed: Timed = .init(.ofSocket(client));
     defer timed.deinit(io, keeper);
 
     // A read waits for bytes that never come, until its deadline; a write
