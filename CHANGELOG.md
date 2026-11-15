@@ -57,6 +57,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `ws.Conn.close` returns `Io.Cancelable!void`: a cancel that stops the close is its answer, where the close swallowed it (glint 0.8's Z026, a dropped error handled where it lands).
 - `server.Socket.handshake` returns whether the handshake finished, a failure told to the observer (`handshake_failed`) or counted (`Server.Stats.dropped`), where it returned an `error{Failed}` its caller dropped.
 - `uplink.Server.Stats` (`uplink.server.Server.Stats`) has a field more, `dropped` (under Added): a literal of it names it too.
+- `uplink.wire.h2.message.copy` takes the room for a block's strings and for its fields apart (`copy(strings, out, fields)`), the two laid out in one buffer by `uplink.wire.h2.message.Layout`: the wire module views no bytes as fields (P007), and uplink's one place that does (`place.fields`) keeps a decoded block in a pooled buffer.
 
 ### Changed
 

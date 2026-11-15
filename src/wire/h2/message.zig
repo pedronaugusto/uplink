@@ -140,30 +140,46 @@ pub fn appendLines(out: []hpack.Field, n: usize, lines: []u8) error{TooManyField
     return count;
 }
 
-/// The room `copy` needs for `fields`.
+/// The room `copy` needs for `fields`, in one buffer laid out as `Layout`
+/// says, with slack for its alignment.
 pub fn copySize(fields: []const hpack.Field) usize {
     var n: usize = fields.len * @sizeOf(Field) + @alignOf(Field);
     for (fields) |f| n += f.name.len + f.value.len;
     return n;
 }
 
-/// Copy `fields`, as decoded, into `buffer`: their strings first, then
-/// the fields.
-pub fn copy(buffer: []align(@alignOf(Field)) u8, fields: []const hpack.Field) error{NoSpaceLeft}![]Field {
-    var bytes: usize = 0;
-    for (fields) |f| bytes += f.name.len + f.value.len;
-    const fields_at = std.mem.alignForward(usize, bytes, @alignOf(Field));
-    if (fields_at + fields.len * @sizeOf(Field) > buffer.len) return error.NoSpaceLeft;
-    const room: []align(@alignOf(Field)) u8 = @alignCast(buffer[fields_at..][0 .. fields.len * @sizeOf(Field)]); // glint-ignore: P007 -- internal: `buffer` is declared aligned for a Field and `fields_at` keeps that
-    const out = std.mem.bytesAsSlice(Field, room); // glint-ignore: P007 -- internal: the check above leaves room for every field, and a Field holds only slices
+/// Where a block kept in one buffer goes: its strings from the start,
+/// `strings` bytes, then its fields from `fields_at`, aligned for a `Field`.
+pub const Layout = struct {
+    strings: usize,
+    fields_at: usize,
+
+    pub fn of(fields: []const hpack.Field) Layout {
+        var bytes: usize = 0;
+        for (fields) |f| bytes += f.name.len + f.value.len;
+        return .{ .strings = bytes, .fields_at = std.mem.alignForward(usize, bytes, @alignOf(Field)) };
+    }
+
+    /// The bytes the block takes, its fields' included.
+    pub fn len(l: Layout, count: usize) usize {
+        return l.fields_at + count * @sizeOf(Field);
+    }
+};
+
+/// Copy `fields`, as decoded: their strings into `strings`, the fields
+/// into `out`, which they point into. `Layout` says how one buffer holds
+/// both.
+pub fn copy(strings: []u8, out: []Field, fields: []const hpack.Field) error{NoSpaceLeft}![]Field {
+    if (out.len < fields.len) return error.NoSpaceLeft;
     var at: usize = 0;
     for (fields, 0..) |f, i| {
-        @memcpy(buffer[at..][0..f.name.len], f.name);
-        @memcpy(buffer[at + f.name.len ..][0..f.value.len], f.value);
-        out[i] = .{ .name = buffer[at..][0..f.name.len], .value = buffer[at + f.name.len ..][0..f.value.len] };
+        if (strings.len - at < f.name.len + f.value.len) return error.NoSpaceLeft;
+        @memcpy(strings[at..][0..f.name.len], f.name);
+        @memcpy(strings[at + f.name.len ..][0..f.value.len], f.value);
+        out[i] = .{ .name = strings[at..][0..f.name.len], .value = strings[at + f.name.len ..][0..f.value.len] };
         at += f.name.len + f.value.len;
     }
-    return out;
+    return out[0..fields.len];
 }
 
 const testing = std.testing;
@@ -222,13 +238,18 @@ test "lines become fields, lower case, a connection's own left out" {
     try testing.expectError(error.TooManyFields, appendLines(out[0..1], 0, &text));
 }
 
-test "a block is copied into a buffer of its own" {
-    var buffer: [256]u8 align(@alignOf(Field)) = undefined;
-    const kept = try copy(&buffer, &.{ .{ .name = ":status", .value = "200" }, .{ .name = "a", .value = "b" } });
+test "a block is copied into room of its own" {
+    var strings: [16]u8 = undefined;
+    var out: [2]Field = undefined;
+    const block: []const hpack.Field = &.{ .{ .name = ":status", .value = "200" }, .{ .name = "a", .value = "b" } };
+    const kept = try copy(&strings, &out, block);
     try testing.expectEqualStrings(":status", kept[0].name);
     try testing.expectEqualStrings("b", kept[1].value);
-    var small: [8]u8 align(@alignOf(Field)) = undefined;
-    try testing.expectError(error.NoSpaceLeft, copy(&small, &.{.{ .name = "abc", .value = "def" }}));
+    try testing.expectEqual(@as(usize, 12), Layout.of(block).strings);
+    try testing.expectEqual(Layout.of(block).fields_at + 2 * @sizeOf(Field), Layout.of(block).len(2));
+    var small: [4]u8 = undefined;
+    try testing.expectError(error.NoSpaceLeft, copy(&small, &out, &.{.{ .name = "abc", .value = "def" }}));
+    try testing.expectError(error.NoSpaceLeft, copy(&strings, out[0..1], block));
 }
 
 test "a field value HTTP/2 reads is one h1's writer sends, at either end and inside" {

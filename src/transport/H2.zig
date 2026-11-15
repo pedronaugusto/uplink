@@ -616,7 +616,7 @@ fn dispatch(h: *H2, io: Io, shared: *Shared, event: h2.Connection.Event) Allocat
             const st = find(shared, hd.stream) orelse return;
             const class = BufferPool.Class.fitting(h2.message.copySize(hd.fields)) orelse return h.malformed(shared, st);
             const buffer = h.ctx.buffers.acquire(io, class) catch return error.OutOfMemory;
-            const kept = h2.message.copy(buffer, hd.fields) catch aegis.assert.never("the class fits the fields");
+            const kept = place.fields(buffer, hd.fields) orelse aegis.assert.never("the class fits the fields");
             if (st.status == null) {
                 const head = h2.message.checkResponse(kept) orelse {
                     h.ctx.buffers.release(io, buffer);

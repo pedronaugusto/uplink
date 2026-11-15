@@ -10,6 +10,7 @@
 const std = @import("std");
 const aegis = @import("aegis");
 const sync = @import("../../sync.zig");
+const place = @import("../../place.zig");
 const Io = std.Io;
 const wire = @import("uplink.wire");
 const h2 = wire.h2;
@@ -228,7 +229,7 @@ fn handle(session: *Session, shared: *Session.Shared, event: h2.Connection.Event
             if (Session.find(shared, hd.stream)) |st| {
                 // Trailers: kept for the request, which ends with them.
                 st.trailer_buffer = session.context.buffers.acquire(session.socket.io, BufferPool.Class.fitting(h2.message.copySize(hd.fields)) orelse .large) catch return null;
-                const kept = h2.message.copy(st.trailer_buffer, hd.fields) catch null;
+                const kept = place.fields(st.trailer_buffer, hd.fields);
                 if (kept == null or !h2.message.checkTrailers(kept.?)) {
                     // A malformed trailer section is the stream's error (RFC 9113 §8.1.1):
                     // the reset is the answer, and one the outbox cannot take ends the connection.
@@ -282,7 +283,7 @@ fn startStream(session: *Session, shared: *Session.Shared, id: u31, fields: []co
     };
     const buffer = try pool.acquire(io, class);
     errdefer pool.release(io, buffer);
-    const kept = h2.message.copy(buffer, fields) catch aegis.assert.never("the class fits the fields");
+    const kept = place.fields(buffer, fields) orelse aegis.assert.never("the class fits the fields");
     // A malformed request is a stream error at once (RFC 9113 §8.1.1), and a
     // declared length is checked against the data as it comes.
     const head = h2.message.checkRequest(kept) orelse {

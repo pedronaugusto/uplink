@@ -8,6 +8,9 @@
 
 const std = @import("std");
 const aegis = @import("aegis");
+const wire = @import("uplink.wire");
+const message = wire.h2.message;
+const Field = wire.fields.Field;
 
 /// The `count` `T`s that start `offset` bytes into `bytes`, a slice of
 /// bytes declared aligned for a `T`.
@@ -23,6 +26,16 @@ pub fn many(comptime T: type, bytes: anytype, offset: usize, count: usize) []T {
 /// declared aligned for a `T`.
 pub fn one(comptime T: type, bytes: anytype, offset: usize) *T {
     return &many(T, bytes, offset, 1)[0];
+}
+
+/// HTTP/2's decoded `fields` kept in `buffer`, a pooled buffer declared
+/// aligned for a field: their strings first, then the fields, as
+/// `message.Layout` lays them out; null when the buffer is too small.
+pub fn fields(buffer: []align(@alignOf(Field)) u8, decoded: []const wire.hpack.Field) ?[]Field {
+    const layout: message.Layout = .of(decoded);
+    if (layout.len(decoded.len) > buffer.len) return null;
+    const out = many(Field, buffer, layout.fields_at, decoded.len);
+    return message.copy(buffer[0..layout.strings], out, decoded) catch aegis.assert.never("the layout gives each its room");
 }
 
 /// The alignment a slice of bytes is declared with.
