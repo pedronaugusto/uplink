@@ -77,7 +77,7 @@ pub fn main(init: std.process.Init) !void {
     while (lines.next()) |line| {
         if (std.mem.find(u8, line, "×") != null or std.mem.find(u8, line, "Expected") != null or std.mem.find(u8, line, "Actual") != null) failed_case = true;
         if (std.mem.find(u8, line, "tests,") != null or std.mem.find(u8, line, "×") != null or std.mem.find(u8, line, "-> ") != null or std.mem.find(u8, line, "Expected:") != null or std.mem.find(u8, line, "Actual:") != null)
-            say(io, "{s}\n", .{line});
+            try say(io, "{s}\n", .{line});
     }
     if (result.term != .exited or result.term.exited != 0) return error.CasesFailed;
 }
@@ -87,8 +87,9 @@ fn answer(io: Io, request: *uplink.server.Request, response: *uplink.server.Resp
     var buf: [4096]u8 = undefined;
     const r = request.reader(io);
     while (true) {
-        // glint-ignore: Z026 -- a body the tester breaks off is answered with what was read
-        const n = r.readSliceShort(&buf) catch break;
+        // A body the tester breaks off fails the handler with the read's cause, which the server
+        // answers as it answers any failed handler.
+        const n = r.readSliceShort(&buf) catch return request.failure();
         if (n == 0) break;
     }
     try response.header("Content-Type", "text/plain");
@@ -96,11 +97,10 @@ fn answer(io: Io, request: *uplink.server.Request, response: *uplink.server.Resp
 }
 
 /// Write to standard output: the harness's report.
-fn say(io: Io, comptime format: []const u8, args: anytype) void {
+/// A report that cannot be written fails the run: what it decided would go unread.
+fn say(io: Io, comptime format: []const u8, args: anytype) Io.Writer.Error!void {
     var buf: [4096]u8 = undefined;
     var w = std.Io.File.stdout().writerStreaming(io, &buf);
-    // glint-ignore: Z026 -- a report that cannot be written changes nothing the run decides
-    w.interface.print(format, args) catch return;
-    // glint-ignore: Z026 -- a report that cannot be written changes nothing the run decides
-    w.interface.flush() catch return;
+    try w.interface.print(format, args);
+    try w.interface.flush();
 }

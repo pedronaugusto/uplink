@@ -51,7 +51,7 @@ pub fn main(init: std.process.Init) !void {
     const result = try std.process.run(gpa, io, .{ .argv = argv.items, .stdout_limit = .limited(16 << 20), .stderr_limit = .limited(16 << 20) });
     defer gpa.free(result.stdout);
     defer gpa.free(result.stderr);
-    say(io, "{s}{s}", .{ result.stdout, result.stderr });
+    try say(io, "{s}{s}", .{ result.stdout, result.stderr });
     if (result.term != .exited or result.term.exited != 0) return error.ToolFailed;
 }
 
@@ -87,11 +87,10 @@ fn echoCookies(io: Io, request: *uplink.server.Request, response: *uplink.server
 }
 
 /// Write to standard output: the harness's report.
-fn say(io: Io, comptime format: []const u8, args: anytype) void {
+/// A report that cannot be written fails the run: what it decided would go unread.
+fn say(io: Io, comptime format: []const u8, args: anytype) Io.Writer.Error!void {
     var buf: [4096]u8 = undefined;
     var w = std.Io.File.stdout().writerStreaming(io, &buf);
-    // glint-ignore: Z026 -- a report that cannot be written changes nothing the run decides
-    w.interface.print(format, args) catch return;
-    // glint-ignore: Z026 -- a report that cannot be written changes nothing the run decides
-    w.interface.flush() catch return;
+    try w.interface.print(format, args);
+    try w.interface.flush();
 }

@@ -90,6 +90,9 @@ pub const Stats = struct {
     open: u32,
     /// Timeouts no task and no `Io` could keep.
     timeouts_unenforced: u64,
+    /// Connections closed unserved for want of memory: a buffer to read
+    /// their requests into, or an HTTP/2 session.
+    dropped: u64,
 };
 
 /// The server's counts now. The connections open are read under the lock
@@ -101,6 +104,7 @@ pub fn stats(s: *Server, io: Io) Stats {
         .requests = k.requests.load(.monotonic).raw(),
         .open = s.context.openNow(io),
         .timeouts_unenforced = k.timeouts_unenforced.load(.monotonic).raw(),
+        .dropped = k.dropped.load(.monotonic).raw(),
     };
 }
 

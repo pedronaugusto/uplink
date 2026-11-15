@@ -12,6 +12,7 @@ const Io = std.Io;
 const cloak = @import("cloak");
 const tls = @import("../tls.zig");
 const span = @import("../span.zig");
+const sync = @import("../sync.zig");
 const Timed = @import("../net/Timed.zig");
 const stream_owner = @import("../net/stream.zig");
 const reactor = @import("reactor");
@@ -97,7 +98,7 @@ const phase_edges = edges: {
 
 /// Begin the phase `start` starts.
 pub fn enter(c: *Socket, start: Start) void {
-    _ = c.phase.step(start) catch unreachable; // glint-ignore: Z026 -- the handshake starts first, and nothing follows a takeover
+    _ = c.phase.step(start) catch aegis.assert.never("the handshake starts first, and nothing follows a takeover");
 }
 
 /// Why an operation failed.
@@ -294,10 +295,10 @@ pub fn close(c: *Socket) void {
     const pool = &c.context.buffers;
     if (c.secure) {
         if (c.failed() == .none and !c.timed.fired()) {
-            // glint-ignore: Z026 -- the close_notify is a courtesy; the socket closes whether or not the peer heard it
-            c.session.finish() catch {};
-            // glint-ignore: Z026 -- as above
-            c.output.interface.flush() catch {};
+            // The close_notify is a courtesy: one that cannot be sent marks the
+            // socket broken, which closes without lingering for the peer.
+            c.session.finish() catch c.noteBroken();
+            c.output.interface.flush() catch c.noteBroken();
         }
         c.session.deinit();
         for (c.session_buffers) |b| pool.release(io, b);
@@ -322,17 +323,20 @@ fn linger(c: *Socket) void {
     // A pipe has no half close; what was written stays for the client to
     // read after the close.
     const stream = c.stream.borrow().socketStream() orelse return;
-    // glint-ignore: Z026 -- a socket that cannot half close has nothing left to linger for
-    stream.shutdown(io, .send) catch return;
+    // A socket that cannot half close has nothing left to linger for.
+    stream.shutdown(io, .send) catch return c.noteBroken();
     const until = Io.Clock.awake.now(io).addDuration(span.toIo(time));
     var buf: [4096]u8 = undefined;
     // the kernel writes what each read takes into `buf`, which the drain never reads
     var data: [1][]u8 = .{&buf};
     while (true) {
-        // glint-ignore: Z026 -- a deadline that ends the wait aborts the socket, which is closing anyway
-        const result = c.timed.perform(io, c.context.keeper(), .{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } }, until) catch return;
-        // glint-ignore: Z026 -- a read that fails ends the linger: the client is gone
-        const n = (result.net_read catch return).data_len;
+        // A deadline that ends the wait aborts the socket, which is closing anyway.
+        const result = c.timed.perform(io, c.context.keeper(), .{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } }, until) catch |err| return c.note(switch (err) {
+            error.TimedOut => .timed_out,
+            error.Canceled => .canceled,
+        });
+        // A read that fails ends the linger: the client is gone.
+        const n = (result.net_read catch return c.noteBroken()).data_len;
         if (n == 0) return;
     }
 }
@@ -344,15 +348,18 @@ pub fn peerCertificate(c: *const Socket) ?[]const u8 {
     return c.session.peerLeaf();
 }
 
-pub fn handshake(c: *Socket, options: tls.ServerOptions) error{Failed}!void {
+/// Speak TLS's handshake as the server: whether it finished. One that did
+/// not is the observer's to hear (`handshake_failed`), or the server's
+/// count of connections dropped for want of memory.
+pub fn handshake(c: *Socket, options: tls.ServerOptions) bool {
     const s = c.context;
     const io = c.io;
     const pool = &s.buffers;
-    c.output.give(pool.acquire(io, .record) catch return error.Failed);
-    const read_buffer = pool.acquire(io, .record) catch return error.Failed;
+    c.output.give(pool.acquire(io, .record) catch return dropped(s));
+    const read_buffer = pool.acquire(io, .record) catch return dropped(s);
     const write_buffer = pool.acquire(io, .record) catch {
         pool.release(io, read_buffer);
-        return error.Failed;
+        return dropped(s);
     };
     c.enter(.handshake);
     c.until = if (s.options.timeouts.handshake) |t| Io.Clock.awake.now(io).addDuration(span.toIo(t)) else null;
@@ -361,7 +368,7 @@ pub fn handshake(c: *Socket, options: tls.ServerOptions) error{Failed}!void {
         pool.release(io, read_buffer);
         pool.release(io, write_buffer);
         if (s.options.observer) |o| o.emit(.{ .handshake_failed = .{ .error_name = @errorName(err) } });
-        return error.Failed;
+        return false;
     };
     var report: cloak.tls.Session.Diagnostics = .{};
     c.session.accept(s.gpa, io, .init(&c.input.interface, c, recordedCause), .init(&c.output.interface, c, recordedCause), read_buffer, write_buffer, .{
@@ -388,10 +395,18 @@ pub fn handshake(c: *Socket, options: tls.ServerOptions) error{Failed}!void {
         pool.release(io, write_buffer);
         if (s.options.observer) |o| o.emit(.{ .handshake_failed = .{ .error_name = @errorName(err) } });
         if (c.failed() == .timed_out) c.noteTimeout(.handshake);
-        return error.Failed;
+        return false;
     };
     c.session_buffers = .{ read_buffer, write_buffer };
     c.secure = true;
+    return true;
+}
+
+/// A connection closed for want of memory, counted: false, the handshake
+/// not made.
+fn dropped(s: *Context) bool {
+    sync.bump(&s.counters.dropped);
+    return false;
 }
 
 /// Between requests a plain connection gives its write buffer back.
@@ -404,10 +419,10 @@ pub fn park(c: *Socket) void {
 /// Send `100 Continue` to a client waiting for it before its body.
 pub fn sendContinue(c: *Socket) void {
     const w = c.writer();
-    // glint-ignore: Z026 -- a client that cannot hear it sends the body after its own wait, or the read that follows fails and says why
-    w.writeAll("HTTP/1.1 100 Continue\r\n\r\n") catch return;
-    // glint-ignore: Z026 -- a client that cannot hear it sends the body after its own wait, or the read that follows fails and says why
-    c.flush() catch return;
+    // A client that cannot hear it sends the body after its own wait, or
+    // the read that follows fails and says why: the socket is broken.
+    w.writeAll("HTTP/1.1 100 Continue\r\n\r\n") catch return c.noteBroken();
+    c.flush() catch return c.noteBroken();
 }
 
 /// The reader of the top layer.
@@ -484,6 +499,12 @@ fn perform(c: *Socket, op: Io.Operation) error{Failed}!Io.Operation.Result {
 
 fn note(c: *Socket, failure: Failure) void {
     _ = c.failure.cmpxchgStrong(.none, failure, .monotonic, .monotonic);
+}
+
+/// A write that failed above the socket, in TLS or a flush of it: the
+/// connection is broken, unless an earlier failure already says why.
+pub fn noteBroken(c: *Socket) void {
+    c.note(.broken);
 }
 
 const SocketReader = struct {

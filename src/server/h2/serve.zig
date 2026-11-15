@@ -8,6 +8,7 @@
 //! goes, and the server says so by allowing one stream at once.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const sync = @import("../../sync.zig");
 const Io = std.Io;
 const wire = @import("uplink.wire");
@@ -56,8 +57,8 @@ fn run(context: *Context, handler: *Handler, socket: *Socket, upgrade: ?Upgrade)
     socket.multiplex();
     var tasks: Io.Group = .init;
     const concurrent = probeConcurrency(io);
-    // glint-ignore: Z026 -- a connection with no memory for its session closes
-    var session = Session.init(context, socket, if (concurrent) 100 else 1) catch return;
+    // A connection with no memory for its session closes, counted.
+    var session = Session.init(context, socket, if (concurrent) 100 else 1) catch return sync.bump(&context.counters.dropped);
     defer session.deinit();
     defer tasks.cancel(io);
     if (concurrent) session.startSending(&tasks);
@@ -76,8 +77,9 @@ fn run(context: *Context, handler: *Handler, socket: *Socket, upgrade: ?Upgrade)
     // The streams end, and the sending task once what is encoded (a
     // GOAWAY, say) has gone.
     session.changed.broadcast(io);
-    // glint-ignore: Z026 -- the streams' tasks end with the connection; a cancel here is the caller's, already on its way
-    tasks.await(io) catch {};
+    // The streams' tasks end with the connection. A cancel that ends the
+    // wait is the caller's: it stays asked for at its next cancelation point.
+    tasks.await(io) catch io.recancel();
 }
 
 /// Take the client's preface and send the server's, after taking an
@@ -94,8 +96,11 @@ fn start(session: *Session, upgrade: ?Upgrade) bool {
     // The settings were checked before the 101 went.
     if (upgrade) |u| shared.conn.upgradeServer(u.client_settings) catch return false;
     if (!shared.conn.checkPreface(preface)) {
-        // glint-ignore: Z026 -- the connection closes next whether or not the GOAWAY reached the peer
-        shared.conn.goaway(Session.out(shared), .protocol_error) catch {};
+        // The connection closes next; a GOAWAY the outbox cannot take for
+        // want of memory closes it at once.
+        shared.conn.goaway(Session.out(shared), .protocol_error) catch {
+            shared.closed = true;
+        };
         session.post(shared);
         return false;
     }
@@ -156,21 +161,29 @@ fn readFrames(session: *Session, handler: *Handler, tasks: *Io.Group, concurrent
             defer held.deinit(io);
             const shared = held.value();
             if (shared.conn.goaway_sent == null) {
-                // glint-ignore: Z026 -- the connection drains its streams and ends either way
-                shared.conn.goaway(Session.out(shared), .no_error) catch {};
+                // The connection drains its streams and ends; a GOAWAY the
+                // outbox cannot take for want of memory ends it at once.
+                shared.conn.goaway(Session.out(shared), .no_error) catch {
+                    shared.closed = true;
+                };
                 session.post(shared);
             }
             if (shared.streams.items.len == 0) return;
         }
-        // glint-ignore: Z026 -- a connection that ends or fails between frames ends the session; the socket keeps why
-        const head_bytes = in.peek(h2.head_len) catch return;
+        // A connection that ends or fails between frames ends the session;
+        // a read that failed marks the socket broken, unless it said why.
+        const head_bytes = in.peek(h2.head_len) catch |err| switch (err) {
+            error.EndOfStream => return,
+            error.ReadFailed => return socket.noteBroken(),
+        };
         const head = h2.Head.parse(head_bytes[0..h2.head_len]);
         socket.startH2();
         // A frame past the read buffer is past any size this end allows;
         // the protocol state answers it from its head.
         const whole = h2.head_len + @as(usize, head.len);
-        // glint-ignore: Z026 -- a connection that ends or fails within a frame ends the session; the socket keeps why
-        const payload: []const u8 = if (whole <= in.buffer.len) (in.peek(whole) catch return)[h2.head_len..] else &.{};
+        // A connection that ends or fails within a frame ends the session,
+        // the socket marked broken unless it said why.
+        const payload: []const u8 = if (whole <= in.buffer.len) (in.peek(whole) catch return socket.noteBroken())[h2.head_len..] else &.{};
         var spawn: ?*Stream = null;
         const handled = blk: {
             var held = session.shared.acquireUncancelable(io);
@@ -217,9 +230,11 @@ fn handle(session: *Session, shared: *Session.Shared, event: h2.Connection.Event
                 st.trailer_buffer = session.context.buffers.acquire(session.socket.io, BufferPool.Class.fitting(h2.message.copySize(hd.fields)) orelse .large) catch return null;
                 const kept = h2.message.copy(st.trailer_buffer, hd.fields) catch null;
                 if (kept == null or !h2.message.checkTrailers(kept.?)) {
-                    // A malformed trailer section is the stream's error (RFC 9113 §8.1.1).
-                    // glint-ignore: Z026 -- the reset is the answer; a failed write ends the connection at its next read
-                    shared.conn.reset(Session.out(shared), st.id, .protocol_error) catch {};
+                    // A malformed trailer section is the stream's error (RFC 9113 §8.1.1):
+                    // the reset is the answer, and one the outbox cannot take ends the connection.
+                    shared.conn.reset(Session.out(shared), st.id, .protocol_error) catch {
+                        shared.closed = true;
+                    };
                     st.reset_code = .protocol_error;
                     return null;
                 }
@@ -258,19 +273,24 @@ fn startStream(session: *Session, shared: *Session.Shared, id: u31, fields: []co
     const pool = &session.context.buffers;
     const io = session.socket.io;
     const class = BufferPool.Class.fitting(h2.message.copySize(fields) + 1024) orelse {
-        // glint-ignore: Z026 -- a head too large to keep is refused; the connection goes on
-        shared.conn.reset(Session.out(shared), id, .refused_stream) catch {};
+        // A head too large to keep is refused, and the connection goes on;
+        // a refusal the outbox cannot take ends it.
+        shared.conn.reset(Session.out(shared), id, .refused_stream) catch {
+            shared.closed = true;
+        };
         return null;
     };
     const buffer = try pool.acquire(io, class);
     errdefer pool.release(io, buffer);
-    const kept = h2.message.copy(buffer, fields) catch unreachable; // glint-ignore: Z026 -- the class fits the fields
+    const kept = h2.message.copy(buffer, fields) catch aegis.assert.never("the class fits the fields");
     // A malformed request is a stream error at once (RFC 9113 §8.1.1), and a
     // declared length is checked against the data as it comes.
     const head = h2.message.checkRequest(kept) orelse {
         pool.release(io, buffer);
-        // glint-ignore: Z026 -- the reset is the answer; a failed write ends the connection at its next read
-        shared.conn.reset(Session.out(shared), id, .protocol_error) catch {};
+        // The reset is the answer; one the outbox cannot take ends the connection.
+        shared.conn.reset(Session.out(shared), id, .protocol_error) catch {
+            shared.closed = true;
+        };
         return null;
     };
     if (shared.conn.stream(id)) |s| s.content_length = head.content_length;

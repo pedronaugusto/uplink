@@ -186,21 +186,21 @@ fn serveFile(f: *const Files, io: Io, request: *Request, response: *Response, re
 fn multipart(io: Io, response: *Response, file: Io.File, list: []const range.Span, size: u64, content_type: []const u8) anyerror!void {
     var boundary_bytes: [12]u8 = undefined;
     io.random(&boundary_bytes);
-    var boundary_buf: [24]u8 = undefined;
-    const boundary = std.mem.print(&boundary_buf, "{x}", .{&boundary_bytes}) catch unreachable; // glint-ignore: Z026 -- 12 bytes are 24 hex digits
+    const boundary_hex = std.fmt.bytesToHex(boundary_bytes, .lower);
+    const boundary: []const u8 = &boundary_hex;
     var type_buf: [128]u8 = undefined;
     try response.header("Content-Type", try std.mem.print(&type_buf, "multipart/byteranges; boundary={s}", .{boundary}));
     var total: u64 = 0;
     for (list) |span| {
         var buf: [256]u8 = undefined;
-        total += partHead(&buf, boundary, content_type, span, size).len + span.len() + 2;
+        total += (try partHead(&buf, boundary, content_type, span, size)).len + span.len() + 2;
     }
     total += 2 + boundary.len + 4;
     try response.setLength(total);
     const w = try response.writer(io);
     for (list) |span| {
         var buf: [256]u8 = undefined;
-        try w.writeAll(partHead(&buf, boundary, content_type, span, size));
+        try w.writeAll(try partHead(&buf, boundary, content_type, span, size));
         try copyTo(io, w, file, span.first, span.len());
         try w.writeAll("\r\n");
     }
@@ -209,8 +209,8 @@ fn multipart(io: Io, response: *Response, file: Io.File, list: []const range.Spa
 }
 
 /// A part's head, in `buf`.
-fn partHead(buf: *[256]u8, boundary: []const u8, content_type: []const u8, span: range.Span, size: u64) []const u8 {
-    return std.mem.print(buf, "--{s}\r\nContent-Type: {s}\r\nContent-Range: bytes {d}-{d}/{d}\r\n\r\n", .{ boundary, content_type, span.first, span.last, size }) catch unreachable; // glint-ignore: Z026 -- a part's head is under 256 bytes: a 24-byte boundary, a type of our table and three numbers
+fn partHead(buf: *[256]u8, boundary: []const u8, content_type: []const u8, span: range.Span, size: u64) std.mem.PrintError![]const u8 {
+    return std.mem.print(buf, "--{s}\r\nContent-Type: {s}\r\nContent-Range: bytes {d}-{d}/{d}\r\n\r\n", .{ boundary, content_type, span.first, span.last, size });
 }
 
 fn copy(io: Io, response: *Response, file: Io.File, offset: u64, len: u64) anyerror!void {

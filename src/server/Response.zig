@@ -118,7 +118,7 @@ const Stages = aegis.state.Machine(State, Event, .{ .initial = .open, .terminal 
 
 /// Take `event`'s edge; every caller is at a state it leaves from.
 fn advance(r: *Response, event: Event) void {
-    _ = r.state.step(event) catch unreachable; // glint-ignore: Z026 -- each caller is open or streaming, as its event needs
+    _ = r.state.step(event) catch aegis.assert.never("each caller is open or streaming, as its event needs");
 }
 
 pub const Framing = enum {
@@ -183,7 +183,7 @@ fn appendField(r: *Response, buffer: *BufferPool.Buffer, len: *usize, name: []co
     const need = name.len + 2 + value.len + 2;
     try r.reserve(buffer, len.*, need);
     var w: Io.Writer = .fixed(buffer.*[len.*..]);
-    h1.writeField(&w, .{ .name = name, .value = value }) catch unreachable; // glint-ignore: Z026 -- room was reserved for the line
+    h1.writeField(&w, .{ .name = name, .value = value }) catch aegis.assert.never("room was reserved for the line");
     len.* += need;
 }
 
@@ -337,19 +337,22 @@ fn finishShort(r: *Response) Error {
         st.reset(r.socket.io, .internal_error);
         return error.BodyIncomplete;
     }
-    // glint-ignore: Z026 -- the connection closes next; what went out goes out cut
-    r.socket.flush() catch {};
+    // The connection closes next; what went out goes out cut, and a flush
+    // that fails marks it broken.
+    r.socket.flush() catch r.socket.noteBroken();
     return error.BodyIncomplete;
 }
 
-/// `body` compressed with `c` into `out_buffer`.
-fn compressWhole(r: *Response, io: Io, c: Encoder.Coding, body: []const u8, out_buffer: []u8) ![]const u8 {
+/// `body` compressed with `c` into `out_buffer`; null when it does not
+/// compress into the buffer, or no encoder can be had for want of memory:
+/// compressing is optional, and the body then goes as it is.
+fn compressWhole(r: *Response, io: Io, c: Encoder.Coding, body: []const u8, out_buffer: []u8) ?[]const u8 {
     var sink: Io.Writer = .fixed(out_buffer);
     const encoders = &r.socket.context.encoders.?;
-    const e = try encoders.acquire(io, c, &sink);
+    const e = encoders.acquire(io, c, &sink) catch return null;
     defer encoders.release(io, e);
-    try e.writer().writeAll(body);
-    try e.finish();
+    e.writer().writeAll(body) catch return null;
+    e.finish() catch return null;
     return sink.buffered();
 }
 
@@ -359,11 +362,11 @@ fn sendWhole(r: *Response, body: []const u8) Error!void {
     if (r.coding(body.len)) |c| compressed: {
         const pool = &r.socket.context.buffers;
         const io = r.socket.io;
-        // glint-ignore: Z026 -- compressing is optional: with no large buffer free, the body goes as it is
-        const out_buffer = pool.acquire(io, .large) catch break :compressed;
+        // Compressing is optional: with no large buffer to be had for want
+        // of memory, the body goes as it is.
+        const out_buffer = pool.acquire(io, .large) catch null orelse break :compressed;
         defer pool.release(io, out_buffer);
-        // glint-ignore: Z026 -- a body that does not compress into the buffer, or finds no encoder free, goes as it is
-        const coded = r.compressWhole(io, c, body, out_buffer) catch break :compressed;
+        const coded = r.compressWhole(io, c, body, out_buffer) orelse break :compressed;
         if (coded.len >= body.len) break :compressed;
         r.declared = coded.len;
         try r.sendHead(.length, c);

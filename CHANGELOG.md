@@ -20,6 +20,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `server.Request.length`: the body's declared length, which the server holds the body to: `Content-Length` over HTTP/1.1, `content-length` over HTTP/2, 0 for none, null for a chunked body.
 - `Cache.Disk`: a cache's store in a directory, bounded by bytes and evicting the least recently used variant, each variant one file written through airlock (temp, sync, rename, directory sync; `Options.level` says how durable), its index rebuilt from the directory at `open`, a crash's temps removed. A file that is not a variant of the key asked for is never served: the lookup fails by name (`cache_failed`) and the file goes. uplink depends on airlock (lazy, with the client). Every exchange of the cache's tests runs over both stores.
 - `server.Request.peer_certificate`: the client's leaf certificate (DER) when `tls.ServerOptions.client_certificate` asked for one and the client proved it, in the handshake or answering a post-handshake request; null otherwise and on a resumed session. What a resource server checks an RFC 8705 certificate-bound token against (clearance's `bearer.Verifier`). The certificate is kept only on connections that ask for one.
+- `Server.Stats.dropped`: the connections closed unserved for want of memory (a buffer to read their requests into, a TLS handshake's buffers, an HTTP/2 session), which closed uncounted.
 
 ### Breaking
 
@@ -54,6 +55,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - What uplink is lent and never closes is an `aegis.own.Unowned`, read with `.get()`: `server.Files.root` (the directory served, which its caller keeps open) and `Cache.Body.file`'s file (which the store keeps open for the holder).
 - The standard methods are named in Zig's case for a value (glint's Z006): `uplink.wire.Method.get`, `uplink.wire.Method.head`, `uplink.wire.Method.post`, `uplink.wire.Method.put`, `uplink.wire.Method.delete`, `uplink.wire.Method.connect`, `uplink.wire.Method.options`, `uplink.wire.Method.trace` and `uplink.wire.Method.patch` (`Method.get`, `.method = .post`), where they were `uplink.wire.Method.GET`, `uplink.wire.Method.HEAD`, `uplink.wire.Method.POST`, `uplink.wire.Method.PUT`, `uplink.wire.Method.DELETE`, `uplink.wire.Method.CONNECT`, `uplink.wire.Method.OPTIONS`, `uplink.wire.Method.TRACE` and `uplink.wire.Method.PATCH` (`uplink.Method.GET`, `uplink.Method.HEAD`, `uplink.Method.POST`, `uplink.Method.PUT`, `uplink.Method.DELETE`, `uplink.Method.CONNECT`, `uplink.Method.OPTIONS`, `uplink.Method.TRACE` and `uplink.Method.PATCH`, the same declarations). Each still goes on the wire as RFC 9110 spells it.
 - `ws.Conn.close` returns `Io.Cancelable!void`: a cancel that stops the close is its answer, where the close swallowed it (glint 0.8's Z026, a dropped error handled where it lands).
+- `server.Socket.handshake` returns whether the handshake finished, a failure told to the observer (`handshake_failed`) or counted (`Server.Stats.dropped`), where it returned an `error{Failed}` its caller dropped.
+- `uplink.Server.Stats` (`uplink.server.Server.Stats`) has a field more, `dropped` (under Added): a literal of it names it too.
 
 ### Changed
 
@@ -100,6 +103,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A client's HTTP/2 reset or GOAWAY that the outbox cannot take fails the connection, where it was dropped and the connection went on; an upgraded stream's close sends its END_STREAM without waiting for room (`transport.H2.endAndFinish`).
 - A client's dial whose delay between attempts finds no task tries the rest in turn, as when an attempt finds none.
 - A TLS key log that cannot take a line says so (a warning, `uplink` scope), where the capture was cut silently.
+- A cancel the server swallowed reaches its caller: `stop` re-arms one that ends its wait for the connections, and an HTTP/2 connection's end one that ends its wait for its streams' tasks.
+- An HTTP/2 server's sending task that can wait no more (aegis's waiter limit) ends its connection, where it ended alone and left the connection's frames unsent; a reset or a GOAWAY the outbox cannot take ends the connection, where it was dropped.
+- A server whose TLS close_notify, refusal, `500` or `100 Continue` cannot be written marks its socket broken, so it closes without lingering for the client.
+- A `405`'s `Allow` lists whole methods only, where a list past its 256 bytes could end in a method cut short.
+- The benchmarks' server and the conformance harnesses report what ends a connection or a case: a report that cannot be written fails the run, and `build.zig` takes a lazy dependency not fetched yet as absent for the pass (`fetched`), where it dropped the error.
 
 ## [0.10.2] - 2026-10-31
 

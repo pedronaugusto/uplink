@@ -204,6 +204,8 @@ pub const Counters = struct {
     requests: sync.Counter = .init(.fromRaw(0)),
     /// Timeouts no task and no `Io` could keep.
     timeouts_unenforced: sync.Counter = .init(.fromRaw(0)),
+    /// Connections closed unserved for want of memory.
+    dropped: sync.Counter = .init(.fromRaw(0)),
 };
 
 /// The connections being served: each is on the list while it lives, and
@@ -249,7 +251,7 @@ pub fn init(gpa: Allocator, options: Options) Context {
         .deadlines = .init(span.toIo(options.timeouts.shortest())),
         .windows = .init(options.max_zstd_window, options.max_brotli_window),
         .encoders = if (options.compression) |c| .init(gpa, c.settings, options.max_free_buffers) else null,
-        .tickets = if (own) |r| cloak.tls.TicketKeys.init(gpa, .{ .lifetime = span.toIo(r.lifetime), .rotation = span.toIo(r.rotation) }) catch unreachable else null, // glint-ignore: Z026 -- both spans were checked above
+        .tickets = if (own) |r| cloak.tls.TicketKeys.init(gpa, .{ .lifetime = span.toIo(r.lifetime), .rotation = span.toIo(r.rotation) }) catch aegis.assert.never("both spans were checked above") else null,
         .key_log = if (options.tls) |t| if (t.key_log) |w| .init(w) else null else null,
         .live = .init(.{}),
     };
@@ -388,8 +390,13 @@ pub fn stop(c: *Context, io: Io) void {
 fn drain(c: *Context, io: Io, grace: Io.Timeout) void {
     var held = c.live.acquireUncancelable(io);
     defer held.deinit(io);
-    // glint-ignore: Z026 -- the grace ending, or a cancel of the caller, ends the wait: what is left ends now
-    while (held.value().count != 0) held.wait(&c.changed, io, grace) catch return;
+    while (held.value().count != 0) held.wait(&c.changed, io, grace) catch |err| switch (err) {
+        // The grace ended: what is left ends now.
+        error.Timeout, error.WaiterLimit => return,
+        // So does a cancel of the caller, which stays asked for at its next
+        // cancelation point.
+        error.Canceled => return io.recancel(),
+    };
 }
 
 /// End the sockets of the idle connections, or of all of them.

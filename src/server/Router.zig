@@ -366,15 +366,17 @@ pub fn dispatch(table: anytype, io: Io, request: *Request, response: *Response) 
             return redirect(io, request, response, buffer[0 .. path.len + 1]);
     }
     if (allowed.len != 0) {
+        // The Allow list holds the methods that fit its 256 bytes, each whole.
         var list_buf: [256]u8 = undefined;
-        var w: Io.Writer = .fixed(&list_buf);
-        for (allowed.sorted(), 0..) |m, i| {
-            // glint-ignore: Z026 -- the Allow list holds the methods that fit its 256 bytes
-            if (i != 0) w.writeAll(", ") catch break;
-            // glint-ignore: Z026 -- the Allow list holds the methods that fit its 256 bytes
-            w.writeAll(m) catch break;
+        var len: usize = 0;
+        for (allowed.sorted()) |m| {
+            const separator: []const u8 = if (len == 0) "" else ", ";
+            if (list_buf.len - len < separator.len + m.len) break;
+            @memcpy(list_buf[len..][0..separator.len], separator);
+            @memcpy(list_buf[len + separator.len ..][0..m.len], m);
+            len += separator.len + m.len;
         }
-        try response.header("Allow", w.buffered());
+        try response.header("Allow", list_buf[0..len]);
         return plain(io, response, .method_not_allowed, "method not allowed\n");
     }
     return table.notFound(io, request, response);

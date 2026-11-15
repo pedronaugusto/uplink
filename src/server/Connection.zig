@@ -35,10 +35,10 @@ pub fn serve(context: *Context, handler: *Handler, io: Io, endpoint: Endpoint) v
     defer context.leave(io, &c.socket.entry);
     defer c.socket.close();
     const in_class: BufferPool.Class = if (context.options.tls != null) .record else .small;
-    // glint-ignore: Z026 -- a connection no buffer is left for closes; the pool counts the refusal
-    c.socket.input.give(context.buffers.acquire(io, in_class) catch return);
-    // glint-ignore: Z026 -- a failed handshake ends its connection; the socket keeps why
-    if (context.options.tls) |options| c.socket.handshake(options) catch return;
+    // A connection no buffer is left for closes, counted.
+    c.socket.input.give(context.buffers.acquire(io, in_class) catch return sync.bump(&context.counters.dropped));
+    // A failed handshake ends its connection; the observer and the socket were told why.
+    if (context.options.tls) |options| if (!c.socket.handshake(options)) return;
     if (std.mem.eql(u8, c.socket.alpn(), "h2")) return h2_serve.serve(context, handler, &c.socket);
     if (!c.socket.secure) switch (context.options.h2c) {
         .off => {},
@@ -216,15 +216,16 @@ fn serveOne(c: *Connection) bool {
         if (response.headSent()) {
             // What went out stays out, cut where the handler stopped: the
             // client sees a truncation, never a short success.
-            // glint-ignore: Z026 -- the connection closes next whether or not the partial body reached the client
-            c.socket.flush() catch {};
+            // The connection closes next; a flush that fails marks it broken.
+            c.socket.flush() catch c.socket.noteBroken();
             return false;
         }
         response.reset(io);
         response.status = request.bodyFault() orelse .internal_server_error;
         response.closeAfter();
-        // glint-ignore: Z026 -- the connection closes either way; a 500 that cannot be written changes nothing
-        response.send(io, "") catch {};
+        // The connection closes either way; a 500 that cannot be written
+        // marks it broken.
+        response.send(io, "") catch c.socket.noteBroken();
         return false;
     };
     if (c.socket.hijacked) return false;
@@ -375,7 +376,7 @@ fn refuse(c: *Connection, status: std.http.Status, reason: []const u8) bool {
     const w = c.socket.writer();
     h1.writeStatusLine(w, status) catch return false;
     w.writeAll("Content-Length: 0\r\nConnection: close\r\n\r\n") catch return false;
-    // glint-ignore: Z026 -- the connection closes next whether or not the refusal reached the client
-    c.socket.flush() catch {};
+    // The connection closes next; a flush that fails marks it broken.
+    c.socket.flush() catch c.socket.noteBroken();
     return false;
 }

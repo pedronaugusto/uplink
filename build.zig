@@ -36,6 +36,14 @@ pub fn build(b: *std.Build) void {
     _ = uplinkModules(b, target, optimize, aegis, with_client, .{ .reactor = reactor, .cloak = cloak, .warp = warp, .xenoglyph = xenoglyph, .airlock = airlock });
 }
 
+/// The lazy dependency `name` of `p`, or null where it is not fetched yet: std has marked it
+/// needed, and the build fetches it and configures again, so this pass makes nothing of it.
+fn fetched(p: *std.Build, name: []const u8, args: anytype) ?*std.Build.Dependency {
+    return p.dependencyLazy(name, args) catch |err| switch (err) {
+        error.LazyDependencyNeeded => null,
+    };
+}
+
 /// uplink's development: its tests, example, checks and benchmarks, under
 /// preflight's gate. Run through bay.
 pub fn dev(b: *std.Build, tools: type) void {
@@ -49,17 +57,13 @@ pub fn dev(b: *std.Build, tools: type) void {
     const p = package.builder;
     const aegis_package = p.dependency("aegis", .{ .target = target, .optimize = optimize });
     const aegis = aegis_package.module("aegis");
-    // reactor, cloak and warp are lazy: their error ends this configure pass until they are fetched.
-    // glint-ignore: Z026 -- a lazy dependency not fetched yet ends this configure pass; the build fetches it and configures again
-    const reactor_package = p.dependencyLazy("reactor", .{ .target = target, .optimize = optimize }) catch return;
-    // glint-ignore: Z026 -- a lazy dependency not fetched yet ends this configure pass; the build fetches it and configures again
-    const cloak_package = p.dependencyLazy("cloak", .{ .target = target, .optimize = optimize }) catch return;
-    // glint-ignore: Z026 -- a lazy dependency not fetched yet ends this configure pass; the build fetches it and configures again
-    const warp_package = p.dependencyLazy("warp", .{ .target = target, .optimize = optimize }) catch return;
-    // glint-ignore: Z026 -- a lazy dependency not fetched yet ends this configure pass; the build fetches it and configures again
-    const xenoglyph_package = p.dependencyLazy("xenoglyph", .{ .target = target, .optimize = optimize }) catch return;
-    // glint-ignore: Z026 -- a lazy dependency not fetched yet ends this configure pass; the build fetches it and configures again
-    const airlock_package = p.dependencyLazy("airlock", .{ .target = target, .optimize = optimize }) catch return;
+    // reactor, cloak, warp, xenoglyph and airlock are lazy: one not fetched yet ends this configure
+    // pass (`fetched`).
+    const reactor_package = fetched(p, "reactor", .{ .target = target, .optimize = optimize }) orelse return;
+    const cloak_package = fetched(p, "cloak", .{ .target = target, .optimize = optimize }) orelse return;
+    const warp_package = fetched(p, "warp", .{ .target = target, .optimize = optimize }) orelse return;
+    const xenoglyph_package = fetched(p, "xenoglyph", .{ .target = target, .optimize = optimize }) orelse return;
+    const airlock_package = fetched(p, "airlock", .{ .target = target, .optimize = optimize }) orelse return;
     const reactor = reactor_package.module("reactor");
     const cloak = cloak_package.module("cloak");
     const warp = warp_package.module("warp");

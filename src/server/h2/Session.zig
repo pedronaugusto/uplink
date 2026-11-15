@@ -168,8 +168,9 @@ pub fn post(s: *Session, shared: *Shared) void {
 }
 
 /// Write the outbox to the socket until the connection ends, as its one
-/// sender: the sending task's work.
-pub fn sendFrames(s: *Session) void {
+/// sender: the sending task's work. A cancel ends the task with its
+/// connection.
+pub fn sendFrames(s: *Session) Io.Cancelable!void {
     const io = s.socket.io;
     var held = s.shared.acquireUncancelable(io);
     defer held.deinit(io);
@@ -181,8 +182,17 @@ pub fn sendFrames(s: *Session) void {
             continue;
         }
         if (held.value().closed) return;
-        // glint-ignore: Z026 -- a cancel ends the sending task with its connection
-        held.wait(&s.changed, io, .none) catch return;
+        held.wait(&s.changed, io, .none) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            // A sender that cannot wait sends nothing more: the connection
+            // ends, and those waiting on it are told.
+            error.WaiterLimit => {
+                held.value().closed = true;
+                s.changed.broadcast(io);
+                return;
+            },
+            error.Timeout => unreachable, // unreachable: the wait has no deadline
+        };
     }
 }
 
@@ -190,9 +200,9 @@ pub fn sendFrames(s: *Session) void {
 /// any stream's task. With no task to spare, whoever adds frames writes
 /// them.
 pub fn startSending(s: *Session, group: *Io.Group) void {
-    // glint-ignore: Z026 -- with no task to spare, whoever adds frames writes them
-    group.concurrent(s.socket.io, sendFrames, .{s}) catch return;
-    s.sender = true;
+    s.sender = if (group.concurrent(s.socket.io, sendFrames, .{s})) true else |err| switch (err) {
+        error.ConcurrencyUnavailable => false,
+    };
 }
 
 /// Wait, under the lock, until the outbox has room for a stream's frames,
