@@ -94,6 +94,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `wire.sigv4`'s `sign` and `presign` refuse a time past 9999-12-31T23:59:59 (`InvalidRequest`): its date has no room for a fifth digit of the year, and the write was `unreachable` there, undefined behavior in a fast build, with the date left unwritten.
 - `Retries.backoff` with a `cap` at the longest `Duration` overflowed past it, a panic or in a fast build undefined behavior; a base doubled past any `Duration` saturated, where it now counts as the cap.
 - `Outgoing.finish` after a body write that failed said `BodyIncomplete`, the bytes it had not taken, where the write had failed for a reason of its own: a cancel was lost, a dead connection called a short body. It now returns why the write failed (`Canceled`, `TimedOut`, `ConnectionFailed`, ...), over HTTP/1.1 and over HTTP/2. In every release since `Client.begin` came.
+- The contracts uplink stated with a `catch unreachable` (a value formatted into a buffer it fits, a state machine's edge, a checked conversion) are checked in every build (`aegis.assert.never`), where a broken one was undefined behaviour in a ReleaseFast build; a value formatted into a buffer that a caller's input sizes is its error, and a percent escape or a number that does not parse is read as the text it is.
 
 ## [0.10.2] - 2026-10-31
 

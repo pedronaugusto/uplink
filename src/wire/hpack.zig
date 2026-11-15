@@ -441,7 +441,7 @@ const testing = std.testing;
 
 fn fromHex(comptime hex: []const u8) [hex.len / 2]u8 {
     var out: [hex.len / 2]u8 = undefined;
-    _ = std.fmt.hexToBytes(&out, hex) catch unreachable; // glint-ignore: Z026 -- the tests' hex is well formed
+    _ = std.fmt.hexToBytes(&out, hex) catch aegis.assert.never("the tests' hex is well formed");
     return out;
 }
 

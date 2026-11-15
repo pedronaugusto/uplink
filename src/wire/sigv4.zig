@@ -18,6 +18,7 @@
 //! inner runs of spaces made one. The time is the caller's.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Writer = std.Io.Writer;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
@@ -154,8 +155,9 @@ pub const Signer = struct {
         var cw: Writer = .fixed(&credential_buffer);
         cw.print("{s}/", .{s.key.access_key}) catch return error.RequestTooLarge;
         s.writeScope(&cw, &date) catch return error.RequestTooLarge;
+        // A u32 is ten digits.
         var expires_buffer: [16]u8 = undefined;
-        const expires_text = std.mem.print(&expires_buffer, "{d}", .{expires}) catch unreachable; // glint-ignore: Z026 -- a u32 is ten digits
+        const expires_text = expires_buffer[0..std.fmt.printInt(&expires_buffer, expires, 10, .lower, .{})];
 
         var canonical: Canonical = .{};
         try canonical.addFields(request, &.{});
@@ -326,11 +328,11 @@ const Canonical = struct {
             while (i < text.len) : (i += 1) {
                 var byte = text[i];
                 if (byte == '%' and i + 2 < text.len) {
-                    // glint-ignore: Z026 -- a percent sign followed by no hex is kept as it is
-                    if (std.fmt.parseInt(u8, text[i + 1 .. i + 3], 16)) |b| {
+                    // A percent sign followed by no hex is kept as it is.
+                    if (std.fmt.parseInt(u8, text[i + 1 .. i + 3], 16) catch null) |b| {
                         byte = b;
                         i += 2;
-                    } else |_| {}
+                    }
                 }
                 encodeByte(&w, byte, .query) catch return error.RequestTooLarge;
             }
@@ -357,9 +359,8 @@ const Canonical = struct {
     fn hash(c: *const Canonical, method: []const u8, target: []const u8, path: PathEncoding, payload: []const u8) [32]u8 {
         var buffer: [256]u8 = undefined;
         var hashing: Writer.Hashing(Sha256) = .init(&buffer);
-        // glint-ignore: Z026 -- a hashing writer does not fail
-        c.writeCanonical(&hashing.writer, method, target, path, payload) catch unreachable;
-        hashing.writer.flush() catch unreachable; // glint-ignore: Z026 -- as above
+        c.writeCanonical(&hashing.writer, method, target, path, payload) catch aegis.assert.never("a hashing writer does not fail");
+        hashing.writer.flush() catch aegis.assert.never("a hashing writer does not fail");
         var out: [32]u8 = undefined;
         hashing.hasher.final(&out);
         return out;
@@ -374,18 +375,18 @@ const Canonical = struct {
         while (i < raw_path.len) : (i += 1) {
             var byte = raw_path[i];
             if (byte == '%' and i + 2 < raw_path.len) {
-                // glint-ignore: Z026 -- a percent sign followed by no hex is kept as it is
-                if (std.fmt.parseInt(u8, raw_path[i + 1 .. i + 3], 16)) |b| {
+                // A percent sign followed by no hex is kept as it is.
+                if (std.fmt.parseInt(u8, raw_path[i + 1 .. i + 3], 16) catch null) |b| {
                     byte = b;
                     i += 2;
-                } else |_| {}
+                }
             }
             switch (path) {
                 .once => try encodeByte(w, byte, .path),
                 .twice => {
                     var once: [3]u8 = undefined;
                     var ow: Writer = .fixed(&once);
-                    encodeByte(&ow, byte, .path) catch unreachable; // glint-ignore: Z026 -- one byte encodes to three at most
+                    encodeByte(&ow, byte, .path) catch aegis.assert.never("one byte encodes to three at most");
                     try encode(w, ow.buffered(), .path);
                 },
             }
@@ -465,8 +466,7 @@ pub fn formatDate(time: i64, out: *[16]u8) ?[]const u8 {
     const month_day = day.calculateMonthDay();
     const clock = epoch.getDaySeconds();
     const parts = .{ day.year, month_day.month.numeric(), month_day.day_index + 1, clock.getHoursIntoDay(), clock.getMinutesIntoHour(), clock.getSecondsIntoMinute() };
-    // glint-ignore: Z026 -- sixteen bytes hold the date while the year has four digits, as it has up to `max_time`
-    return std.mem.print(out, "{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}Z", parts) catch unreachable;
+    return std.mem.print(out, "{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}Z", parts) catch aegis.assert.never("sixteen bytes hold the date while the year has four digits, as it has up to `max_time`");
 }
 
 // AWS's own examples (the S3 API reference, "Signature Calculations for

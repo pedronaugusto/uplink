@@ -168,11 +168,10 @@ pub fn pick(challenges: []const Challenge, method: Method, offered: *Writer) Pic
     if (method != .digest) {
         for (challenges) |c| if (c.scheme == .basic) return .basic;
     }
+    // `offered` holds as many names as fit: a writer full ends the list.
     for (challenges, 0..) |c, n| {
-        // glint-ignore: Z026 -- `offered` holds as many names as fit
-        if (n != 0) offered.writeAll(", ") catch break;
-        // glint-ignore: Z026 -- `offered` holds as many names as fit
-        offered.writeAll(c.name) catch break;
+        if (n != 0) offered.writeAll(", ") catch return .unsupported;
+        offered.writeAll(c.name) catch return .unsupported;
     }
     return .unsupported;
 }
@@ -309,9 +308,9 @@ pub const Digest = struct {
     /// allocated.
     pub fn writeAnswer(d: *Digest, w: *Writer, user: []const u8, password: []const u8, method: []const u8, uri: []const u8) Writer.Error!void {
         d.nc += 1;
+        // A u32 is at most eight hex digits.
         var nc_buf: [8]u8 = undefined;
-        // glint-ignore: Z026 -- a u32 is at most eight hex digits
-        const nc = std.mem.print(&nc_buf, "{x:0>8}", .{d.nc}) catch unreachable;
+        const nc = nc_buf[0..std.fmt.printInt(&nc_buf, d.nc, 16, .lower, .{ .width = 8, .fill = '0', .alignment = .right })];
 
         // HA1 stands for the password to a server that knows it: wiped.
         var ha1_buf: aegis.Secret([max_hex]u8) = .init(undefined);

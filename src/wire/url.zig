@@ -191,12 +191,12 @@ pub fn percentDecode(out: []u8, text: []const u8) []u8 {
     var i: usize = 0;
     while (i < text.len) : (n += 1) {
         if (text[i] == '%' and text.len - i >= 3) {
-            // glint-ignore: Z026 -- a `%` without two hex digits is kept as it is
-            if (std.fmt.parseInt(u8, text[i + 1 ..][0..2], 16)) |byte| {
+            // A `%` without two hex digits is kept as it is.
+            if (std.fmt.parseInt(u8, text[i + 1 ..][0..2], 16) catch null) |byte| {
                 out[n] = byte;
                 i += 3;
                 continue;
-            } else |_| {}
+            }
         }
         out[n] = text[i];
         i += 1;
