@@ -144,9 +144,11 @@ pub const Timeouts = struct {
     /// The bytes a low-speed window must move.
     pub fn lowSpeedNeed(l: LowSpeed) aegis.units.Bytes(u64) {
         const window = aegis.int.Checked(u128).init(l.window.raw());
-        const moved = window.mul(l.bytes_per_second) catch unreachable; // glint-ignore: Z026 -- a u64 times a u32 fits a u128
-        // glint-ignore: A011 -- design: bytes a rate moves in a window, nanoseconds times bytes per second over nanoseconds per second, exact in u128; the window's own conversion to seconds would round it
-        const need = moved.div(std.time.ns_per_s) catch unreachable; // glint-ignore: Z026 -- the divisor is a nonzero constant
+        // Nanoseconds times bytes per second, over a second in nanoseconds:
+        // exact in u128, where the window's own conversion to seconds would
+        // round it.
+        const moved = window.mul(l.bytes_per_second) catch aegis.assert.never("a u64 times a u32 fits a u128");
+        const need = moved.div(Duration.literal("1s").raw()) catch aegis.assert.never("a second is a nonzero divisor");
         return .fromRaw(aegis.int.cast(u64, need.raw()) catch std.math.maxInt(u64));
     }
 

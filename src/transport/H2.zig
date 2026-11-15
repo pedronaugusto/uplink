@@ -87,7 +87,7 @@ const settings: h2.Settings = .{
 pub fn upgradeSettings(out: *[upgrade_settings_len]u8) []const u8 {
     var buf: [64]u8 = undefined;
     var w: Io.Writer = .fixed(&buf);
-    settings.write(&w) catch unreachable; // glint-ignore: Z026 -- the settings are under 64 bytes
+    settings.write(&w) catch aegis.assert.never("the settings are under 64 bytes");
     return std.base64.url_safe_no_pad.Encoder.encode(out, w.buffered());
 }
 
@@ -231,9 +231,13 @@ pub fn close(h: *H2, io: Io) void {
     const shared = h.shared.teardown();
     if (shared.failure == null) {
         h.conn.io = io;
-        // glint-ignore: Z026 -- the GOAWAY is a courtesy; the socket closes whether or not it went
-        shared.proto.goaway(shared.outbox.writer(), .no_error) catch {};
-        _ = shared.outbox.sendAlone(ConnSink{ .conn = h.conn });
+        // The GOAWAY is a courtesy, and the socket closes whether or not it
+        // went: one the outbox cannot take fails the connection, and is not
+        // sent.
+        shared.proto.goaway(shared.outbox.writer(), .no_error) catch {
+            shared.failure = .{ .io = h.conn.writeError() };
+        };
+        if (shared.failure == null) _ = shared.outbox.sendAlone(ConnSink{ .conn = h.conn });
     }
     shared.streams.deinit(h.ctx.gpa);
     shared.outbox.deinit();
@@ -612,7 +616,7 @@ fn dispatch(h: *H2, io: Io, shared: *Shared, event: h2.Connection.Event) Allocat
             const st = find(shared, hd.stream) orelse return;
             const class = BufferPool.Class.fitting(h2.message.copySize(hd.fields)) orelse return h.malformed(shared, st);
             const buffer = h.ctx.buffers.acquire(io, class) catch return error.OutOfMemory;
-            const kept = h2.message.copy(buffer, hd.fields) catch unreachable; // glint-ignore: Z026 -- the class fits the fields
+            const kept = h2.message.copy(buffer, hd.fields) catch aegis.assert.never("the class fits the fields");
             if (st.status == null) {
                 const head = h2.message.checkResponse(kept) orelse {
                     h.ctx.buffers.release(io, buffer);
@@ -694,6 +698,29 @@ fn find(shared: *Shared, id: u31) ?*Stream {
     return null;
 }
 
+/// End this end's side of `st` when it has not, with an empty DATA frame,
+/// which no window holds back; then `finish` it. A stream this end may no
+/// longer write on is left to `finish`, which resets it; an end the outbox
+/// cannot take fails the connection, as any frame does.
+pub fn endAndFinish(h: *H2, io: Io, st: *Stream) void {
+    {
+        var held = h.shared.acquireUncancelable(io);
+        defer held.deinit(io);
+        const shared = held.value();
+        if (shared.failure == null and st.reset_code == null and !st.sent_end) {
+            if (shared.proto.writeData(shared.outbox.writer(), st.id, "", true)) |_| {
+                st.sent_end = true;
+            } else |err| switch (err) {
+                error.StreamClosed => {},
+                error.WriteFailed => shared.failure = .{ .io = h.conn.writeError() },
+                error.TooManyStreams, error.GoingAway => unreachable, // unreachable: only opening a stream is refused these
+            }
+            h.post(io, &held);
+        }
+    }
+    h.finish(io, st);
+}
+
 /// The exchange on `st` is done: a stream still open is reset (CANCEL),
 /// and its memory goes back.
 pub fn finish(h: *H2, io: Io, st: *Stream) void {
@@ -702,8 +729,11 @@ pub fn finish(h: *H2, io: Io, st: *Stream) void {
         defer held.deinit(io);
         const shared = held.value();
         if (shared.failure == null and st.reset_code == null and !(st.recv_end and st.sent_end)) {
-            // glint-ignore: Z026 -- a reset that cannot be written leaves a failed connection, which ends the stream too
-            shared.proto.reset(shared.outbox.writer(), st.id, .cancel) catch {};
+            // A reset the outbox cannot take fails the connection, which ends
+            // the stream too.
+            shared.proto.reset(shared.outbox.writer(), st.id, .cancel) catch {
+                shared.failure = .{ .io = h.conn.writeError() };
+            };
         }
         shared.proto.release(st.id);
         for (shared.streams.items, 0..) |s, i| if (s == st) {

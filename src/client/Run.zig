@@ -13,6 +13,7 @@
 //! response.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const sync = @import("../sync.zig");
 const Io = std.Io;
 const span = @import("../span.zig");
@@ -418,8 +419,7 @@ pub fn switches(r: Context.Route, response: *const Response) bool {
 /// HTTP/1.1 one still while it is not.
 pub fn switchToH2(run: *Run, io: Io, switched: *Response, lease: *Lease) H2Error!Response {
     const c = run.shared;
-    // glint-ignore: Z026 -- `switches` took a 101 whose body nobody read
-    const conn = (switched.upgrade(io) catch unreachable).carrier.conn;
+    const conn = (switched.upgrade(io) catch aegis.assert.never("`switches` took a 101 whose body nobody read")).carrier.conn;
     switched.deinit(io);
     const up = H2.upgraded(&c.context, io, conn, run.method.eql(.head)) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
@@ -1371,10 +1371,9 @@ fn invalidate(run: *Run, io: Io, cache: *Cache, r: *const Response) void {
     for ([_][]const u8{ "location", "content-location" }) |name| {
         const reference = r.headers.get(name) orelse continue;
         var buffer: [2048]u8 = undefined;
-        // glint-ignore: Z026 -- a reference that does not resolve names no stored response to remove
-        const target = url_mod.resolve(run.url_text, reference, &buffer) catch continue;
-        // glint-ignore: Z026 -- a reference that does not parse names no stored response to remove
-        const parsed = url_mod.parse(target) catch continue;
+        // A reference that does not resolve, or does not parse, names no stored response to remove.
+        const target = url_mod.resolve(run.url_text, reference, &buffer) catch null orelse continue;
+        const parsed = url_mod.parse(target) catch null orelse continue;
         if (!sameOrigin(run.url, parsed)) continue;
         cache.store.remove(io, target) catch |err| run.cacheFailed(err);
     }

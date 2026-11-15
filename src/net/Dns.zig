@@ -99,8 +99,9 @@ fn lookupName(d: *const Dns, io: Io, name: []const u8, port: u16, family: ?IpAdd
     const half = @min(out.len, v6.len);
     var aaaa_task = io.concurrent(ask, .{ d, io, name, dns.Type.aaaa, port, v6[0..half] }) catch null;
     const a_found = d.ask(io, name, .a, port, out) catch |err| {
-        // glint-ignore: Z026 -- this name's lookup failed; the other family's answer goes with it
-        if (aaaa_task) |*t| _ = t.cancel(io) catch {};
+        // This name's lookup failed: the other family's question is
+        // canceled, and whatever it found, this failure is the answer.
+        if (aaaa_task) |*t| return if (t.cancel(io)) |_| err else |_| err;
         return err;
     };
     const aaaa_found: NameError!Found = if (aaaa_task) |*t| t.await(io) else d.ask(io, name, .aaaa, port, v6[0..half]);
@@ -218,8 +219,8 @@ pub fn https(d: *const Dns, io: Io, gpa: Allocator, host: []const u8) (NameError
         while (records.next() catch return error.NoAnswer) |r| {
             if (r.kind != .https or r.class != dns.class_in) continue;
             var target_buf: [dns.max_name]u8 = undefined;
-            // glint-ignore: Z026 -- a malformed HTTPS record is skipped; the answer's others are read
-            const s = dns.Service.parse(r, &target_buf) catch continue;
+            // A malformed HTTPS record is skipped; the answer's others are read.
+            const s = dns.Service.parse(r, &target_buf) catch null orelse continue;
             if (s.priority == 0) {
                 @memcpy(alias_buf[0..s.target.len], s.target);
                 alias = alias_buf[0..s.target.len];
@@ -230,7 +231,7 @@ pub fn https(d: *const Dns, io: Io, gpa: Allocator, host: []const u8) (NameError
             const target = if (s.target.len == 0) name else s.target;
             @memcpy(targets[n][0..target.len], target);
             var record: Resolver.Binding.Record = .{ .target = targets[n][0..target.len], .service = s };
-            kept.append(&record) catch unreachable; // glint-ignore: Z026 -- fewer than `max_records` were kept, checked above
+            kept.append(&record) catch aegis.assert.never("fewer than `max_records` were kept, checked above");
             n += 1;
             // In order of priority; equal ones in the answer's order.
             const list = kept.items();
@@ -271,7 +272,7 @@ pub const max_records = 16;
 fn turnOf(turn: sync.Events, servers: usize) usize {
     // No servers is no turn: `exchange` answers that before it asks.
     const round = turn.rem(servers) catch return 0;
-    return aegis.int.cast(usize, round.raw()) catch unreachable; // glint-ignore: Z026 -- below the number of servers, a usize
+    return aegis.int.cast(usize, round.raw()) catch aegis.assert.never("a turn is below the number of servers, a usize");
 }
 
 pub const Stub = struct {
@@ -337,8 +338,9 @@ pub const Stub = struct {
                 error.Canceled => return error.Canceled,
                 error.Failed => continue,
             };
-            // glint-ignore: Z026 -- an answer that does not parse is no answer; the next server is asked
-            if (!(dns.Message.parse(got) catch continue).flags.truncated) return got;
+            // An answer that does not parse is no answer: the next server is asked.
+            const message = dns.Message.parse(got) catch null orelse continue;
+            if (!message.flags.truncated) return got;
             return s.overTcp(io, server, query, answer) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
                 error.Failed => continue,
@@ -652,36 +654,45 @@ const FakeServer = struct {
         var buf: [512]u8 = undefined;
         var out: [dns.max_message]u8 = undefined;
         while (true) {
-            // glint-ignore: Z026 -- the test's fake server ends with its socket
-            const message = f.udp.receive(io, &buf) catch return;
+            // The test's fake server ends with its socket, or when `stop`
+            // cancels it.
+            const message = f.udp.receive(io, &buf) catch |err| return std.log.debug("fake name server: UDP ended: {t}", .{err});
             const reply = answer(message.data, &out, true) orelse continue;
-            // glint-ignore: Z026 -- the test's fake server ends with its socket
-            f.udp.send(io, &message.from, reply) catch return;
+            f.udp.send(io, &message.from, reply) catch |err| return std.log.debug("fake name server: UDP ended: {t}", .{err});
         }
     }
 
     fn serveTcp(f: *FakeServer, io: Io) void {
         while (true) {
-            // glint-ignore: Z026 -- the test's fake server ends with its listener
-            const stream = f.tcp.borrowMut().accept(io) catch return;
+            // The test's fake server ends with its listener, or when `stop`
+            // cancels it.
+            const stream = f.tcp.borrowMut().accept(io) catch |err| return std.log.debug("fake name server: TCP ended: {t}", .{err});
             defer stream.close(io);
             var rbuf: [1024]u8 = undefined;
             var r = stream.reader(io, &rbuf);
             var wbuf: [4096]u8 = undefined;
             var w = stream.writer(io, &wbuf);
-            // glint-ignore: Z026 -- a query cut short gets no answer; the fake takes the next connection
-            const len = r.interface.takeInt(u16, .big) catch continue;
-            // glint-ignore: Z026 -- a query cut short gets no answer; the fake takes the next connection
-            const query = r.interface.take(len) catch continue;
+            // A query cut short gets no answer, and a client gone before its
+            // answer goes unanswered: the fake takes the next connection.
+            const len = r.interface.takeInt(u16, .big) catch |err| {
+                std.log.debug("fake name server: a query cut short: {t}", .{err});
+                continue;
+            };
+            const query = r.interface.take(len) catch |err| {
+                std.log.debug("fake name server: a query cut short: {t}", .{err});
+                continue;
+            };
             var out: [dns.max_message]u8 = undefined;
             const reply = answer(query, &out, false) orelse continue;
-            // glint-ignore: Z026 -- a client gone before its answer goes unanswered; the fake takes the next connection
-            w.interface.writeInt(u16, @intCast(reply.len), .big) catch continue; // safe: the fake's answers are small
-            // glint-ignore: Z026 -- a client gone before its answer goes unanswered; the fake takes the next connection
-            w.interface.writeAll(reply) catch continue;
-            // glint-ignore: Z026 -- a client gone before its answer goes unanswered; the fake takes the next connection
-            w.interface.flush() catch continue;
+            sendReply(&w.interface, reply) catch |err| std.log.debug("fake name server: a client gone before its answer: {t}", .{err});
         }
+    }
+
+    /// `reply` on a TCP connection, after its length.
+    fn sendReply(w: *Io.Writer, reply: []const u8) Io.Writer.Error!void {
+        try w.writeInt(u16, @intCast(reply.len), .big); // safe: the fake's answers are small
+        try w.writeAll(reply);
+        try w.flush();
     }
 
     /// The answer to `query`: its header and question, then the records.

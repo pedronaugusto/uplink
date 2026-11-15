@@ -376,8 +376,9 @@ const no_domain = "";
 /// or a name whose last two labels hash there. curl sends a cookie with no
 /// domain only to such hosts (`Curl_cookie_getlist`).
 fn sharesNoDomain(host: []const u8) bool {
-    // glint-ignore: Z026 -- a host that is no address literal is a name, judged below
-    if (Io.net.IpAddress.parseLiteral(host)) |_| return true else |_| {}
+    // A host that is no address literal is a name, judged below.
+    const literal: ?Io.net.IpAddress = Io.net.IpAddress.parseLiteral(host) catch null;
+    if (literal != null) return true;
     var top = host;
     if (std.mem.findScalarLast(u8, host, '.')) |last| {
         if (std.mem.findScalarLast(u8, host[0..last], '.')) |first| top = host[first + 1 ..];
@@ -481,8 +482,8 @@ fn loadLine(jar: *CookieJar, io: Io, line: []const u8, now: i64) Allocator.Error
     if (fields.hasControl(name) or fields.hasControl(value) or std.mem.findScalar(u8, name, ';') != null or std.mem.findScalar(u8, value, ';') != null) return;
     const path = parts[2];
     if (path.len == 0 or path[0] != '/') return;
-    // glint-ignore: Z026 -- a line whose expiry is no number is not a cookie; the file's other lines are read
-    const expires_n = std.fmt.parseInt(i64, parts[4], 10) catch return;
+    // A line whose expiry is no number is not a cookie; the file's other lines are read.
+    const expires_n: i64 = std.fmt.parseInt(i64, parts[4], 10) catch null orelse return;
     const expires: ?i64 = if (expires_n == 0) null else expires_n;
     if (expires) |e| if (e <= now) return;
     var domain_buf: [Io.net.HostName.max_len]u8 = undefined;

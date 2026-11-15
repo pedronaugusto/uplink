@@ -421,7 +421,7 @@ fn read(d: *Disk, io: Io, key: []const u8, name: Name) Error!?Entry {
     const framing = d.frame(io, file.borrow().*, key) catch |err| switch (err) {
         error.Canceled, error.OutOfMemory, error.StoreFailed => |e| return e,
         error.NotAVariant => {
-            d.forget(io, name);
+            try d.forget(io, name);
             return error.StoreFailed;
         },
     };
@@ -432,7 +432,7 @@ fn read(d: *Disk, io: Io, key: []const u8, name: Name) Error!?Entry {
     try readAt(io, file.borrow().*, text, layout.header_len);
     // Another key whose hash is this one's.
     if (!std.mem.eql(u8, text[0..framing.key_len], key)) {
-        d.forget(io, name);
+        try d.forget(io, name);
         return error.StoreFailed;
     }
     held.* = .{ .handle = .{ .store = &d.storing }, .file = undefined, .framing = framing, .text = text };
@@ -458,15 +458,15 @@ fn frame(d: *Disk, io: Io, file: Io.File, key: []const u8) (Error || Framing.Not
 }
 
 /// Takes `name` out of the index and its file away, after a read found it
-/// was not a variant of the key it was asked for.
-fn forget(d: *Disk, io: Io, name: Name) void {
+/// was not a variant of the key it was asked for. A removal that fails
+/// leaves a file the next `open` counts and finds again.
+fn forget(d: *Disk, io: Io, name: Name) Error!void {
     {
         var held = d.state.acquireUncancelable(io);
         defer held.deinit(io);
         if (find(held.value(), name)) |r| d.drop(held.value(), r);
     }
-    // glint-ignore: Z026 -- the lookup fails by name already; a file left here is counted again at the next open and found again
-    d.unlinkFile(io, name) catch {};
+    try d.unlinkFile(io, name);
 }
 
 fn readAt(io: Io, file: Io.File, buffer: []u8, offset: u64) Error!void {
@@ -552,9 +552,10 @@ fn account(d: *Disk, io: Io, name: Name, size: Size) Error!void {
         const s = held.value();
         if (find(s, name)) |old| d.drop(s, old);
         _ = insert(d.gpa, s, name, size) catch |err| {
-            // Stored but not indexed: it would never be counted, so it goes.
-            // glint-ignore: Z026 -- the commit fails by name already; a file left here is counted at the next open
-            d.unlinkFile(io, name) catch {};
+            // Stored but not indexed: it would never be counted, so it goes. A
+            // removal that fails fails the commit by its own cause, and leaves a
+            // file the next `open` counts.
+            try d.unlinkFile(io, name);
             return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 error.Overflow => error.StoreFailed,

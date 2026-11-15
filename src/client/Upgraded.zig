@@ -137,11 +137,7 @@ pub fn close(u: *Upgraded, io: Io) void {
     switch (u.carrier) {
         .conn => |conn| u.pool.close(io, .{ .h1 = conn }),
         .stream => |s| {
-            if (!s.stream.sent_end) {
-                // glint-ignore: Z026 -- a stream that cannot be ended is reset by finish, which ends it too
-                s.h2.send(io, s.stream, "", true, null) catch {};
-            }
-            s.h2.finish(io, s.stream);
+            s.h2.endAndFinish(io, s.stream);
             u.pool.unshare(io, s.h2);
             for ([_]BufferPool.Buffer{ u.tunnel_buffer, u.tunnel_in }) |b| if (b.len != 0) u.ctx.buffers.release(io, b);
         },

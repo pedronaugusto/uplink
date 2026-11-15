@@ -106,7 +106,7 @@ test "messages of every kind and size come back whole, compressed or not" {
                 try testing.expectEqual(ws.Conn.Kind.text, kind);
                 try testing.expect(std.mem.startsWith(u8, back, "piece 0; piece 1; "));
                 try testing.expect(std.mem.endsWith(u8, back, "piece 49; "));
-                opened.conn.close(io, wire.ws.Close.normal, "done");
+                try opened.conn.close(io, wire.ws.Close.normal, "done");
                 try testing.expectEqual(wire.ws.Close.normal, opened.conn.peer_close.?.code);
             }
         }
@@ -401,7 +401,7 @@ test "the client opens a WebSocket over HTTP/2 when the server takes an extended
                     try testing.expectEqualSlices(u8, payload, back);
                 }
             }
-            first.conn.close(io, wire.ws.Close.normal, "done");
+            try first.conn.close(io, wire.ws.Close.normal, "done");
             try testing.expectEqual(wire.ws.Close.normal, first.conn.peer_close.?.code);
             try testing.expectEqual(@as(u64, 1), client.stats().connections_opened);
 

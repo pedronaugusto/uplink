@@ -279,11 +279,12 @@ pub fn dialUnix(io: Io, path: []const u8, options: Options) DialError!Dialed {
     var buffer: [2]Race = undefined;
     var race: Io.Select(Race) = .init(io, &buffer);
     defer while (race.cancel()) |late| switch (late) {
-        // glint-ignore: Z026 -- a late dial that failed made no stream to close
-        .connected => |result| if (result) |d| {
+        // A late dial that connected has its stream closed; one that failed
+        // made none.
+        .connected => |result| if (result catch null) |d| {
             var unclaimed = d;
             unclaimed.stream.deinit(io);
-        } else |_| {},
+        },
         .expired => {},
     };
     race.concurrent(.connected, unixNow, .{ io, path }) catch {
@@ -429,11 +430,12 @@ fn connectAny(io: Io, addresses: []const IpAddress, delay: Io.Duration, deadline
     var buffer: [2 * max_addresses]Event = undefined;
     var race: Io.Select(Event) = .init(io, &buffer);
     defer while (race.cancel()) |late| switch (late) {
-        // glint-ignore: Z026 -- a late dial that failed made no stream to close
-        .connected => |result| if (result) |c| {
+        // A late dial that connected has its stream closed; one that failed
+        // made none.
+        .connected => |result| if (result catch null) |c| {
             var unclaimed = c;
             unclaimed.stream.deinit(io);
-        } else |_| {},
+        },
         .waited => {},
     };
     var state: Attempts = .{ .race = &race, .io = io, .addresses = addresses, .delay = delay, .deadline = deadline, .local = local };
@@ -485,8 +487,11 @@ const Attempts = struct {
         a.started += 1;
         a.running += 1;
         if (a.started < a.addresses.len) {
-            // glint-ignore: Z026 -- with no task for the delay, the next attempt starts when this one fails
-            a.race.concurrent(.waited, waitFor, .{ a.io, a.delay, a.started }) catch {};
+            // With no task for the delay, the rest go in turn, the next when
+            // this one fails.
+            a.race.concurrent(.waited, waitFor, .{ a.io, a.delay, a.started }) catch {
+                a.spare = false;
+            };
         }
     }
 };

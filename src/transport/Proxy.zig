@@ -147,14 +147,14 @@ pub fn parseKept(gpa: Allocator, arena: Allocator, credential: *?aegis.SecretByt
     const room = text.len * 4 + 64;
     var scratch: aegis.SecretBytes = try .init(gpa, room);
     defer scratch.deinit(gpa);
-    scratch.resizeWithinCapacity(room) catch unreachable; // glint-ignore: Z026 -- `room` is the capacity just made
+    scratch.resizeWithinCapacity(room) catch aegis.assert.never("`room` is the capacity just made");
     var fixed: std.heap.FixedBufferAllocator = .init(scratch.exposeMut());
     var proxy = try parse(fixed.allocator(), text, rules);
     proxy.host = try arena.dupe(u8, proxy.host);
     if (proxy.credential) |c| {
         var kept: aegis.SecretBytes = try .init(gpa, c.user.len + c.password.len);
         errdefer kept.deinit(gpa);
-        kept.resizeWithinCapacity(c.user.len + c.password.len) catch unreachable; // glint-ignore: Z026 -- the capacity just made
+        kept.resizeWithinCapacity(c.user.len + c.password.len) catch aegis.assert.never("the capacity just made");
         const bytes = kept.exposeMut();
         @memcpy(bytes[0..c.user.len], c.user);
         @memcpy(bytes[c.user.len..], c.password);
@@ -291,8 +291,9 @@ fn uppercaseBypassed(list: []const u8, host: []const u8, port: u16) bool {
     if (std.ascii.eqlIgnoreCase(host, "localhost")) return true;
     const ip: ?IpAddress = IpAddress.parse(host, 0) catch null;
     if (ip) |a| if (isLoopback(a)) return true;
+    // A u16 is at most five digits.
     var port_buf: [8]u8 = undefined;
-    const port_text = std.mem.print(&port_buf, "{d}", .{port}) catch unreachable; // glint-ignore: Z026 -- a u16 is at most five digits
+    const port_text = port_buf[0..std.fmt.printInt(&port_buf, port, 10, .lower, .{})];
     var it = std.mem.splitScalar(u8, list, ',');
     while (it.next()) |raw| {
         const entry = std.mem.trim(u8, raw, " \t\r\n");
@@ -311,11 +312,12 @@ fn uppercaseBypassed(list: []const u8, host: []const u8, port: u16) bool {
             if (entry_host.len == 0) continue;
         }
         const port_ok = entry_port.len == 0 or std.mem.eql(u8, entry_port, port_text);
-        // glint-ignore: Z026 -- an entry that is no address literal is a domain, matched below
-        if (IpAddress.parse(entry_host, 0)) |entry_ip| {
-            if (ip) |a| if (sameAddress(a, entry_ip) and port_ok) return true;
+        // An entry that is no address literal is a domain, matched below.
+        const entry_ip: ?IpAddress = IpAddress.parse(entry_host, 0) catch null;
+        if (entry_ip) |e| {
+            if (ip) |a| if (sameAddress(a, e) and port_ok) return true;
             continue;
-        } else |_| {}
+        }
         if (ip != null) continue;
         var domain = entry_host;
         if (std.mem.startsWith(u8, domain, "*.")) domain = domain[1..];

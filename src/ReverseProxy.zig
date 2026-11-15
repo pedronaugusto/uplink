@@ -435,7 +435,8 @@ fn writeForwarded(w: *Io.Writer, request: *const Request) Io.Writer.Error!void {
     if (request.remote) |remote| {
         var buf: [64]u8 = undefined;
         var node: Io.Writer = .fixed(&buf);
-        remote.format(&node) catch unreachable; // glint-ignore: Z026 -- an address and port fit 64 bytes
+        // An address and its port fit 64 bytes.
+        try remote.format(&node);
         try writeValue(w, node.buffered());
     } else try w.writeAll("unknown");
     try w.writeAll(";host=");

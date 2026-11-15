@@ -302,8 +302,12 @@ fn waitForFrame(c: *Conn, io: Io) ReadError!void {
     c.ping(io, "") catch |err| return answerFailed(err);
     if (try c.transport.readableFn(&c.transport, io, span.toIo(interval)) != .timed_out) return;
     c.failure = ws.Close.going_away;
-    // glint-ignore: Z026 -- the peer is gone or silent; the close is a courtesy
-    c.sendClose(io, ws.Close.going_away, "") catch {};
+    // The peer is gone or silent, and the close a courtesy; a cancel that
+    // stops it is the read's answer.
+    c.sendClose(io, ws.Close.going_away, "") catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        error.ConnectionFailed, error.Closed, error.PayloadTooLarge, error.OutOfMemory => {},
+    };
     return error.TimedOut;
 }
 
@@ -390,8 +394,13 @@ fn readPayload(c: *Conn, out: []u8) ReadError!void {
 fn fail(c: *Conn, io: Io, code: u16) ReadError {
     if (c.failure == null) c.failure = code;
     c.reading.open = false;
-    // glint-ignore: Z026 -- the connection has failed; the close tells the peer why if it can still hear
-    c.sendClose(io, code, "") catch {};
+    // The connection has failed; the close tells the peer why if it can
+    // still hear. A cancel that stops it is the read's answer, `failure`
+    // keeping the code.
+    c.sendClose(io, code, "") catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        error.ConnectionFailed, error.Closed, error.PayloadTooLarge, error.OutOfMemory => {},
+    };
     return error.ProtocolError;
 }
 
@@ -654,24 +663,28 @@ fn fragment(c: *Conn, io: Io, mw: *MessageWriter, parts: []const []const u8, spl
 
 /// Close: send a close with `code` and `reason`, then wait up to
 /// `close_timeout` for the peer's, skipping what comes before it. Call it
-/// while no other task reads.
-pub fn close(c: *Conn, io: Io, code: u16, reason: []const u8) void {
-    // glint-ignore: Z026 -- a close already sent waits for the peer's; a stream gone has nothing to wait for
+/// while no other task reads. A stream that fails ends the close; a cancel
+/// ends it as `error.Canceled`.
+pub fn close(c: *Conn, io: Io, code: u16, reason: []const u8) Io.Cancelable!void {
     c.sendClose(io, code, reason) catch |err| switch (err) {
+        // A close already sent waits for the peer's.
         error.Closed => {},
+        error.Canceled => return error.Canceled,
         // The stream is gone: there is nothing to wait for.
-        else => return,
+        error.ConnectionFailed, error.PayloadTooLarge, error.OutOfMemory => return,
     };
     const until = Io.Clock.awake.now(io).addDuration(span.toIo(c.options.close_timeout));
     var buffer: [512]u8 = undefined;
     while (c.peer_close == null and c.failure == null) {
         const left = Io.Clock.awake.now(io).durationTo(until);
         if (span.spent(left)) return;
-        // glint-ignore: Z026 -- a close that cannot wait for the peer's ends without it
-        const ready = c.transport.readableFn(&c.transport, io, left) catch return;
+        const ready = try c.transport.readableFn(&c.transport, io, left);
         if (ready == .timed_out) return;
-        // glint-ignore: Z026 -- a close that cannot read the peer's ends without it
-        _ = c.next(io, &buffer) catch return;
+        // A close that cannot read the peer's ends without it.
+        _ = c.next(io, &buffer) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            error.ProtocolError, error.ConnectionFailed, error.TimedOut, error.OutOfMemory => return,
+        };
     }
 }
 

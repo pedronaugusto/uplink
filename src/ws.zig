@@ -9,6 +9,7 @@
 //! does the rest.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const wire = @import("uplink.wire");
@@ -110,7 +111,7 @@ pub fn accept(out: *Accepted, gpa: Allocator, io: Io, request: *ServerRequest, r
     if (agreed) |d| {
         var buf: [256]u8 = undefined;
         var w: Io.Writer = .fixed(&buf);
-        d.write(&w) catch unreachable; // glint-ignore: Z026 -- the parameters are under 256 bytes
+        d.write(&w) catch aegis.assert.never("the parameters are under 256 bytes");
         response.header("Sec-WebSocket-Extensions", w.buffered()) catch |err| return answerFailed(err);
     }
     const stream = response.hijack(io) catch |err| return answerFailed(err);
@@ -165,8 +166,8 @@ fn agreeDeflate(h: *const fields.Headers, c: Compression) ?ws.Deflate {
     while (lines.next()) |element| {
         const semi = std.mem.findScalar(u8, element, ';') orelse element.len;
         if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, element[0..semi], " \t"), "permessage-deflate")) continue;
-        // glint-ignore: Z026 -- an offer this end cannot read is passed over for the client's next
-        const offer = ws.Deflate.parse(element[semi..]) catch continue;
+        // An offer this end cannot read is passed over for the client's next.
+        const offer = ws.Deflate.parse(element[semi..]) catch null orelse continue;
         var answer: ws.Deflate = .{
             .server_no_context_takeover = offer.server_no_context_takeover or c.no_context_takeover,
             .client_no_context_takeover = offer.client_no_context_takeover,
@@ -277,7 +278,7 @@ fn open(out: *Opened, client: *Client, gpa: Allocator, io: Io, http_url: []const
             .client_bits_offered = c.window_bits == 15,
             .client_max_window_bits = if (c.window_bits < 15) c.window_bits else null,
         };
-        offer.write(&w) catch unreachable; // glint-ignore: Z026 -- an offer is under 128 bytes
+        offer.write(&w) catch aegis.assert.never("an offer is under 128 bytes");
         headers[n] = .{ .name = "Sec-WebSocket-Extensions", .value = w.buffered() };
         n += 1;
     }

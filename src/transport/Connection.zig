@@ -413,17 +413,24 @@ pub fn close(conn: *Connection, io: Io) void {
     conn.teardown(io, conn.failed() == .none);
 }
 
-fn teardown(conn: *Connection, io: Io, polite: bool) void {
+fn teardown(conn: *Connection, io: Io, polite_at_first: bool) void {
     conn.io = io;
+    // A layer whose close_notify cannot be sent has failed under it: the
+    // layers below close without theirs, as a failed connection does.
+    var polite = polite_at_first;
     var i: usize = conn.sessions.len;
     while (i > 0) {
         i -= 1;
         if (!conn.session_on[i]) continue;
         if (polite) {
-            // glint-ignore: Z026 -- the close_notify is a courtesy, as below
-            conn.sessions[i].finish() catch {};
-            // glint-ignore: Z026 -- the close_notify is a courtesy; the socket is closed below whether or not the peer heard it
-            conn.flushFrom(i) catch {};
+            // The close_notify is a courtesy: the socket is closed below
+            // whether or not the peer heard it.
+            conn.sessions[i].finish() catch {
+                polite = false;
+            };
+            if (polite) conn.flushFrom(i) catch {
+                polite = false;
+            };
         }
         conn.sessions[i].deinit();
         for (conn.session_buffers[i]) |b| conn.ctx.buffers.release(io, b);
@@ -687,9 +694,12 @@ pub fn writeError(conn: *Connection) IoError {
     // the write that failed is the request, and the alert is there to read.
     for (&conn.sessions, conn.session_on) |*s, on| {
         if (!on or !s.diagnostics().certificate_requested) continue;
-        // glint-ignore: Z026 -- the read only takes the alert in; its failure lands in the session's failure, checked next
-        _ = s.reader().peekByte() catch {};
-        if (s.failure() != null) return conn.readError();
+        // The read takes the alert in: a read that fails puts its cause in
+        // the session's failure.
+        const alerted = if (s.reader().peekByte()) |_| false else |err| switch (err) {
+            error.EndOfStream, error.ReadFailed => s.failure() != null,
+        };
+        if (alerted) return conn.readError();
     }
     if (conn.missingCertificateReset()) return error.ClientCertificateRejected;
     return error.ConnectionFailed;
@@ -1008,7 +1018,7 @@ fn startTls(conn: *Connection, slot: usize, host: []const u8, offer: Offer) (Ope
 fn ticketNamespace(conn: *const Connection, slot: usize, buf: []u8) []const u8 {
     if (slot == 0) return "";
     const p = (conn.route.proxy orelse return "").proxy;
-    return std.mem.print(buf, "via {t} {s}:{d}", .{ p.kind, p.host, p.port }) catch unreachable; // glint-ignore: Z026 -- the buffer holds a host name and 32 bytes more, past the longest kind and port
+    return std.mem.print(buf, "via {t} {s}:{d}", .{ p.kind, p.host, p.port }) catch aegis.assert.never("the buffer holds a host name and 32 bytes more, past the longest kind and port");
 }
 
 /// The authorities a session in `slot` checks its server against, or null

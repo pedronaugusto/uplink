@@ -259,8 +259,9 @@ pub const KeyLogWriter = struct {
         defer if (io) |task| {
             _ = task.swapCancelProtection(held.?);
         };
-        // glint-ignore: Z026 -- a capture that cannot be written is the caller's to notice; it must not fail the handshake it describes
-        sink.writer.writeAll(line) catch return;
+        // A capture that cannot be written must not fail the handshake it
+        // describes: the log is told it is short.
+        sink.writer.writeAll(line) catch |err| std.log.scoped(.uplink).warn("TLS key log: a line was not written ({t}): the capture is short", .{err});
     }
 };
 

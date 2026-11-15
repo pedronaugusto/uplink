@@ -42,24 +42,23 @@ pub fn main(init: std.process.Init) !void {
 /// Echo every message back, as it came, compressed when the client asks.
 fn echo(io: Io, request: *uplink.server.Request, response: *uplink.server.Response) anyerror!void {
     var accepted: ws.Accepted = undefined;
-    ws.accept(&accepted, std.heap.smp_allocator, io, request, response, .{
+    try ws.accept(&accepted, std.heap.smp_allocator, io, request, response, .{
         .conn = .{ .max_message = .literal("64MiB"), .max_frame = .literal("64MiB") },
         // Context takeover kept both ways, so every case of 12 and 13 runs.
         .compression = .{},
-        // glint-ignore: Z026 -- a case whose upgrade fails is one the fuzzing server reports failed
-    }) catch return;
+        // A case whose upgrade fails fails the handler; the fuzzing server reports the case.
+    });
     defer accepted.deinit();
-    pump(io, &accepted.conn);
+    try pump(io, &accepted.conn);
 }
 
-fn pump(io: Io, conn: *ws.Conn) void {
+/// Echo until the peer closes; a case the fuzzing server breaks off ends with its failure, which
+/// its report judges.
+fn pump(io: Io, conn: *ws.Conn) !void {
     while (true) {
-        // glint-ignore: Z026 -- the case ends when the fuzzing server closes or breaks the connection; its report says how
-        const message = conn.readMessage(io, std.heap.smp_allocator, .limited(64 << 20)) catch return;
-        const kind, const bytes = message orelse return;
+        const kind, const bytes = try conn.readMessage(io, std.heap.smp_allocator, .limited(64 << 20)) orelse return;
         defer std.heap.smp_allocator.free(bytes);
-        // glint-ignore: Z026 -- the case ends when the fuzzing server closes or breaks the connection; its report says how
-        conn.send(io, kind, bytes) catch return;
+        try conn.send(io, kind, bytes);
     }
 }
 
@@ -106,14 +105,18 @@ fn againstClient(gpa: std.mem.Allocator, io: Io, wstest: []const u8, work: Io.Di
         var opened: ws.Opened = undefined;
         ws.connect(&opened, &client, gpa, io, try std.mem.print(&url_buf, "ws://127.0.0.1:{d}/runCase?case={d}&agent=uplink", .{ port, i }), .{
             .conn = .{ .max_message = .literal("64MiB"), .max_frame = .literal("64MiB") },
-            // glint-ignore: Z026 -- a case the client cannot open is one the fuzzing server reports failed; the next runs
-        }) catch continue;
+            // A case the client cannot open is one the fuzzing server reports failed; the next runs.
+        }) catch |err| {
+            std.log.debug("case {d}: not opened: {t}", .{ i, err });
+            continue;
+        };
         defer opened.deinit(io);
-        pump(io, &opened.conn);
+        // A case the fuzzing server breaks off is one its report judges; the next runs.
+        pump(io, &opened.conn) catch |err| std.log.debug("case {d}: ended by {t}", .{ i, err });
     }
     var opened: ws.Opened = undefined;
     try ws.connect(&opened, &client, gpa, io, try std.mem.print(&url_buf, "ws://127.0.0.1:{d}/updateReports?agent=uplink", .{port}), .{});
-    opened.conn.close(io, 1000, "");
+    try opened.conn.close(io, 1000, "");
     opened.deinit(io);
     return summarize(gpa, io, work, "reports/clients/index.json");
 }
@@ -147,22 +150,21 @@ fn summarize(gpa: std.mem.Allocator, io: Io, work: Io.Dir, index: []const u8) !v
         gop.value_ptr.* += 1;
         if (std.mem.eql(u8, behaviour, "FAILED") or std.mem.eql(u8, close, "FAILED")) {
             failed += 1;
-            say(io, "FAILED {s} (behavior {s}, close {s})\n", .{ entry.key_ptr.*, behaviour, close });
+            try say(io, "FAILED {s} (behavior {s}, close {s})\n", .{ entry.key_ptr.*, behaviour, close });
         }
     }
-    say(io, "{d} cases:", .{agent.object.count()});
+    try say(io, "{d} cases:", .{agent.object.count()});
     var ci = counts.iterator();
-    while (ci.next()) |e| say(io, " {s} {d}", .{ e.key_ptr.*, e.value_ptr.* });
-    say(io, "\n", .{});
+    while (ci.next()) |e| try say(io, " {s} {d}", .{ e.key_ptr.*, e.value_ptr.* });
+    try say(io, "\n", .{});
     if (failed != 0) return error.CasesFailed;
 }
 
 /// Write to standard output: the harness's report.
-fn say(io: Io, comptime format: []const u8, args: anytype) void {
+/// A report that cannot be written fails the run: what it decided would go unread.
+fn say(io: Io, comptime format: []const u8, args: anytype) Io.Writer.Error!void {
     var buf: [4096]u8 = undefined;
     var w = std.Io.File.stdout().writerStreaming(io, &buf);
-    // glint-ignore: Z026 -- a report that cannot be written changes nothing the run decides
-    w.interface.print(format, args) catch return;
-    // glint-ignore: Z026 -- a report that cannot be written changes nothing the run decides
-    w.interface.flush() catch return;
+    try w.interface.print(format, args);
+    try w.interface.flush();
 }
