@@ -322,7 +322,7 @@ const Context = struct {
             const copy = c.scratch[0..head.len];
             @memcpy(copy, head);
             const parsed = (try uplink.wire.h1.parseResponse(copy, &fields, .{ .max_fields = 64 })) orelse return error.MalformedHead;
-            std.mem.doNotOptimizeAway(try uplink.wire.h1.responseFraming(.GET, &parsed.head));
+            std.mem.doNotOptimizeAway(try uplink.wire.h1.responseFraming(.get, &parsed.head));
             c.cursor = (c.cursor + 1) % c.ends.len;
         }
         c.cursor = 0;

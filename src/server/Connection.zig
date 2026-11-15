@@ -200,7 +200,7 @@ fn serveOne(c: *Connection) bool {
     }
     defer if (request.decoder) |*d| d.deinit(io, s.gpa, &s.buffers, &s.windows);
 
-    var response: Response = .init(&c.socket, rh.method.eql(.HEAD), rh.version == .http1_0, rh.headers.getKnown(.@"accept-encoding"));
+    var response: Response = .init(&c.socket, rh.method.eql(.head), rh.version == .http1_0, rh.headers.getKnown(.@"accept-encoding"));
     defer response.release(io);
     const keep_alive = h1.keepAlive(rh.version, &rh.headers);
     if (!keep_alive) response.closeAfter();

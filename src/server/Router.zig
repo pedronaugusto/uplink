@@ -344,7 +344,7 @@ pub fn dispatch(table: anytype, io: Io, request: *Request, response: *Response) 
     const path = request.path;
     if (path.len == 0) {
         // `OPTIONS *` asks about the server, which answers for itself.
-        if (request.method.eql(.OPTIONS)) return plain(io, response, .ok, "");
+        if (request.method.eql(.options)) return plain(io, response, .ok, "");
         // A `CONNECT` to a host and port names no resource a pattern can:
         // no method is allowed there (RFC 9110 §15.5.6, an empty `Allow`).
         try response.header("Allow", "");
@@ -398,7 +398,7 @@ fn redirect(io: Io, request: *const Request, response: *Response, path: []const 
         w.writeByte('?') catch return error.HeadTooLarge;
         w.writeAll(q) catch return error.HeadTooLarge;
     }
-    response.status = if (request.method.eql(.GET) or request.method.eql(.HEAD)) .moved_permanently else .permanent_redirect;
+    response.status = if (request.method.eql(.get) or request.method.eql(.head)) .moved_permanently else .permanent_redirect;
     try response.header("Location", w.buffered());
     return plain(io, response, response.status, "");
 }
@@ -482,20 +482,20 @@ test "the most specific pattern wins, whatever the order they were added in" {
     defer r.deinit();
     const h: *Handler = .of(nop);
     for ([_][]const u8{ "/", "/a/", "/a/b", "/a/{x}", "/a/{x}/c", "GET /a/b", "/static/{rest...}", "/{$}", "other.com/a/b", "/x/{y}/z/" }) |p| try r.add(p, h);
-    try testing.expectEqualStrings("GET /a/b", matched(&r, .GET, "/a/b").?);
-    try testing.expectEqualStrings("GET /a/b", matched(&r, .HEAD, "/a/b").?);
-    try testing.expectEqualStrings("/a/b", matched(&r, .POST, "/a/b").?);
-    try testing.expectEqualStrings("/a/{x}", matched(&r, .GET, "/a/q").?);
-    try testing.expectEqualStrings("/a/{x}/c", matched(&r, .GET, "/a/q/c").?);
-    try testing.expectEqualStrings("/a/", matched(&r, .GET, "/a/q/d").?);
-    try testing.expectEqualStrings("/a/", matched(&r, .GET, "/a/").?);
-    try testing.expectEqualStrings("/{$}", matched(&r, .GET, "/").?);
-    try testing.expectEqualStrings("/", matched(&r, .GET, "/zzz").?);
-    try testing.expectEqualStrings("/static/{rest...}", matched(&r, .GET, "/static/css/a.css").?);
-    try testing.expectEqualStrings("/a/{x}", matched(&r, .GET, "/a/b%2Fc").?);
-    try testing.expectEqualStrings("/x/{y}/z/", matched(&r, .GET, "/x/1/z/deep/er").?);
+    try testing.expectEqualStrings("GET /a/b", matched(&r, .get, "/a/b").?);
+    try testing.expectEqualStrings("GET /a/b", matched(&r, .head, "/a/b").?);
+    try testing.expectEqualStrings("/a/b", matched(&r, .post, "/a/b").?);
+    try testing.expectEqualStrings("/a/{x}", matched(&r, .get, "/a/q").?);
+    try testing.expectEqualStrings("/a/{x}/c", matched(&r, .get, "/a/q/c").?);
+    try testing.expectEqualStrings("/a/", matched(&r, .get, "/a/q/d").?);
+    try testing.expectEqualStrings("/a/", matched(&r, .get, "/a/").?);
+    try testing.expectEqualStrings("/{$}", matched(&r, .get, "/").?);
+    try testing.expectEqualStrings("/", matched(&r, .get, "/zzz").?);
+    try testing.expectEqualStrings("/static/{rest...}", matched(&r, .get, "/static/css/a.css").?);
+    try testing.expectEqualStrings("/a/{x}", matched(&r, .get, "/a/b%2Fc").?);
+    try testing.expectEqualStrings("/x/{y}/z/", matched(&r, .get, "/x/1/z/deep/er").?);
     var allowed: Allowed = .{};
-    try testing.expectEqualStrings("other.com/a/b", r.match(.GET, "other.com:8080", "/a/b", &allowed).?.pattern());
+    try testing.expectEqualStrings("other.com/a/b", r.match(.get, "other.com:8080", "/a/b", &allowed).?.pattern());
 }
 
 test "conflicting patterns are refused, naming the one already there" {
@@ -519,12 +519,12 @@ test "a path under another method is gathered for Allow, and captures come back 
     try r.add("GET /items/{id}", h);
     try r.add("GET /users/{user}/repos/{repo...}", h);
     var allowed: Allowed = .{};
-    try testing.expectEqual(null, r.match(.DELETE, "h", "/items/7", &allowed));
+    try testing.expectEqual(null, r.match(.delete, "h", "/items/7", &allowed));
     try testing.expectEqual(@as(usize, 3), allowed.sorted().len);
     try testing.expectEqualStrings("GET", allowed.sorted()[0]);
     try testing.expectEqualStrings("HEAD", allowed.sorted()[1]);
     allowed = .{};
-    const m = r.match(.GET, "h", "/users/ann/repos/zig/std", &allowed).?;
+    const m = r.match(.get, "h", "/users/ann/repos/zig/std", &allowed).?;
     try testing.expectEqual(@as(u8, 2), m.len);
     try testing.expectEqualStrings("ann", m.values[0]);
     try testing.expectEqualStrings("zig/std", m.values[1]);

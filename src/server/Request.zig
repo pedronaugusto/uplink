@@ -318,7 +318,7 @@ pub const Target = struct {
     /// for `OPTIONS`.
     pub fn parse(method: Method, target: []const u8) Error!Target {
         if (target.len == 0) return error.InvalidTarget;
-        if (method.eql(.CONNECT)) {
+        if (method.eql(.connect)) {
             if (target.len == 0 or target[0] == '/' or std.mem.findScalar(u8, target, '/') != null) return error.InvalidTarget;
             return .{ .path = "", .query = null, .authority = target };
         }
@@ -329,12 +329,12 @@ pub const Target = struct {
     /// methods have, not an authority.
     pub fn parseExtended(target: []const u8) Error!Target {
         if (target.len == 0 or target[0] != '/') return error.InvalidTarget;
-        return resource(.CONNECT, target);
+        return resource(.connect, target);
     }
 
     fn resource(method: Method, target: []const u8) Error!Target {
         if (std.mem.eql(u8, target, "*")) {
-            if (!method.eql(.OPTIONS)) return error.InvalidTarget;
+            if (!method.eql(.options)) return error.InvalidTarget;
             return .{ .path = "", .query = null };
         }
         var rest = target;
@@ -362,21 +362,21 @@ pub const Target = struct {
 const testing = std.testing;
 
 test "a target is split into its path and query, in every form a server takes" {
-    const origin = try Target.parse(.GET, "/a/b?x=1&y");
+    const origin = try Target.parse(.get, "/a/b?x=1&y");
     try testing.expectEqualStrings("/a/b", origin.path);
     try testing.expectEqualStrings("x=1&y", origin.query.?);
     try testing.expectEqual(null, origin.authority);
-    const absolute = try Target.parse(.GET, "http://example.com:8080?q");
+    const absolute = try Target.parse(.get, "http://example.com:8080?q");
     try testing.expectEqualStrings("/", absolute.path);
     try testing.expectEqualStrings("q", absolute.query.?);
     try testing.expectEqualStrings("example.com:8080", absolute.authority.?);
-    const connect = try Target.parse(.CONNECT, "example.com:443");
+    const connect = try Target.parse(.connect, "example.com:443");
     try testing.expectEqualStrings("example.com:443", connect.authority.?);
-    try testing.expectEqualStrings("", (try Target.parse(.OPTIONS, "*")).path);
-    try testing.expectError(error.InvalidTarget, Target.parse(.GET, "*"));
-    try testing.expectError(error.InvalidTarget, Target.parse(.GET, "ftp://x/"));
-    try testing.expectError(error.InvalidTarget, Target.parse(.CONNECT, "/x"));
-    try testing.expectError(error.InvalidTarget, Target.parse(.GET, "http:///x"));
+    try testing.expectEqualStrings("", (try Target.parse(.options, "*")).path);
+    try testing.expectError(error.InvalidTarget, Target.parse(.get, "*"));
+    try testing.expectError(error.InvalidTarget, Target.parse(.get, "ftp://x/"));
+    try testing.expectError(error.InvalidTarget, Target.parse(.connect, "/x"));
+    try testing.expectError(error.InvalidTarget, Target.parse(.get, "http:///x"));
 }
 
 test "params are found by name" {
@@ -406,7 +406,7 @@ test "fuzz: any target is read or refused, and one read names a path, a query or
                 while (len < buf.len and s.more(12)) : (len += 1) buf[len] = gen.oneOf(s, u8, "/?:*hp.#%");
             }
             const text = buf[0..len];
-            const methods = [_]Method{ .GET, .CONNECT, .OPTIONS };
+            const methods = [_]Method{ .get, .connect, .options };
             const method = gen.oneOf(s, Method, &methods);
             // a generated target may parse or not; the property checks only one that does
             if (Target.parse(method, text)) |t| {

@@ -190,12 +190,12 @@ test "comptime routes order their patterns by specificity and type their capture
         .{ "GET /users/{id}", user },
     });
     var allowed: Router.Allowed = .{};
-    const hit = R.find(.{}, .GET, "h", "/users/7", &allowed).?;
+    const hit = R.find(.{}, .get, "h", "/users/7", &allowed).?;
     try testing.expectEqual(@as(usize, 1), hit.index);
     try testing.expectEqualStrings("7", hit.values[0]);
-    const deep = R.find(.{}, .GET, "h", "/users/7/repos", &allowed).?;
+    const deep = R.find(.{}, .get, "h", "/users/7/repos", &allowed).?;
     try testing.expectEqual(@as(usize, 0), deep.index);
-    try testing.expectEqual(null, R.find(.{}, .GET, "h", "/other", &allowed));
+    try testing.expectEqual(null, R.find(.{}, .get, "h", "/other", &allowed));
     const C = Captures("GET /a/{x}/b/{y...}");
     try testing.expect(@hasField(C, "x") and @hasField(C, "y"));
 }

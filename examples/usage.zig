@@ -66,7 +66,7 @@ pub fn main(init: std.process.Init) !void {
     const url = try std.mem.print(&url_buffer, "http://127.0.0.1:{d}/echo/ping", .{listener.socket.address.getPort()});
     var diagnostics: uplink.Diagnostics = .{};
     var response = client.send(io, .{
-        .method = .POST,
+        .method = .post,
         .url = url,
         .headers = &.{.{ .name = "Content-Type", .value = "text/plain" }},
         .body = .{ .bytes = "hello" },

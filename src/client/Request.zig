@@ -9,7 +9,7 @@ const Method = wire.Method;
 const Diagnostics = @import("../transport/Diagnostics.zig");
 const policy = @import("policy.zig");
 
-method: Method = .GET,
+method: Method = .get,
 /// An `http` or `https` URL. A space, a control character or a user and
 /// password in it are refused.
 url: []const u8,

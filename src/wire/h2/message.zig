@@ -84,7 +84,7 @@ pub fn checkRequest(fields: []const Field) ?Request {
     const m = method orelse return null;
     if (!fields_mod.isToken(m)) return null;
     h.method = .{ .name = m };
-    if (h.method.eql(.CONNECT) and h.protocol == null) {
+    if (h.method.eql(.connect) and h.protocol == null) {
         // CONNECT: an authority, no scheme or path.
         if (h.authority == null or h.scheme != null or path != null) return null;
         h.path = "";
@@ -92,7 +92,7 @@ pub fn checkRequest(fields: []const Field) ?Request {
         h.path = path orelse return null;
         // A request target's bytes, as h1's request line holds them.
         if (!h1.isTarget(h.path) or h.scheme == null) return null;
-        if (h.protocol != null and !h.method.eql(.CONNECT)) return null;
+        if (h.protocol != null and !h.method.eql(.connect)) return null;
     }
     return h;
 }

@@ -222,7 +222,7 @@ fn unsafeRemoves(kind: Kind) !void {
     try expectGot(try get(&f, io, url, &.{}), 200, .miss, "ok");
     try expectGot(try get(&f, io, url, &.{}), 200, .hit, "ok");
     {
-        var response = try f.client.send(io, .{ .method = .POST, .url = url, .body = .{ .bytes = "x" } });
+        var response = try f.client.send(io, .{ .method = .post, .url = url, .body = .{ .bytes = "x" } });
         response.deinit(io);
     }
     try expectGot(try get(&f, io, url, &.{}), 200, .miss, "ok");

@@ -99,9 +99,9 @@ test "redirects are followed as RFC 9110 has them, the method and body changed o
             }
             const typed: []const std.http.Header = &.{.{ .name = "Content-Type", .value = "text/plain" }};
             for ([_]struct { []const u8, Method, []const u8 }{
-                .{ "/moved", .POST, "GET||-|-|-" },
-                .{ "/other", .PUT, "GET||-|-|-" },
-                .{ "/keep", .POST, "POST|x|text/plain|-|-" },
+                .{ "/moved", .post, "GET||-|-|-" },
+                .{ "/other", .put, "GET||-|-|-" },
+                .{ "/keep", .post, "POST|x|text/plain|-|-" },
             }) |case| {
                 const body = try get(&client, io, .{ .method = case[1], .url = server.url(&buf, case[0]), .headers = typed, .body = .{ .bytes = "x" } });
                 defer gpa.free(body);
@@ -109,7 +109,7 @@ test "redirects are followed as RFC 9110 has them, the method and body changed o
             }
             {
                 var source: Io.Reader = .fixed("once");
-                try testing.expectError(error.BodyNotReplayable, client.send(io, .{ .method = .POST, .url = server.url(&buf, "/keep"), .body = .{ .reader = .{ .reader = &source, .length = 4 } } }));
+                try testing.expectError(error.BodyNotReplayable, client.send(io, .{ .method = .post, .url = server.url(&buf, "/keep"), .body = .{ .reader = .{ .reader = &source, .length = 4 } } }));
             }
             try testing.expectError(error.TooManyRedirects, client.send(io, .{ .url = server.url(&buf, "/loop") }));
             try testing.expectError(error.TooManyRedirects, client.send(io, .{ .url = server.url(&buf, "/loop"), .redirects = .{ .follow = .{ .max = 2 } } }));
@@ -224,7 +224,7 @@ test "statuses the retries cover are tried again after Retry-After or a backoff,
                 var client: Client = .init(gpa, fast);
                 defer client.deinit(io);
                 var d: Diagnostics = .{};
-                const body = try get(&client, io, .{ .method = .POST, .url = server.url(&buf, "/"), .body = .{ .bytes = "b" }, .diagnostics = &d });
+                const body = try get(&client, io, .{ .method = .post, .url = server.url(&buf, "/"), .body = .{ .bytes = "b" }, .diagnostics = &d });
                 defer gpa.free(body);
                 try testing.expectEqualStrings("POST|b|-|-|-", body);
                 try testing.expectEqual(@as(u8, 1), d.retries);
@@ -292,7 +292,7 @@ test "a connection that fails before any answer is tried again when the request 
                 defer server.stop();
                 var client: Client = .init(gpa, fast);
                 defer client.deinit(io);
-                try testing.expectError(error.ConnectionFailed, client.send(io, .{ .method = .POST, .url = server.url(&buf, "/"), .body = .{ .bytes = "x" } }));
+                try testing.expectError(error.ConnectionFailed, client.send(io, .{ .method = .post, .url = server.url(&buf, "/"), .body = .{ .bytes = "x" } }));
                 try testing.expectEqual(@as(u32, 1), server.requests.load(.monotonic));
             }
         }
@@ -361,7 +361,7 @@ test "a 401 is answered from the caller's credentials once, and the answer sent 
                 var client: Client = .init(gpa, .{ .credentials = store.credentials() });
                 defer client.deinit(io);
                 for (0..3) |_| {
-                    const body = try get(&client, io, .{ .method = .PUT, .url = server.url(&buf, "/repo"), .body = .{ .bytes = "x" } });
+                    const body = try get(&client, io, .{ .method = .put, .url = server.url(&buf, "/repo"), .body = .{ .bytes = "x" } });
                     defer gpa.free(body);
                     try testing.expect(std.mem.startsWith(u8, body, "PUT|x|-|"));
                 }
@@ -655,7 +655,7 @@ test "Expect: 100-continue sends the body on the go-ahead, or never when refused
                 defer server.stop();
                 var client: Client = .init(gpa, .{ .expect_continue_timeout = .literal("50ms") });
                 defer client.deinit(io);
-                var response = try client.send(io, .{ .method = .PUT, .url = server.url(&buf, "/echo"), .body = .{ .bytes = "payload" }, .expect_continue = true });
+                var response = try client.send(io, .{ .method = .put, .url = server.url(&buf, "/echo"), .body = .{ .bytes = "payload" }, .expect_continue = true });
                 defer response.deinit(io);
                 const body = try response.collect(gpa, io, .unlimited);
                 defer gpa.free(body);
@@ -685,7 +685,7 @@ test "a written body waits for the go-ahead too, and goes nowhere when the serve
                 defer server.stop();
                 var client: Client = .init(gpa, .{});
                 defer client.deinit(io);
-                var out = try client.begin(io, .{ .method = .PUT, .url = server.url(&buf, "/echo"), .body = .{ .streamed = .{ .length = 7 } }, .expect_continue = true });
+                var out = try client.begin(io, .{ .method = .put, .url = server.url(&buf, "/echo"), .body = .{ .streamed = .{ .length = 7 } }, .expect_continue = true });
                 defer out.deinit(io);
                 try out.writer().writeAll("payload");
                 var response = try out.finish(io);
@@ -732,7 +732,7 @@ test "a 101 hands the connection over, and so does a CONNECT through a proxy" {
             var proxy_url: [64]u8 = undefined;
             var through: Client = .init(gpa, .{ .proxy = .{ .fixed = try Proxy.parse(arena.allocator(), try std.mem.print(&proxy_url, "127.0.0.1:{d}", .{proxy.port}), .lowercase) } });
             defer through.deinit(io);
-            var tunnel = try through.send(io, .{ .method = .CONNECT, .url = echo_server.url(&buf, "/") });
+            var tunnel = try through.send(io, .{ .method = .connect, .url = echo_server.url(&buf, "/") });
             try testing.expectEqual(std.http.Status.ok, tunnel.status);
             var raw = try tunnel.upgrade(io);
             tunnel.deinit(io);
@@ -821,7 +821,7 @@ test "the observer sees each step, and the prepare hook every attempt" {
             var client: Client = .init(gpa, .{ .observer = recorder.observer(), .prepare = numbering.hook() });
             defer client.deinit(io);
             var buf: [64]u8 = undefined;
-            const body = try get(&client, io, .{ .url = server.url(&buf, "/keep"), .method = .POST, .body = .{ .bytes = "x" } });
+            const body = try get(&client, io, .{ .url = server.url(&buf, "/keep"), .method = .post, .body = .{ .bytes = "x" } });
             defer gpa.free(body);
             try testing.expectEqualStrings("POST|x|2|-|-", body);
             try testing.expectEqualStrings("connected sent head307 redirect reused sent head200 ", recorder.buf[0..recorder.len]);

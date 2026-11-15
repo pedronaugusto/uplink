@@ -38,7 +38,7 @@ fn exchange(io: Io, t: *Dns.Transport, query: []const u8, answer: []u8) Dns.Exch
     sent[1] = 0;
     var response = d.client.send(io, .{
         .url = d.url,
-        .method = .POST,
+        .method = .post,
         .headers = &.{ .{ .name = "Content-Type", .value = media_type }, .{ .name = "Accept", .value = media_type } },
         .body = .{ .bytes = sent[0..query.len] },
     }) catch |err| return switch (err) {

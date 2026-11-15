@@ -1,7 +1,8 @@
 //! A request method: any token (RFC 9110 §9). The nine standard methods are
-//! constants; an extension such as `PROPFIND` or `MKCOL` is made with
-//! `parse`. Methods are compared as written: RFC 9110 makes them
-//! case-sensitive.
+//! constants, named in Zig's case for a value and spelled on the wire as
+//! RFC 9110 spells them (`get` sends `GET`); an extension such as
+//! `PROPFIND` or `MKCOL` is made with `parse`. Methods are compared as
+//! written: RFC 9110 makes them case-sensitive.
 
 const std = @import("std");
 const fields = @import("fields.zig");
@@ -11,24 +12,15 @@ const Method = @This();
 /// The method's name, as sent on the request line.
 name: []const u8,
 
-// glint-ignore: Z006 -- the method as RFC 9110 spells it, which is how a caller writes it
-pub const GET: Method = .{ .name = "GET" };
-// glint-ignore: Z006 -- the method as RFC 9110 spells it, which is how a caller writes it
-pub const HEAD: Method = .{ .name = "HEAD" };
-// glint-ignore: Z006 -- the method as RFC 9110 spells it, which is how a caller writes it
-pub const POST: Method = .{ .name = "POST" };
-// glint-ignore: Z006 -- the method as RFC 9110 spells it, which is how a caller writes it
-pub const PUT: Method = .{ .name = "PUT" };
-// glint-ignore: Z006 -- the method as RFC 9110 spells it, which is how a caller writes it
-pub const DELETE: Method = .{ .name = "DELETE" };
-// glint-ignore: Z006 -- the method as RFC 9110 spells it, which is how a caller writes it
-pub const CONNECT: Method = .{ .name = "CONNECT" };
-// glint-ignore: Z006 -- the method as RFC 9110 spells it, which is how a caller writes it
-pub const OPTIONS: Method = .{ .name = "OPTIONS" };
-// glint-ignore: Z006 -- the method as RFC 9110 spells it, which is how a caller writes it
-pub const TRACE: Method = .{ .name = "TRACE" };
-// glint-ignore: Z006 -- the method as RFC 9110 spells it, which is how a caller writes it
-pub const PATCH: Method = .{ .name = "PATCH" };
+pub const get: Method = .{ .name = "GET" };
+pub const head: Method = .{ .name = "HEAD" };
+pub const post: Method = .{ .name = "POST" };
+pub const put: Method = .{ .name = "PUT" };
+pub const delete: Method = .{ .name = "DELETE" };
+pub const connect: Method = .{ .name = "CONNECT" };
+pub const options: Method = .{ .name = "OPTIONS" };
+pub const trace: Method = .{ .name = "TRACE" };
+pub const patch: Method = .{ .name = "PATCH" };
 
 /// Errors from `parse`.
 pub const ParseError = error{
@@ -51,19 +43,19 @@ pub fn eql(a: Method, b: Method) bool {
 /// Whether the method is safe (RFC 9110 §9.2.1): it asks for nothing to
 /// change.
 pub fn safe(m: Method) bool {
-    return m.eql(GET) or m.eql(HEAD) or m.eql(OPTIONS) or m.eql(TRACE);
+    return m.eql(get) or m.eql(head) or m.eql(options) or m.eql(trace);
 }
 
 /// Whether the method is idempotent (RFC 9110 §9.2.2): sending it twice is
 /// sending it once, so a request lost to a broken connection may be sent
 /// again.
 pub fn idempotent(m: Method) bool {
-    return m.safe() or m.eql(PUT) or m.eql(DELETE);
+    return m.safe() or m.eql(put) or m.eql(delete);
 }
 
 /// Whether a response to this method never has a body.
 pub fn bodiless(m: Method) bool {
-    return m.eql(HEAD);
+    return m.eql(head);
 }
 
 const testing = std.testing;
@@ -73,10 +65,10 @@ test "methods are tokens, compared with case, and classed as RFC 9110 classes th
     try testing.expectError(error.InvalidMethod, parse(""));
     try testing.expectError(error.InvalidMethod, parse("GE T"));
     try testing.expectError(error.InvalidMethod, parse("GET\r\n"));
-    try testing.expect(!GET.eql(try parse("get")));
-    try testing.expect(GET.safe() and HEAD.safe() and OPTIONS.safe() and TRACE.safe());
-    try testing.expect(!POST.safe() and !PUT.safe());
-    try testing.expect(PUT.idempotent() and DELETE.idempotent() and GET.idempotent());
-    try testing.expect(!POST.idempotent() and !PATCH.idempotent() and !CONNECT.idempotent());
+    try testing.expect(!get.eql(try parse("get")));
+    try testing.expect(get.safe() and head.safe() and options.safe() and trace.safe());
+    try testing.expect(!post.safe() and !put.safe());
+    try testing.expect(put.idempotent() and delete.idempotent() and get.idempotent());
+    try testing.expect(!post.idempotent() and !patch.idempotent() and !connect.idempotent());
     try testing.expect(!(try parse("PROPFIND")).idempotent());
 }

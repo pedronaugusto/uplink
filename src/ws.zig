@@ -78,9 +78,9 @@ pub fn accept(out: *Accepted, gpa: Allocator, io: Io, request: *ServerRequest, r
     const h = &request.headers;
     const over_h2 = request.version == .h2;
     const handshake = if (over_h2)
-        request.method.eql(.CONNECT) and std.mem.eql(u8, request.protocol orelse "", "websocket")
+        request.method.eql(.connect) and std.mem.eql(u8, request.protocol orelse "", "websocket")
     else
-        request.method.eql(.GET) and request.version == .http1_1 and
+        request.method.eql(.get) and request.version == .http1_1 and
             h.hasToken("upgrade", "websocket") and h.hasToken("connection", "upgrade");
     const key = h.get("sec-websocket-key") orelse "";
     if (!handshake or (!over_h2 and !ws.validKey(key))) return refuse(io, response, .bad_request, error.NotWebSocket);
@@ -286,7 +286,7 @@ fn open(out: *Opened, client: *Client, gpa: Allocator, io: Io, http_url: []const
     const extra = @min(options.headers.len, all.len - n);
     @memcpy(all[n..][0..extra], options.headers[0..extra]);
     var response = try client.send(io, .{
-        .method = if (over_h2) .CONNECT else .GET,
+        .method = if (over_h2) .connect else .get,
         .url = http_url,
         .headers = all[0 .. n + extra],
         .protocol = if (over_h2) "websocket" else null,

@@ -297,7 +297,7 @@ fn answer(session: *Session, handler: *Handler, st: *Stream) void {
     const io = session.socket.io;
     defer finish(session, st);
     const head = h2.message.checkRequest(st.fields).?; // `startStream` refused a malformed head
-    const target_text = if (head.method.eql(.CONNECT) and head.protocol == null) head.authority.? else head.path;
+    const target_text = if (head.method.eql(.connect) and head.protocol == null) head.authority.? else head.path;
     const parsed = if (head.protocol != null) Request.Target.parseExtended(target_text) else Request.Target.parse(head.method, target_text);
     const target = parsed catch return st.reset(io, .protocol_error);
     // Whether the request's data is still to come, as the reading task left
@@ -331,7 +331,7 @@ fn answer(session: *Session, handler: *Handler, st: *Stream) void {
         break :codings null;
     } else null;
     defer if (request.decoder) |*d| d.deinit(io, context.gpa, &context.buffers, &context.windows);
-    var response: Response = .init(session.socket, head.method.eql(.HEAD), false, request.headers.getKnown(.@"accept-encoding"));
+    var response: Response = .init(session.socket, head.method.eql(.head), false, request.headers.getKnown(.@"accept-encoding"));
     response.stream = st;
     defer response.release(io);
     sync.bump(&context.counters.requests);

@@ -493,7 +493,7 @@ pub fn fromStream(io: Io, ctx: *Context, pool: *Pool, h: *H2, st: *H2.Stream, op
     const code = st.status.?;
     // A 2xx to an extended `CONNECT`: the stream's data is the tunnel's,
     // no body, and never decoded.
-    const tunnel = options.method.eql(.CONNECT) and code / 100 == 2;
+    const tunnel = options.method.eql(.connect) and code / 100 == 2;
     const bodiless = tunnel or options.method.bodiless() or code == 204 or code == 304;
     st.read_deadline = options.deadline;
     var response: Response = .{
@@ -565,7 +565,7 @@ pub fn receive(io: Io, ctx: *Context, pool: *Pool, conn: *Connection, options: R
             .head_buffer = head.buffer,
             .body_buffer = head.body_buffer,
             .keep_alive = framing.keep_alive,
-            .tunnel = options.method.eql(.CONNECT),
+            .tunnel = options.method.eql(.connect),
             .body = .init(Io.Reader.ending, framing.framing, head.body_buffer),
         };
         if (options.decompress) try response.planDecoding(io);

@@ -318,7 +318,7 @@ pub fn responseFraming(method: Method, head: *const ResponseHead) FramingError!R
     const code = @backingInt(head.status);
     // A switch or a tunnel: what follows is no longer HTTP, so the
     // connection carries no other exchange, taken over or not.
-    if (code == 101 or (method.eql(.CONNECT) and code / 100 == 2)) return .{ .framing = .none, .keep_alive = false };
+    if (code == 101 or (method.eql(.connect) and code / 100 == 2)) return .{ .framing = .none, .keep_alive = false };
     if (method.bodiless() or code / 100 == 1 or code == 204 or code == 304) return .{ .framing = .none, .keep_alive = keep_alive };
     if (head.headers.getKnown(.@"transfer-encoding") != null) {
         const chunked_last = try chunkedLast(&head.headers);
@@ -815,10 +815,10 @@ test "a response head is parsed in place, its fields indexed and its framing dec
     try testing.expectEqual(Version.http1_1, head.version);
     try testing.expectEqualStrings("OK", head.reason);
     try testing.expectEqualStrings("/x", head.headers.get("location").?);
-    const f = try responseFraming(.GET, head);
+    const f = try responseFraming(.get, head);
     try testing.expectEqual(@as(u64, 12), f.framing.length);
     try testing.expect(f.keep_alive);
-    try testing.expectEqual(Framing.none, (try responseFraming(.HEAD, head)).framing);
+    try testing.expectEqual(Framing.none, (try responseFraming(.head, head)).framing);
 }
 
 test "a head not yet whole is asked for more, and one past the limit is refused" {
@@ -866,7 +866,7 @@ test "a request is read strictly: bare LF, folding and spaced names are refused"
     var ok = "\r\nGET /a?b HTTP/1.1\r\nHost: x\r\n\r\n".*;
     const parsed = (try parseRequest(&ok, &fields, .{})).?;
     try testing.expectEqual(ok.len, parsed.len);
-    try testing.expect(parsed.head.method.eql(.GET));
+    try testing.expect(parsed.head.method.eql(.get));
     try testing.expectEqualStrings("/a?b", parsed.head.target);
     var bare = "GET / HTTP/1.1\nHost: x\r\n\r\n".*;
     try testing.expectError(error.BareLineFeed, parseRequest(&bare, &fields, .{}));
@@ -922,18 +922,18 @@ test "framing follows RFC 9112 §6.3 in its order" {
     var fields: [8]Field = undefined;
     const Case = struct { []const u8, Method, Framing, bool };
     const cases = [_]Case{
-        .{ "HTTP/1.1 204 No Content\r\nContent-Length: 5\r\n\r\n", .GET, .none, true },
-        .{ "HTTP/1.1 304 Not Modified\r\n\r\n", .GET, .none, true },
-        .{ "HTTP/1.1 101 Switching\r\n\r\n", .GET, .none, false },
-        .{ "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\nContent-Length: 5\r\n\r\n", .GET, .chunked, false },
-        .{ "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked, gzip\r\n\r\n", .GET, .until_close, false },
-        .{ "HTTP/1.0 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n", .GET, .chunked, false },
-        .{ "HTTP/1.1 200 OK\r\nContent-Length: 5, 5\r\nContent-Length: 5\r\n\r\n", .GET, .{ .length = 5 }, true },
-        .{ "HTTP/1.1 200 OK\r\n\r\n", .GET, .until_close, false },
-        .{ "HTTP/1.0 200 OK\r\nContent-Length: 1\r\n\r\n", .GET, .{ .length = 1 }, false },
-        .{ "HTTP/1.0 200 OK\r\nContent-Length: 1\r\nConnection: Keep-Alive\r\n\r\n", .GET, .{ .length = 1 }, true },
-        .{ "HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: Upgrade, Close\r\n\r\n", .GET, .{ .length = 1 }, false },
-        .{ "HTTP/1.1 200 Connection established\r\n\r\n", .CONNECT, .none, false },
+        .{ "HTTP/1.1 204 No Content\r\nContent-Length: 5\r\n\r\n", .get, .none, true },
+        .{ "HTTP/1.1 304 Not Modified\r\n\r\n", .get, .none, true },
+        .{ "HTTP/1.1 101 Switching\r\n\r\n", .get, .none, false },
+        .{ "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\nContent-Length: 5\r\n\r\n", .get, .chunked, false },
+        .{ "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked, gzip\r\n\r\n", .get, .until_close, false },
+        .{ "HTTP/1.0 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n", .get, .chunked, false },
+        .{ "HTTP/1.1 200 OK\r\nContent-Length: 5, 5\r\nContent-Length: 5\r\n\r\n", .get, .{ .length = 5 }, true },
+        .{ "HTTP/1.1 200 OK\r\n\r\n", .get, .until_close, false },
+        .{ "HTTP/1.0 200 OK\r\nContent-Length: 1\r\n\r\n", .get, .{ .length = 1 }, false },
+        .{ "HTTP/1.0 200 OK\r\nContent-Length: 1\r\nConnection: Keep-Alive\r\n\r\n", .get, .{ .length = 1 }, true },
+        .{ "HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: Upgrade, Close\r\n\r\n", .get, .{ .length = 1 }, false },
+        .{ "HTTP/1.1 200 Connection established\r\n\r\n", .connect, .none, false },
     };
     for (cases) |case| {
         const copy = try testing.allocator.dupe(u8, case[0]);
@@ -956,7 +956,7 @@ test "framing follows RFC 9112 §6.3 in its order" {
     }) |case| {
         var bytes = case[0].*;
         const parsed = (try parseResponse(&bytes, &fields, .{})).?;
-        try testing.expectError(case[1], responseFraming(.GET, &parsed.head));
+        try testing.expectError(case[1], responseFraming(.get, &parsed.head));
     }
 }
 
@@ -1070,7 +1070,7 @@ test "a request head is written with its framing, and nothing unchecked reaches 
     var buffer: [512]u8 = undefined;
     var w: Io.Writer = .fixed(&buffer);
     try writeRequestHead(&w, .{
-        .method = .POST,
+        .method = .post,
         .target = &.{"/upload?x=1"},
         .host = "example.com:8080",
         .own = &.{.{ .name = "User-Agent", .value = "uplink" }},
@@ -1082,14 +1082,14 @@ test "a request head is written with its framing, and nothing unchecked reaches 
         w.buffered(),
     );
     const bad = [_]struct { RequestHeadOut, WriteHeadError }{
-        .{ .{ .method = .GET, .target = &.{"/a b"}, .host = "h" }, error.InvalidRequestLine },
-        .{ .{ .method = .GET, .target = &.{"/a\r\nX: y"}, .host = "h" }, error.InvalidRequestLine },
-        .{ .{ .method = .GET, .target = &.{""}, .host = "h" }, error.InvalidRequestLine },
+        .{ .{ .method = .get, .target = &.{"/a b"}, .host = "h" }, error.InvalidRequestLine },
+        .{ .{ .method = .get, .target = &.{"/a\r\nX: y"}, .host = "h" }, error.InvalidRequestLine },
+        .{ .{ .method = .get, .target = &.{""}, .host = "h" }, error.InvalidRequestLine },
         .{ .{ .method = .{ .name = "G T" }, .target = &.{"/"}, .host = "h" }, error.InvalidRequestLine },
-        .{ .{ .method = .GET, .target = &.{"/"}, .host = "h\r\nX: y" }, error.InvalidHeader },
-        .{ .{ .method = .GET, .target = &.{"/"}, .host = "h", .headers = &.{.{ .name = "X", .value = "a\r\nInjected: 1" }} }, error.InvalidHeader },
-        .{ .{ .method = .GET, .target = &.{"/"}, .host = "h", .headers = &.{.{ .name = "X:Y", .value = "a" }} }, error.InvalidHeader },
-        .{ .{ .method = .GET, .target = &.{"/"}, .host = "h", .headers = &.{.{ .name = "X", .value = "a\x00" }} }, error.InvalidHeader },
+        .{ .{ .method = .get, .target = &.{"/"}, .host = "h\r\nX: y" }, error.InvalidHeader },
+        .{ .{ .method = .get, .target = &.{"/"}, .host = "h", .headers = &.{.{ .name = "X", .value = "a\r\nInjected: 1" }} }, error.InvalidHeader },
+        .{ .{ .method = .get, .target = &.{"/"}, .host = "h", .headers = &.{.{ .name = "X:Y", .value = "a" }} }, error.InvalidHeader },
+        .{ .{ .method = .get, .target = &.{"/"}, .host = "h", .headers = &.{.{ .name = "X", .value = "a\x00" }} }, error.InvalidHeader },
     };
     for (bad) |case| {
         w = .fixed(&buffer);
@@ -1106,10 +1106,10 @@ test "a written request head parses back to what was written" {
         .{ .name = "X-Empty", .value = "" },
         .{ .name = "X-Inner", .value = "a \t b" },
     };
-    try writeRequestHead(&w, .{ .method = .PUT, .target = &.{ "/", "p" }, .host = "h", .headers = &headers, .framing = .chunked });
+    try writeRequestHead(&w, .{ .method = .put, .target = &.{ "/", "p" }, .host = "h", .headers = &headers, .framing = .chunked });
     var fields: [8]Field = undefined;
     const parsed = (try parseRequest(w.buffered(), &fields, .{})).?;
-    try testing.expect(parsed.head.method.eql(.PUT));
+    try testing.expect(parsed.head.method.eql(.put));
     try testing.expectEqualStrings("h", parsed.head.headers.get("host").?);
     for (headers, 1..) |h, i| {
         try testing.expectEqualStrings(h.name, parsed.head.headers.fields[i].name);
@@ -1158,7 +1158,7 @@ test "fuzz: any response head is parsed or refused by name, and a parsed one hol
                 try testing.expect(fields_mod.isToken(f.name));
                 try testing.expect(!fields_mod.hasControl(f.value));
             }
-            _ = responseFraming(.GET, &parsed.head) catch return;
+            _ = responseFraming(.get, &parsed.head) catch return;
         }
     }.one, .{});
 }
@@ -1202,7 +1202,7 @@ test "a request target's writer refuses exactly the bytes its reader refuses" {
         const piece = [_]u8{c};
         var out_buffer: [64]u8 = undefined;
         var w: Io.Writer = .fixed(&out_buffer);
-        const written = if (writeRequestHead(&w, .{ .method = .GET, .target = &.{ "/", &piece }, .host = "h" })) |_| true else |err| refused: {
+        const written = if (writeRequestHead(&w, .{ .method = .get, .target = &.{ "/", &piece }, .host = "h" })) |_| true else |err| refused: {
             try testing.expectEqual(error.InvalidRequestLine, err);
             try testing.expectEqual(0, w.buffered().len);
             break :refused false;

@@ -211,7 +211,7 @@ test "a client that expects 100 Continue gets it, and its body is echoed" {
             var client: Client = .init(gpa, .{ .expect_continue_timeout = .literal("10s") });
             defer client.deinit(io);
             var buf: [64]u8 = undefined;
-            var response = try client.send(io, .{ .method = .POST, .url = running.url(&buf, "/"), .body = .{ .bytes = "payload" }, .expect_continue = true });
+            var response = try client.send(io, .{ .method = .post, .url = running.url(&buf, "/"), .body = .{ .bytes = "payload" }, .expect_continue = true });
             defer response.deinit(io);
             const body = try response.collect(gpa, io, .limited(1 << 20));
             defer gpa.free(body);
@@ -1204,14 +1204,14 @@ test "the client speaks HTTP/2 by prior knowledge, its requests over one connect
                 try testing.expectEqualStrings("h2 GET /x 0", body);
             }
             {
-                var response = try client.send(io, .{ .url = running.url(&buf, "/post"), .method = .POST, .body = .{ .bytes = "twelve bytes" } });
+                var response = try client.send(io, .{ .url = running.url(&buf, "/post"), .method = .post, .body = .{ .bytes = "twelve bytes" } });
                 defer response.deinit(io);
                 const body = try response.collect(gpa, io, .limited(1 << 20));
                 defer gpa.free(body);
                 try testing.expectEqualStrings("h2 POST /post 12", body);
             }
             {
-                var response = try client.send(io, .{ .url = running.url(&buf, "/head"), .method = .HEAD });
+                var response = try client.send(io, .{ .url = running.url(&buf, "/head"), .method = .head });
                 defer response.deinit(io);
                 try testing.expectEqual(std.http.Status.ok, response.status);
                 const body = try response.collect(gpa, io, .limited(1 << 20));
@@ -1237,7 +1237,7 @@ test "a request in HTTP/1.1 asks to upgrade, and the connection goes on in HTTP/
             // A request with a body is answered in HTTP/1.1, as Apache's and
             // nghttpx's answer it.
             {
-                var response = try client.send(io, .{ .url = running.url(&buf, "/post"), .method = .POST, .body = .{ .bytes = "twelve bytes" } });
+                var response = try client.send(io, .{ .url = running.url(&buf, "/post"), .method = .post, .body = .{ .bytes = "twelve bytes" } });
                 defer response.deinit(io);
                 try testing.expectEqual(.http1_1, response.version);
                 const body = try response.collect(gpa, io, .limited(1 << 20));
@@ -1256,7 +1256,7 @@ test "a request in HTTP/1.1 asks to upgrade, and the connection goes on in HTTP/
                 try testing.expectEqualStrings(want, body);
             }
             {
-                var response = try client.send(io, .{ .url = running.url(&buf, "/echo"), .method = .POST, .body = .{ .bytes = "over h2" } });
+                var response = try client.send(io, .{ .url = running.url(&buf, "/echo"), .method = .post, .body = .{ .bytes = "over h2" } });
                 defer response.deinit(io);
                 try testing.expectEqual(.h2, response.version);
                 const body = try response.collect(gpa, io, .limited(1 << 20));
@@ -1269,7 +1269,7 @@ test "a request in HTTP/1.1 asks to upgrade, and the connection goes on in HTTP/
             // A `HEAD` that switches a connection has no body on stream 1.
             var other: Client = .init(gpa, .{ .http2 = .upgrade });
             defer other.deinit(io);
-            var head = try other.send(io, .{ .url = running.url(&buf, "/head"), .method = .HEAD });
+            var head = try other.send(io, .{ .url = running.url(&buf, "/head"), .method = .head });
             defer head.deinit(io);
             try testing.expectEqual(.h2, head.version);
             const none = try head.collect(gpa, io, .limited(1 << 20));
@@ -1334,7 +1334,7 @@ test "bodies past every window go both ways over HTTP/2, and trailers come after
             defer gpa.free(big);
             for (big, 0..) |*b, i| b.* = @truncate(i *% 7);
             {
-                var response = try client.send(io, .{ .url = running.url(&buf, "/echo"), .method = .POST, .body = .{ .bytes = big } });
+                var response = try client.send(io, .{ .url = running.url(&buf, "/echo"), .method = .post, .body = .{ .bytes = big } });
                 defer response.deinit(io);
                 const body = try response.collect(gpa, io, .limited(16 << 20));
                 defer gpa.free(body);
@@ -1342,7 +1342,7 @@ test "bodies past every window go both ways over HTTP/2, and trailers come after
             }
             {
                 var source: Io.Reader = .fixed(big[0 .. 1 << 20]);
-                var response = try client.send(io, .{ .url = running.url(&buf, "/trailers"), .method = .PUT, .headers = &.{.{ .name = "X-Sent", .value = "yes" }}, .body = .{ .reader = .{ .reader = &source, .length = null } } });
+                var response = try client.send(io, .{ .url = running.url(&buf, "/trailers"), .method = .put, .headers = &.{.{ .name = "X-Sent", .value = "yes" }}, .body = .{ .reader = .{ .reader = &source, .length = null } } });
                 defer response.deinit(io);
                 const body = try response.collect(gpa, io, .limited(16 << 20));
                 defer gpa.free(body);
@@ -1350,7 +1350,7 @@ test "bodies past every window go both ways over HTTP/2, and trailers come after
                 try testing.expectEqualStrings("yes", response.trailers().?.get("x-seen").?);
             }
             {
-                var out = try client.begin(io, .{ .url = running.url(&buf, "/echo"), .method = .POST, .body = .{ .streamed = .{ .length = 5000 } }, .expect_continue = true });
+                var out = try client.begin(io, .{ .url = running.url(&buf, "/echo"), .method = .post, .body = .{ .streamed = .{ .length = 5000 } }, .expect_continue = true });
                 defer out.deinit(io);
                 try out.writer().splatByteAll('z', 5000);
                 var response = try out.finish(io);
@@ -1385,7 +1385,7 @@ test "requests at once share one HTTP/2 connection" {
                     const tio = test_io.io();
                     var payload: [20000]u8 = undefined;
                     @memset(&payload, @truncate(n));
-                    var response = c.send(tio, .{ .url = u, .method = .POST, .body = .{ .bytes = &payload } }) catch return;
+                    var response = c.send(tio, .{ .url = u, .method = .post, .body = .{ .bytes = &payload } }) catch return;
                     defer response.deinit(tio);
                     const body = response.collect(testing.allocator, tio, .limited(1 << 20)) catch return;
                     defer testing.allocator.free(body);
@@ -1434,7 +1434,7 @@ test "a query goes as an HTTP POST and its answer comes back with the query's id
             const Answer = struct {
                 /// One A record for any question, its owner the question's name.
                 fn handle(hio: Io, request: *Request, response: *Response) anyerror!void {
-                    if (!request.method.eql(.POST) or !std.mem.eql(u8, request.headers.get("content-type") orelse "", media_type)) {
+                    if (!request.method.eql(.post) or !std.mem.eql(u8, request.headers.get("content-type") orelse "", media_type)) {
                         response.status = .bad_request;
                         return response.send(hio, "");
                     }
@@ -1517,7 +1517,7 @@ test "over TLS both ends agree HTTP/2 by ALPN, and requests at once share its co
                     const payload = testing.allocator.alloc(u8, 300 << 10) catch return;
                     defer testing.allocator.free(payload);
                     for (payload, 0..) |*b, i| b.* = @truncate(i *% (n + 3));
-                    var response = c.send(tio, .{ .url = u, .method = .POST, .body = .{ .bytes = payload } }) catch return;
+                    var response = c.send(tio, .{ .url = u, .method = .post, .body = .{ .bytes = payload } }) catch return;
                     defer response.deinit(tio);
                     const body = response.collect(testing.allocator, tio, .limited(1 << 20)) catch return;
                     defer testing.allocator.free(body);

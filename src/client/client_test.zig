@@ -56,7 +56,7 @@ test "a request's head is written exactly, with nothing unchecked" {
             defer client.deinit(io);
             var buf: [64]u8 = undefined;
             var response = try client.send(io, .{
-                .method = .POST,
+                .method = .post,
                 .url = server.url(&buf, "/repo.git/git-upload-pack?x=1#frag"),
                 .headers = &.{.{ .name = "Git-Protocol", .value = "version=2" }},
                 .body = .{ .bytes = "0000" },
@@ -110,9 +110,9 @@ test "an extended CONNECT on a connection in HTTP/1.1 is refused with nothing se
             var client: Client = .init(testing.allocator, .{});
             defer client.deinit(io);
             var buf: [64]u8 = undefined;
-            try testing.expectError(error.ExtendedConnectUnsupported, client.send(io, .{ .method = .CONNECT, .url = server.url(&buf, "/"), .protocol = "websocket" }));
+            try testing.expectError(error.ExtendedConnectUnsupported, client.send(io, .{ .method = .connect, .url = server.url(&buf, "/"), .protocol = "websocket" }));
             try testing.expectError(error.InvalidHeader, client.send(io, .{ .url = server.url(&buf, "/"), .protocol = "websocket" }));
-            try testing.expectError(error.InvalidHeader, client.send(io, .{ .method = .CONNECT, .url = server.url(&buf, "/"), .protocol = "web socket" }));
+            try testing.expectError(error.InvalidHeader, client.send(io, .{ .method = .connect, .url = server.url(&buf, "/"), .protocol = "web socket" }));
             const body = try get(&client, io, server.url(&buf, "/"));
             defer testing.allocator.free(body);
             try testing.expectEqualStrings("ok", body);
@@ -390,7 +390,7 @@ test "a range or a HEAD is asked for without a coding, whose bytes and length it
             var buf: [64]u8 = undefined;
             var ranged = try client.send(io, .{ .url = server.url(&buf, "/object"), .headers = &.{.{ .name = "Range", .value = "bytes=10-" }} });
             ranged.deinit(io);
-            var head = try client.send(io, .{ .method = .HEAD, .url = server.url(&buf, "/object") });
+            var head = try client.send(io, .{ .method = .head, .url = server.url(&buf, "/object") });
             head.deinit(io);
             var plain = try client.send(io, .{ .url = server.url(&buf, "/object") });
             plain.deinit(io);
@@ -445,7 +445,7 @@ test "a body from a reader goes with its length, or in chunks, and a short one i
             const url = server.url(&buf, "/upload");
             {
                 var source: Io.Reader = .fixed("exactly this");
-                var response = try client.send(io, .{ .method = .PUT, .url = url, .body = .{ .reader = .{ .reader = &source, .length = 12 } } });
+                var response = try client.send(io, .{ .method = .put, .url = url, .body = .{ .reader = .{ .reader = &source, .length = 12 } } });
                 defer response.deinit(io);
                 const body = try response.collect(testing.allocator, io, .unlimited);
                 defer testing.allocator.free(body);
@@ -454,7 +454,7 @@ test "a body from a reader goes with its length, or in chunks, and a short one i
             }
             {
                 var source: Io.Reader = .fixed("streamed to its end");
-                var response = try client.send(io, .{ .method = .POST, .url = url, .body = .{ .reader = .{ .reader = &source } } });
+                var response = try client.send(io, .{ .method = .post, .url = url, .body = .{ .reader = .{ .reader = &source } } });
                 defer response.deinit(io);
                 const body = try response.collect(testing.allocator, io, .unlimited);
                 defer testing.allocator.free(body);
@@ -462,7 +462,7 @@ test "a body from a reader goes with its length, or in chunks, and a short one i
                 try testing.expectEqualStrings("true", response.headers.get("x-chunked").?);
             }
             var short: Io.Reader = .fixed("short");
-            try testing.expectError(error.BodyIncomplete, client.send(io, .{ .method = .PUT, .url = url, .body = .{ .reader = .{ .reader = &short, .length = 10 } } }));
+            try testing.expectError(error.BodyIncomplete, client.send(io, .{ .method = .put, .url = url, .body = .{ .reader = .{ .reader = &short, .length = 10 } } }));
             try testing.expectError(error.InvalidBody, client.send(io, .{ .url = url, .body = .{ .streamed = .{} } }));
             try testing.expectEqual(@as(u32, 0), client.stats().in_use);
         }
@@ -480,7 +480,7 @@ test "a body the caller writes goes exactly at its length, or in chunks" {
             var buf: [64]u8 = undefined;
             const url = server.url(&buf, "/upload");
             {
-                var out = try client.begin(io, .{ .method = .POST, .url = url, .body = .{ .streamed = .{ .length = 11 } } });
+                var out = try client.begin(io, .{ .method = .post, .url = url, .body = .{ .streamed = .{ .length = 11 } } });
                 defer out.deinit(io);
                 try out.writer().writeAll("hello ");
                 try out.writer().writeAll("world");
@@ -491,7 +491,7 @@ test "a body the caller writes goes exactly at its length, or in chunks" {
                 try testing.expectEqualStrings("hello world", body);
             }
             {
-                var out = try client.begin(io, .{ .method = .POST, .url = url });
+                var out = try client.begin(io, .{ .method = .post, .url = url });
                 defer out.deinit(io);
                 for (0..100) |_| try out.writer().writeAll("0123456789");
                 var response = try out.finish(io);
@@ -500,14 +500,14 @@ test "a body the caller writes goes exactly at its length, or in chunks" {
                 try testing.expectError(error.ExchangeOver, out.finish(io));
             }
             {
-                var out = try client.begin(io, .{ .method = .POST, .url = url, .body = .{ .streamed = .{ .length = 3 } } });
+                var out = try client.begin(io, .{ .method = .post, .url = url, .body = .{ .streamed = .{ .length = 3 } } });
                 defer out.deinit(io);
                 // Past the length: the write fails, and `finish` says why.
                 try testing.expectError(error.WriteFailed, writeAndFlush(out.writer(), "four"));
                 try testing.expectError(error.BodyTooLong, out.finish(io));
             }
             {
-                var out = try client.begin(io, .{ .method = .POST, .url = url, .body = .{ .streamed = .{ .length = 3 } } });
+                var out = try client.begin(io, .{ .method = .post, .url = url, .body = .{ .streamed = .{ .length = 3 } } });
                 defer out.deinit(io);
                 try out.writer().writeAll("tw");
                 try testing.expectError(error.BodyIncomplete, out.finish(io));
@@ -537,7 +537,7 @@ test "a body write a cancel stops is Canceled at finish, not a body cut short" {
             const io = seamed.over(faults.io());
             var client: Client = .init(gpa, .{});
             defer client.deinit(io);
-            var out = try client.begin(io, .{ .method = .POST, .url = url, .body = .{ .streamed = .{ .length = body.len } } });
+            var out = try client.begin(io, .{ .method = .post, .url = url, .body = .{ .streamed = .{ .length = body.len } } });
             defer out.deinit(io);
             try testing.expectError(error.WriteFailed, out.writer().writeAll(body));
             try testing.expectError(error.Canceled, out.finish(io));
@@ -586,7 +586,7 @@ test "a kept connection the server closed is noticed before it is used, or repla
                 const again = try get(&client, io, server.url(&buf, "/keep"));
                 testing.allocator.free(again);
                 try testing.expectEqual(@as(u64, 2), client.stats().connections_opened);
-                try testing.expectError(error.ConnectionFailed, client.send(io, .{ .method = .POST, .url = server.url(&buf, "/keep"), .body = .{ .bytes = "x" } }));
+                try testing.expectError(error.ConnectionFailed, client.send(io, .{ .method = .post, .url = server.url(&buf, "/keep"), .body = .{ .bytes = "x" } }));
                 try testing.expectEqual(@as(u32, 0), client.stats().in_use);
             }
         }
@@ -747,7 +747,7 @@ test "a small exchange on a kept connection is one write and one read, and a loo
     const url = server.url(&buf, "/");
     for (0..11) |i| {
         if (i == 1) counted.state = .{};
-        var response = try client.send(io, .{ .method = .POST, .url = url, .body = .{ .bytes = "a body sent with its head" } });
+        var response = try client.send(io, .{ .method = .post, .url = url, .body = .{ .bytes = "a body sent with its head" } });
         defer response.deinit(io);
         var body: [8]u8 = undefined;
         _ = try response.reader(io).readSliceShort(&body);
@@ -983,7 +983,7 @@ const Answered = struct {
 
     fn upload(client: *Client, url: []const u8, body: []const u8) void {
         const io = test_io.io();
-        var response = client.send(io, .{ .url = url, .method = .POST, .body = .{ .bytes = body } }) catch return;
+        var response = client.send(io, .{ .url = url, .method = .post, .body = .{ .bytes = body } }) catch return;
         response.deinit(io);
     }
 };

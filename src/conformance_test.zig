@@ -63,7 +63,7 @@ fn echo(io: Io, request: *Request, response: *Response) anyerror!void {
 
 /// The body of a POST of `sent` to `url`, as the response says and `version`.
 fn post(client: *Client, io: Io, url: []const u8, sent: []const u8, version: Version) !void {
-    var response = try client.send(io, .{ .method = .POST, .url = url, .body = .{ .bytes = sent } });
+    var response = try client.send(io, .{ .method = .post, .url = url, .body = .{ .bytes = sent } });
     defer response.deinit(io);
     try testing.expectEqual(std.http.Status.ok, response.status);
     try testing.expectEqual(version, response.version);

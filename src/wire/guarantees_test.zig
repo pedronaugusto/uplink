@@ -245,7 +245,7 @@ fn anyHeadOut(_: void, case: *shakedown.Case) !void {
     const own = [_]std.http.Header{.{ .name = draw(s, &b[1]), .value = draw(s, &b[2]) }};
     const headers = [_]std.http.Header{ .{ .name = draw(s, &b[3]), .value = draw(s, &b[4]) }, .{ .name = "Accept", .value = draw(s, &b[5]) } };
     const head: h1.RequestHeadOut = .{
-        .method = shakedown.gen.oneOf(s, Method, &.{ .GET, .POST, .HEAD }),
+        .method = shakedown.gen.oneOf(s, Method, &.{ .get, .post, .head }),
         .target = &target,
         .host = draw(s, &b[6]),
         .own = &own,

@@ -62,7 +62,7 @@ fn answer(io: Io, request: *uplink.server.Request, response: *uplink.server.Resp
     defer std.heap.smp_allocator.free(body);
     try response.header("Content-Type", "text/plain");
     if (body.len != 0) return response.send(io, body);
-    if (request.method.eql(.HEAD) or request.method.eql(.GET)) return response.send(io, "OK");
+    if (request.method.eql(.head) or request.method.eql(.get)) return response.send(io, "OK");
     return response.send(io, "");
 }
 

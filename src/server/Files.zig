@@ -56,7 +56,7 @@ fn handled(h: *Handler, io: Io, request: *Request, response: *Response) anyerror
 
 /// Answer `request` from the directory.
 pub fn serve(f: *const Files, io: Io, request: *Request, response: *Response) anyerror!void {
-    if (!request.method.eql(.GET) and !request.method.eql(.HEAD)) {
+    if (!request.method.eql(.get) and !request.method.eql(.head)) {
         try response.header("Allow", "GET, HEAD");
         return Router.plain(io, response, .method_not_allowed, "method not allowed\n");
     }

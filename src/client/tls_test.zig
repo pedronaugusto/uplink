@@ -307,7 +307,7 @@ const H2Proxy = struct {
 
     fn handle(handler: *serving.Server.Handler, io: Io, request: *serving.Request, response: *serving.Response) anyerror!void {
         const p: *H2Proxy = @alignCast(@fieldParentPtr("handler", handler));
-        if (!request.method.eql(.CONNECT)) {
+        if (!request.method.eql(.connect)) {
             response.status = .method_not_allowed;
             return response.end(io);
         }
@@ -523,7 +523,7 @@ test "an https HTTP/2 proxy carries a body past the flow-control windows, both w
             const url = try std.mem.print(&url_buf, "https://127.0.0.1:{d}/", .{target.port});
             // A second round reuses the tunnel the first left in the pool.
             for (0..2) |_| {
-                var response = try client.send(io, .{ .url = url, .method = .POST, .body = .{ .bytes = sent } });
+                var response = try client.send(io, .{ .url = url, .method = .post, .body = .{ .bytes = sent } });
                 defer response.deinit(io);
                 const back = try response.collect(gpa, io, .limited(2 << 20));
                 defer gpa.free(back);

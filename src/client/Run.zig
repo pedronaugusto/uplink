@@ -107,7 +107,7 @@ pub fn init(c: *Shared, io: Io, request: Request) Error!Run {
     };
     if (!fields.isToken(request.method.name)) return error.InvalidHeader;
     // An extended `CONNECT` names its protocol as a token, and is a `CONNECT`.
-    if (request.protocol) |p| if (!request.method.eql(.CONNECT) or !fields.isToken(p)) return error.InvalidHeader;
+    if (request.protocol) |p| if (!request.method.eql(.connect) or !fields.isToken(p)) return error.InvalidHeader;
     for (request.headers) |h| {
         h1.checkHeader(h) catch return error.InvalidHeader;
         for ([_][]const u8{ "host", "content-length", "transfer-encoding" }) |own| {
@@ -205,7 +205,7 @@ fn protocolFor(run: *const Run, r: Context.Route) Context.Route.Protocol {
     // An extended `CONNECT` is HTTP/2's alone: it goes as any request
     // that may, and a connection in HTTP/1.1 refuses it.
     const extended = run.request.protocol != null;
-    if (choice == .off or (run.method.eql(.CONNECT) and !extended) or named(run.request.headers, "upgrade") or absoluteForm(r)) return .http1;
+    if (choice == .off or (run.method.eql(.connect) and !extended) or named(run.request.headers, "upgrade") or absoluteForm(r)) return .http1;
     if (r.secure) return .negotiate;
     return switch (choice) {
         .prior_knowledge => .h2_prior_knowledge,
@@ -373,7 +373,7 @@ const max_refusals = 3;
 fn exchange(run: *Run, io: Io, lease: *Lease, r: Context.Route) H2Error!Response {
     const conn = lease.kind.h1;
     const framing: h1.Framing = switch (run.body) {
-        .none => if (run.method.eql(.POST) or run.method.eql(.PUT) or run.method.eql(.PATCH)) .{ .length = 0 } else .none,
+        .none => if (run.method.eql(.post) or run.method.eql(.put) or run.method.eql(.patch)) .{ .length = 0 } else .none,
         .bytes => |b| .{ .length = b.len },
         .reader => |rd| if (rd.length) |n| .{ .length = n } else .chunked,
         .streamed => unreachable, // unreachable: a body the caller writes goes through `begin`
@@ -421,7 +421,7 @@ pub fn switchToH2(run: *Run, io: Io, switched: *Response, lease: *Lease) H2Error
     // glint-ignore: Z026 -- `switches` took a 101 whose body nobody read
     const conn = (switched.upgrade(io) catch unreachable).carrier.conn;
     switched.deinit(io);
-    const up = H2.upgraded(&c.context, io, conn, run.method.eql(.HEAD)) catch |err| return switch (err) {
+    const up = H2.upgraded(&c.context, io, conn, run.method.eql(.head)) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.ConnectionFailed => conn.writeError(),
     };
@@ -442,7 +442,7 @@ pub const H2Error = Error || error{Refused};
 /// the response's head read.
 fn exchangeH2(run: *Run, io: Io, h: *H2) H2Error!Response {
     const length: ?u64 = switch (run.body) {
-        .none => if (run.method.eql(.POST) or run.method.eql(.PUT) or run.method.eql(.PATCH)) 0 else null,
+        .none => if (run.method.eql(.post) or run.method.eql(.put) or run.method.eql(.patch)) 0 else null,
         .bytes => |b| b.len,
         .reader => |rd| rd.length,
         .streamed => unreachable, // unreachable: a body the caller writes goes through `begin`
@@ -502,7 +502,7 @@ pub fn openStream(run: *Run, io: Io, h: *H2, length: ?u64, end_stream: bool, exp
     run.writeFields(io, &w, r, false, framing, expect) catch return error.InvalidHeader;
     const n = h2_message.appendLines(&list, pseudo, buffer[lines_start..w.end]) catch return error.InvalidHeader;
     for (list[pseudo..n]) |*f| f.never_index = isCredential(f.name);
-    return h.open(io, list[0..n], end_stream, run.method.eql(.HEAD)) catch |err| run.h2Failure(io, err);
+    return h.open(io, list[0..n], end_stream, run.method.eql(.head)) catch |err| run.h2Failure(io, err);
 }
 
 /// A run's error where nothing can go again: a refusal is a failed
@@ -672,7 +672,7 @@ pub fn writeHead(run: *Run, io: Io, conn: *Connection, r: Context.Route, framing
     const url = run.url;
     try w.writeAll(run.method.name);
     try w.writeByte(' ');
-    if (run.method.eql(.CONNECT)) {
+    if (run.method.eql(.connect)) {
         try url.writeAuthority(w, true);
     } else {
         if (conn.absolute_form) {
@@ -773,7 +773,7 @@ fn decodes(run: *const Run) bool {
 
 fn offersCodings(run: *const Run) bool {
     const headers = run.request.headers;
-    return !run.method.eql(.HEAD) and !named(headers, "accept-encoding") and !named(headers, "range");
+    return !run.method.eql(.head) and !named(headers, "accept-encoding") and !named(headers, "range");
 }
 
 /// Fields that carry the caller's credentials, dropped when a redirect
@@ -1163,7 +1163,7 @@ fn fieldValue(run: *Run, name: []const u8) ?[]const u8 {
 fn fromCache(run: *Run, io: Io) Error!?Response {
     const c = run.shared;
     const cache = c.options.cache orelse return null;
-    if (!run.method.eql(.GET)) return null;
+    if (!run.method.eql(.get)) return null;
     run.endRevalidating(io);
     var field_buf: [64]fields.Field = undefined;
     const request_fields = run.requestFields(&field_buf);
@@ -1260,7 +1260,7 @@ fn throughCache(run: *Run, io: Io, response: Response) Error!Response {
         if (status < 400) run.invalidate(io, cache, &r);
         return r;
     }
-    if (!run.method.eql(.GET)) return r;
+    if (!run.method.eql(.get)) return r;
     r.cache = .miss;
     if (run.revalidating) |*v| {
         const now = span.calendar(io);

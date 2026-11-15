@@ -122,7 +122,7 @@ test "a request goes upstream under the upstream's path, its connection's fields
             defer client.deinit(io);
             var buf: [96]u8 = undefined;
             const seen = try sent(gpa, &client, io, .{
-                .method = .POST,
+                .method = .post,
                 .url = f.front.url(&buf, "/items/7?page=2"),
                 .headers = &.{
                     .{ .name = "Connection", .value = "X-Hop" },
@@ -238,7 +238,7 @@ test "coded bodies pass as they came, both ways, whatever either end decodes" {
             defer client.deinit(io);
             var url_buf: [64]u8 = undefined;
             var response = try client.send(io, .{
-                .method = .PUT,
+                .method = .put,
                 .url = f.front.url(&url_buf, "/"),
                 .headers = &.{ .{ .name = "Content-Encoding", .value = "gzip" }, .{ .name = "Accept-Encoding", .value = "gzip" } },
                 .body = .{ .bytes = gzip },

@@ -131,7 +131,7 @@ fn handle(h: *Handler, io: Io, request: *Request, response: *Response) anyerror!
 
 /// Send `request` upstream and answer it with what came back.
 pub fn forward(p: *const ReverseProxy, io: Io, request: *Request, response: *Response) Error!void {
-    if (request.method.eql(.CONNECT)) return answer(io, response, .not_implemented);
+    if (request.method.eql(.connect)) return answer(io, response, .not_implemented);
     var arena_state: std.heap.ArenaAllocator = .init(p.gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();

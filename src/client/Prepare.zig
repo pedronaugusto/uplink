@@ -74,7 +74,7 @@ pub const Attempt = struct {
 };
 
 test "a hook adds checked fields, up to its limit" {
-    var a: Attempt = .{ .method = .GET, .url = "https://h/", .headers = &.{}, .body = null, .number = 1 };
+    var a: Attempt = .{ .method = .get, .url = "https://h/", .headers = &.{}, .body = null, .number = 1 };
     try a.add(.{ .name = "X-Signature", .value = "abc" });
     try std.testing.expectError(error.InvalidHeader, a.add(.{ .name = "Host", .value = "evil" }));
     try std.testing.expectError(error.InvalidHeader, a.add(.{ .name = "X", .value = "a\r\nb" }));

@@ -53,8 +53,8 @@ pub const Hop = struct { method: wire.Method, keep_body: bool };
 /// the status is not a redirect that is followed.
 pub fn hop(status: u10, method: wire.Method) ?Hop {
     return switch (status) {
-        301, 302 => if (method.eql(.POST)) .{ .method = .GET, .keep_body = false } else .{ .method = method, .keep_body = true },
-        303 => if (method.eql(.HEAD)) .{ .method = .HEAD, .keep_body = false } else .{ .method = .GET, .keep_body = false },
+        301, 302 => if (method.eql(.post)) .{ .method = .get, .keep_body = false } else .{ .method = method, .keep_body = true },
+        303 => if (method.eql(.head)) .{ .method = .head, .keep_body = false } else .{ .method = .get, .keep_body = false },
         307, 308 => .{ .method = method, .keep_body = true },
         else => null,
     };
@@ -133,15 +133,15 @@ pub fn notActedOn(status: std.http.Status) bool {
 const testing = std.testing;
 
 test "redirects change the method as RFC 9110 and every browser do" {
-    try testing.expect(hop(301, .POST).?.method.eql(.GET));
-    try testing.expect(!hop(302, .POST).?.keep_body);
-    try testing.expect(hop(302, .PUT).?.method.eql(.PUT));
-    try testing.expect(hop(303, .PUT).?.method.eql(.GET));
-    try testing.expect(hop(303, .HEAD).?.method.eql(.HEAD));
-    try testing.expect(hop(307, .POST).?.keep_body);
-    try testing.expect(hop(308, .POST).?.method.eql(.POST));
-    try testing.expectEqual(null, hop(304, .GET));
-    try testing.expectEqual(null, hop(300, .GET));
+    try testing.expect(hop(301, .post).?.method.eql(.get));
+    try testing.expect(!hop(302, .post).?.keep_body);
+    try testing.expect(hop(302, .put).?.method.eql(.put));
+    try testing.expect(hop(303, .put).?.method.eql(.get));
+    try testing.expect(hop(303, .head).?.method.eql(.head));
+    try testing.expect(hop(307, .post).?.keep_body);
+    try testing.expect(hop(308, .post).?.method.eql(.post));
+    try testing.expectEqual(null, hop(304, .get));
+    try testing.expectEqual(null, hop(300, .get));
 }
 
 test "a redirect is refused past its count, from https to http, and off its origin when asked" {
