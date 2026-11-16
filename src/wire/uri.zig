@@ -406,8 +406,10 @@ pub fn resolve(base: Reference, reference: Reference, out: []u8) ResolveError![]
     try w.write(scheme);
     try w.write(":");
     var query: ?[]const u8 = r.query;
+    const from_reference = r.scheme != null or r.authority != null;
+    const authority = if (from_reference) r.authority else base.authority;
     const path_start = blk: {
-        if (r.scheme != null or r.authority != null) {
+        if (from_reference) {
             if (r.authority) |a| try w.authority(a);
             const start = w.end;
             try w.write(r.path);
@@ -433,6 +435,10 @@ pub fn resolve(base: Reference, reference: Reference, out: []u8) ResolveError![]
         break :blk start;
     };
     w.end = path_start + removeDotSegments(w.buffer[path_start..w.end]);
+    // §3.3: with no authority the path cannot begin with "//", which would read back as an
+    // authority (`urn:a:b` and `/.//` give the path "//"). The URL Standard's answer, which
+    // removing dot segments takes back to the same path: "/." before it.
+    if (authority == null and std.mem.startsWith(u8, w.buffer[path_start..w.end], "//")) try w.insert(path_start, "/.");
     if (query) |q| {
         try w.write("?");
         try w.write(q);
@@ -451,6 +457,14 @@ const Out = struct {
     fn write(o: *Out, s: []const u8) ResolveError!void {
         if (s.len > o.buffer.len - o.end) return error.NoSpaceLeft;
         @memcpy(o.buffer[o.end..][0..s.len], s);
+        o.end += s.len;
+    }
+
+    /// Puts `s` at `at`, moving what follows it.
+    fn insert(o: *Out, at: usize, s: []const u8) ResolveError!void {
+        if (s.len > o.buffer.len - o.end) return error.NoSpaceLeft;
+        std.mem.copyBackwards(u8, o.buffer[at + s.len .. o.end + s.len], o.buffer[at..o.end]);
+        @memcpy(o.buffer[at..][0..s.len], s);
         o.end += s.len;
     }
 

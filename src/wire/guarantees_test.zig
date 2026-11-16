@@ -509,5 +509,5 @@ fn anyComponents(_: void, case: *shakedown.Case) !void {
 }
 
 test "property: resolution takes each part from where RFC 3986 §5.2.2 says, and is idempotent" {
-    try shakedown.check(testing.allocator, {}, anyComponents, .{ .cases = 5000, .seed = 0x5222 });
+    try shakedown.check(testing.allocator, {}, anyComponents, .{ .cases = 5000, .seed = 0x5222, .regressions = &.{"0:2:0:0:6:1:0:3:2f"} });
 }

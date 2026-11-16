@@ -234,6 +234,13 @@ test "RFC 3986 §5.4: all 42 resolution examples, 23 normal and 19 abnormal" {
     // A base with an authority and no path merges onto "/"; a base's fragment is dropped.
     try testing.expectEqualStrings("http://a/g", try uri.resolve(try parse("http://a", .uri, .uri), try parse("g", .reference, .uri), &out));
     try testing.expectEqualStrings("http://a/b/g", try uri.resolve(try parse("http://a/b/c#f", .uri, .uri), try parse("g", .reference, .uri), &out));
+    // With no authority, a path left beginning with "//" keeps "/." before it, so it reads back
+    // as a path and not an authority (§3.3); resolving the target again gives it back.
+    const urn = try parse("urn:a:b", .uri, .uri);
+    const target = try uri.resolve(urn, try parse("/.//", .reference, .uri), &out);
+    try testing.expectEqualStrings("urn:/.//", target);
+    var again: [64]u8 = undefined;
+    try testing.expectEqualStrings(target, try uri.resolve(urn, try parse(target, .uri, .uri), &again));
 }
 
 fn anyResolution(_: void, case: *shakedown.Case) !void {

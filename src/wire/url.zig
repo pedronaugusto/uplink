@@ -262,7 +262,12 @@ pub fn resolve(base: []const u8, reference: []const u8, out: []u8) ResolveError!
         try w.lower(scheme);
         try w.raw(":");
         try w.authorityOf(r.authority);
+        const path_start = w.len;
         try w.path(r.path);
+        // RFC 3986 §3.3: with no authority the path cannot begin with "//", which would read
+        // back as one (`x:/.//h` gives the path "//h", and `x://h` names the host h). The URL
+        // Standard's answer, which removing dot segments takes back to the same path: "/." before it.
+        if (r.authority == null and std.mem.startsWith(u8, out[path_start..w.len], "//")) try w.insert(path_start, "/.");
         try w.query(r.query);
     } else if (r.authority != null) {
         try w.lower(b.scheme.?);
@@ -322,6 +327,14 @@ const Writer = struct {
     fn raw(w: *Writer, bytes: []const u8) ResolveError!void {
         if (w.out.len - w.len < bytes.len) return error.NoSpaceLeft;
         @memcpy(w.out[w.len..][0..bytes.len], bytes);
+        w.len += bytes.len;
+    }
+
+    /// Puts `bytes` at `at`, moving what follows it.
+    fn insert(w: *Writer, at: usize, bytes: []const u8) ResolveError!void {
+        if (w.out.len - w.len < bytes.len) return error.NoSpaceLeft;
+        std.mem.copyBackwards(u8, w.out[at + bytes.len .. w.len + bytes.len], w.out[at..w.len]);
+        @memcpy(w.out[at..][0..bytes.len], bytes);
         w.len += bytes.len;
     }
 
@@ -471,6 +484,9 @@ test "references resolve as RFC 3986's examples resolve" {
         .{ "g?y/./x", "http://a/b/c/g?y/./x" },    .{ "g?y/../x", "http://a/b/c/g?y/../x" },
         .{ "g#s/./x", "http://a/b/c/g#s/./x" },    .{ "g#s/../x", "http://a/b/c/g#s/../x" },
         .{ "HTTPS://Other/x", "https://Other/x" },
+        // A path left beginning with "//" where there is no authority keeps "/." before it (§3.3).
+        .{ "x:/.//h", "x:/.//h" },
+        .{ "x:/a/..//h", "x:/.//h" },
     };
     var buf: [128]u8 = undefined;
     for (cases) |case| {
