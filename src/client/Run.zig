@@ -1372,8 +1372,8 @@ fn invalidate(run: *Run, io: Io, cache: *Cache, r: *const Response) void {
         const reference = r.headers.get(name) orelse continue;
         var buffer: [2048]u8 = undefined;
         // A reference that does not resolve, or does not parse, names no stored response to remove.
-        const target = url_mod.resolve(run.url_text, reference, &buffer) catch null orelse continue;
-        const parsed = url_mod.parse(target) catch null orelse continue;
+        const target = (url_mod.resolve(run.url_text, reference, &buffer) catch null) orelse continue;
+        const parsed = (url_mod.parse(target) catch null) orelse continue;
         if (!sameOrigin(run.url, parsed)) continue;
         cache.store.remove(io, target) catch |err| run.cacheFailed(err);
     }

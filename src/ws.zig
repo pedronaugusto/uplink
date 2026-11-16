@@ -167,7 +167,7 @@ fn agreeDeflate(h: *const fields.Headers, c: Compression) ?ws.Deflate {
         const semi = std.mem.findScalar(u8, element, ';') orelse element.len;
         if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, element[0..semi], " \t"), "permessage-deflate")) continue;
         // An offer this end cannot read is passed over for the client's next.
-        const offer = ws.Deflate.parse(element[semi..]) catch null orelse continue;
+        const offer = (ws.Deflate.parse(element[semi..]) catch null) orelse continue;
         var answer: ws.Deflate = .{
             .server_no_context_takeover = offer.server_no_context_takeover or c.no_context_takeover,
             .client_no_context_takeover = offer.client_no_context_takeover,

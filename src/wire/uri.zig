@@ -463,7 +463,7 @@ const Out = struct {
     /// Puts `s` at `at`, moving what follows it.
     fn insert(o: *Out, at: usize, s: []const u8) ResolveError!void {
         if (s.len > o.buffer.len - o.end) return error.NoSpaceLeft;
-        std.mem.copyBackwards(u8, o.buffer[at + s.len .. o.end + s.len], o.buffer[at..o.end]);
+        @memmove(o.buffer[at + s.len .. o.end + s.len], o.buffer[at..o.end]);
         @memcpy(o.buffer[at..][0..s.len], s);
         o.end += s.len;
     }

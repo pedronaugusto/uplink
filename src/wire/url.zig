@@ -333,7 +333,7 @@ const Writer = struct {
     /// Puts `bytes` at `at`, moving what follows it.
     fn insert(w: *Writer, at: usize, bytes: []const u8) ResolveError!void {
         if (w.out.len - w.len < bytes.len) return error.NoSpaceLeft;
-        std.mem.copyBackwards(u8, w.out[at + bytes.len .. w.len + bytes.len], w.out[at..w.len]);
+        @memmove(w.out[at + bytes.len .. w.len + bytes.len], w.out[at..w.len]);
         @memcpy(w.out[at..][0..bytes.len], bytes);
         w.len += bytes.len;
     }

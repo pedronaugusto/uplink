@@ -364,7 +364,7 @@ fn sendWhole(r: *Response, body: []const u8) Error!void {
         const io = r.socket.io;
         // Compressing is optional: with no large buffer to be had for want
         // of memory, the body goes as it is.
-        const out_buffer = pool.acquire(io, .large) catch null orelse break :compressed;
+        const out_buffer = (pool.acquire(io, .large) catch null) orelse break :compressed;
         defer pool.release(io, out_buffer);
         const coded = r.compressWhole(io, c, body, out_buffer) orelse break :compressed;
         if (coded.len >= body.len) break :compressed;

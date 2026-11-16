@@ -580,7 +580,7 @@ pub fn receive(io: Io, ctx: *Context, pool: *Pool, conn: *Connection, options: R
 fn planDecoding(r: *Response, io: Io) Allocator.Error!void {
     if (r.body.state.current() == .done) return;
     // Codings uplink cannot read leave the body as it came, Content-Encoding and all.
-    const codings = coding.Codings.of(&r.headers) catch null orelse return;
+    const codings = (coding.Codings.of(&r.headers) catch null) orelse return;
     if (codings.len == 0 or !Decoder.decodes(codings.slice())) return;
     r.decoder = try .init(io, r.ctx.gpa, &r.ctx.buffers, &r.ctx.windows, codings.slice());
 }

@@ -483,7 +483,7 @@ fn loadLine(jar: *CookieJar, io: Io, line: []const u8, now: i64) Allocator.Error
     const path = parts[2];
     if (path.len == 0 or path[0] != '/') return;
     // A line whose expiry is no number is not a cookie; the file's other lines are read.
-    const expires_n: i64 = std.fmt.parseInt(i64, parts[4], 10) catch null orelse return;
+    const expires_n: i64 = (std.fmt.parseInt(i64, parts[4], 10) catch null) orelse return;
     const expires: ?i64 = if (expires_n == 0) null else expires_n;
     if (expires) |e| if (e <= now) return;
     var domain_buf: [Io.net.HostName.max_len]u8 = undefined;

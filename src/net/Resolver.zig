@@ -396,7 +396,7 @@ pub const Cache = struct {
         var entry: ServiceEntry = .{ .binding = null, .expires = now.addDuration(span.toIo(c.options.ttl)) };
         // A binding that cannot be kept for want of memory is not kept: the
         // next lookup asks again.
-        if (binding) |b| entry.binding = b.clone(c.gpa) catch null orelse return;
+        if (binding) |b| entry.binding = (b.clone(c.gpa) catch null) orelse return;
         var held = c.services.acquireUncancelable(io);
         defer held.deinit(io);
         const services = held.value();
@@ -495,7 +495,7 @@ pub const Cache = struct {
         if (entries.count() >= c.options.max_entries) return;
         // An entry that cannot be kept for want of memory is not kept: the
         // next lookup asks again.
-        const owned = c.gpa.dupe(u8, key) catch null orelse return;
+        const owned = (c.gpa.dupe(u8, key) catch null) orelse return;
         entries.put(c.gpa, owned, entry) catch c.gpa.free(owned);
     }
 

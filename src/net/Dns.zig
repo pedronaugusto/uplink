@@ -220,7 +220,7 @@ pub fn https(d: *const Dns, io: Io, gpa: Allocator, host: []const u8) (NameError
             if (r.kind != .https or r.class != dns.class_in) continue;
             var target_buf: [dns.max_name]u8 = undefined;
             // A malformed HTTPS record is skipped; the answer's others are read.
-            const s = dns.Service.parse(r, &target_buf) catch null orelse continue;
+            const s = (dns.Service.parse(r, &target_buf) catch null) orelse continue;
             if (s.priority == 0) {
                 @memcpy(alias_buf[0..s.target.len], s.target);
                 alias = alias_buf[0..s.target.len];
@@ -339,7 +339,7 @@ pub const Stub = struct {
                 error.Failed => continue,
             };
             // An answer that does not parse is no answer: the next server is asked.
-            const message = dns.Message.parse(got) catch null orelse continue;
+            const message = (dns.Message.parse(got) catch null) orelse continue;
             if (!message.flags.truncated) return got;
             return s.overTcp(io, server, query, answer) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,

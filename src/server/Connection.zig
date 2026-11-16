@@ -167,7 +167,6 @@ fn serveOne(c: *Connection) bool {
         // unreachable: an HTTP/1.1 request without a Host was refused above
         if (upgradeSettings(&rh.headers, &settings_buf)) |settings| return c.switchToH2(rh.method.name, rh.target, host_field orelse unreachable, &rh.headers, settings);
     }
-
     var request: Request = .{
         .method = rh.method,
         .target = rh.target,
