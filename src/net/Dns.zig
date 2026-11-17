@@ -608,35 +608,32 @@ const FakeServer = struct {
 
     fn start(f: *FakeServer, io: Io) !void {
         const loopback = try IpAddress.parse("127.0.0.1", 0);
-        // UDP and TCP on one port: the port the system gives the UDP socket
-        // may be taken for TCP (another process's connection), so another
-        // is asked for until both are free. The listener asks for no address
-        // reuse: on Windows a reusing bind over a port another socket holds
-        // is refused as access denied, which std reports as Unexpected, where
-        // a plain one is AddressInUse. Windows also refuses, as access denied
-        // (Unexpected again), a TCP listen on a port in one of the system's
-        // excluded port ranges, which a UDP port may fall in: another port is
-        // asked for then too (the Windows runners, 3 tests failing at random).
+        // UDP and TCP on one port, the TCP listener's: the system gives it a
+        // port it lets TCP listen on, where a port given to a UDP socket can
+        // lie in one of Windows' excluded TCP port ranges, and a listen there
+        // is refused as access denied (the arm64 Windows runner, every
+        // time). The UDP socket then binds that port, which a UDP socket
+        // may hold already (AddressInUse) or Windows may exclude for UDP
+        // (access denied: AccessDenied from reactor's backend, Unexpected
+        // from std's, which names no status); another port is asked for
+        // then. The listener asks for no address reuse: on Windows a
+        // reusing bind over a port another socket holds is refused as
+        // access denied too, where a plain one is AddressInUse.
         var tries: u8 = 0;
         while (true) : (tries += 1) {
-            f.udp = try loopback.bind(io, .{ .mode = .dgram });
-            f.address = f.udp.address;
-            f.tcp = .init(f.address.listen(io, .{}) catch |err| switch (err) {
-                error.AddressInUse => {
-                    f.udp.close(io);
-                    if (tries == 16) return err;
-                    continue;
-                },
-                error.Unexpected => {
-                    f.udp.close(io);
-                    if (@import("builtin").os.tag != .windows or tries == 16) return err;
-                    continue;
-                },
-                else => |e| {
-                    f.udp.close(io);
-                    return e;
-                },
-            });
+            var tcp = try loopback.listen(io, .{});
+            f.address = tcp.socket.address;
+            f.udp = f.address.bind(io, .{ .mode = .dgram }) catch |err| {
+                tcp.deinit(io);
+                const refused = switch (err) {
+                    error.AddressInUse, error.AccessDenied => true,
+                    error.Unexpected => @import("builtin").os.tag == .windows,
+                    else => false,
+                };
+                if (!refused or tries == 16) return err;
+                continue;
+            };
+            f.tcp = .init(tcp);
             break;
         }
         f.udp_task = io.concurrent(serveUdp, .{ f, io }) catch return error.SkipZigTest;
