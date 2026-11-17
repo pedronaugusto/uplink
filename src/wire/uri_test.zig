@@ -252,14 +252,17 @@ fn anyResolution(_: void, case: *shakedown.Case) !void {
     const ref = parse(ref_text, .reference, .uri) catch return;
     var out: [256]u8 = undefined;
     const target = try uri.resolve(base, ref, &out);
-    // What resolution makes is a URI, with no "." or ".." segment left in its path.
+    // What resolution makes is a URI, with no "." or ".." segment left in its path but the "/."
+    // §3.3 puts before a path that would begin with "//" where there is no authority (`urn:a:b`
+    // and "/.//" give "urn:/.//"); what follows that one begins with "//".
     const t = try parse(target, .uri, .uri);
-    var segments = std.mem.splitScalar(u8, t.path, '/');
+    const path = if (t.authority == null and std.mem.startsWith(u8, t.path, "/.//")) t.path[2..] else t.path;
+    var segments = std.mem.splitScalar(u8, path, '/');
     while (segments.next()) |s| {
         try testing.expect(!std.mem.eql(u8, s, ".") and !std.mem.eql(u8, s, ".."));
     }
 }
 
 test "property: a resolution is a URI with no dot segments left" {
-    try shakedown.check(testing.allocator, {}, anyResolution, .{ .cases = 3000, .seed = 0x3987 });
+    try shakedown.check(testing.allocator, {}, anyResolution, .{ .cases = 3000, .seed = 0x3987, .regressions = &.{"0:2:0:0:6:1:0:3:2f"} });
 }
