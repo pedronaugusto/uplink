@@ -29,22 +29,21 @@ your module's imports. It depends on `std`,
 [reactor](https://github.com/pedronaugusto/reactor),
 [cloak](https://github.com/pedronaugusto/cloak),
 [warp](https://github.com/pedronaugusto/warp) and
-[xenoglyph](https://github.com/pedronaugusto/xenoglyph), the last four fetched
-only when the client is built.
+[xenoglyph](https://github.com/pedronaugusto/xenoglyph), lazy dependencies compiled
+only in a program that imports `uplink`.
 
 The codecs are a module of their own. A program that reads and writes HTTP
-messages and has no use for the client, a server, a proxy or a test tool, asks
-for less in its `build.zig`:
+messages and has no use for the client, a server, a proxy or a test tool,
+imports only them:
 
 ```zig
-const uplink = b.dependency("uplink", .{ .target = target, .optimize = optimize, .client = false });
+const uplink = b.dependency("uplink", .{ .target = target, .optimize = optimize });
 const wire = uplink.module("uplink.wire");
 ```
 
-and imports `uplink.wire`. It depends on `std` and aegis alone: no reactor is
-fetched, nothing of the client is built, and there is no `uplink` module to ask for. Without `.client = false` both
-modules are there, and `uplink` exposes the codecs too, as `uplink.wire`; the
-two are the same declarations, not copies.
+and compiles `std` and aegis alone: the client's packages are fetched with uplink, as lazy
+dependencies, and nothing of them is compiled. `uplink` exposes the codecs too, as
+`uplink.wire`; the two are the same declarations, not copies.
 
 ## Stability
 
@@ -437,16 +436,16 @@ reactor's runtime both are kept on every system.
   linked into the module, except that cloak links the platform's own trust
   store on macOS and Windows.
 - [cloak](https://github.com/pedronaugusto/cloak) is the TLS engine, with the
-  certificates, keys and authorities. It is a lazy dependency, fetched only for
-  the client.
+  certificates, keys and authorities. It is a lazy dependency, compiled only in
+  a program that imports `uplink`.
 - [reactor](https://github.com/pedronaugusto/reactor) is the evented `std.Io`,
   and owns the sockets' deadlines, name lookup and connecting. It is a lazy
-  dependency, fetched only for the client and the server.
+  dependency, compiled only in a program that imports `uplink`.
 - [warp](https://github.com/pedronaugusto/warp) decodes and encodes gzip,
   deflate and zstd, every checksum verified. It is a lazy dependency too.
 - [xenoglyph](https://github.com/pedronaugusto/xenoglyph) maps a URL's host to
   the name DNS has (UTS #46 ToASCII, `Bücher.de` to `xn--bcher-kva.de`). It is
-  a lazy dependency, fetched only for the client.
+  a lazy dependency, compiled only in a program that imports `uplink`.
 - [preflight](https://github.com/pedronaugusto/preflight) runs the source checks,
   the tests and CI.
 - [shakedown](https://github.com/pedronaugusto/shakedown) is the layered `Io`,

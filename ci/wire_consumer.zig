@@ -2,11 +2,11 @@
 //! a consumer of `uplink.wire` alone. The build runs this file as a program:
 //! `<zig> <project> <packages> <uplink root> <program>`.
 //!
-//! The project depends on uplink by path with `.client = false`, fetching is
-//! off, and the package directory holds aegis and nothing else. A build that
-//! reached for reactor, which only the client needs, would fail to find it.
-//! The build has a Zig cache of its own, so no package found in the global
-//! cache stands in for one the project failed to ask for.
+//! The project depends on uplink by path, fetching is off, and the package
+//! directory holds every package uplink's graph needs, as a fetch leaves them.
+//! Its program imports `uplink.wire` and nothing else, so it compiles nothing
+//! of the client. The build has a Zig cache of its own, so no package found in
+//! the global cache stands in for one the directory lacks.
 const std = @import("std");
 const aegis = @import("aegis");
 
@@ -60,7 +60,7 @@ const script =
     \\pub fn build(b: *std.Build) void {
     \\    const target = b.standardTargetOptions(.{});
     \\    const optimize = b.standardOptimizeOption(.{});
-    \\    const uplink = b.dependency("uplink", .{ .target = target, .optimize = optimize, .client = false });
+    \\    const uplink = b.dependency("uplink", .{ .target = target, .optimize = optimize });
     \\    const exe = b.addExecutable(.{ .name = "consumer", .root_module = b.createModule(.{
     \\        .root_source_file = b.path("src/main.zig"),
     \\        .target = target,

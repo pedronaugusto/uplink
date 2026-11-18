@@ -1,7 +1,6 @@
 //! What a project that reads and writes HTTP messages and nothing else
-//! writes: `uplink.wire`, asked for with `.client = false`, so that neither
-//! reactor nor anything the client needs is fetched. Built by
-//! `zig build check-wire-consumer` with aegis the only package.
+//! writes: `uplink.wire` alone, which compiles nothing of the client. Built
+//! by `zig build check-wire-consumer` with fetching off.
 const std = @import("std");
 const wire = @import("uplink.wire");
 

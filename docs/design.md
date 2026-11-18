@@ -49,23 +49,22 @@ Why a module and not only the layer: Zig analyses what is used, so a program
 that imports `uplink` and calls the codecs compiles none of the client. What
 it does not avoid is fetching: a build that reaches `uplink` fetches reactor,
 cloak and warp with it. A separate module buys something only where a part's dependencies
-should not be fetched by those who do not use it, and the codecs are such a part:
+should not be compiled by those who do not use it, and the codecs are such a part:
 a server or a proxy parsing HTTP/1.1 has no use for the client's runtime or its
 TLS. `tls`, `net`, `transport`, `coding`, `pool` and `client` are not modules:
 they share reactor, cloak and warp, and no user wants one without the rest.
 
-The build has one option, `client`, true unless a project says otherwise.
-reactor, cloak and warp are lazy dependencies, requested only when it is true, so the common
-user, who builds the client, writes nothing and gets the whole package, and
-a wire-only user writes `.client = false` and fetches aegis and nothing more. With
-it false the `uplink` module is not defined: it cannot be built without the
-runtime. The default is the client's because that is the package's purpose; a program
-that wants less says so.
-`zig build check-consumer` builds a project of each kind from the package's
-directory with fetching off and only the packages that kind needs in the package
-directory; `check-wire-consumer` is the wire-only one, with aegis alone, so a
-build script or module that reached for reactor, shakedown or preflight fails
-there. `wire`'s own tests run as the root of their own build (`src/wire_test.zig`),
+The build has no option. Both modules are always declared, and reactor, cloak, warp,
+xenoglyph and airlock are lazy dependencies: fetched with uplink, and compiled only in a
+program that imports `uplink`. A wire-only user imports `uplink.wire` and compiles `std` and
+aegis; the common user, who builds the client, imports `uplink` and gets the whole package.
+A choice of what to build is the program's imports, never an argument to the dependency: two
+dependents asking with different arguments would get two copies of the package.
+`zig build check-consumer` builds the client's project from the package's directory
+with fetching off and only the packages uplink's graph needs in the package directory;
+`check-wire-consumer` is the wire-only one, with the same packages: a project that
+imports `uplink.wire` alone compiles nothing of the client, and a build script that
+reached for shakedown or preflight, which no consumer has, fails there. `wire`'s own tests run as the root of their own build (`src/wire_test.zig`),
 because a module's tests run only from the build that has it as root.
 
 ## One owner per state

@@ -1,7 +1,7 @@
 const std = @import("std");
 
-/// What a project that depends on uplink builds: `uplink.wire`, the codecs, and
-/// with the client (the default) `uplink`, which fetches reactor and cloak.
+/// What a project that depends on uplink is given: `uplink.wire`, the codecs, and `uplink`,
+/// the client over them. No option: a program compiles the module it imports.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -17,23 +17,19 @@ pub fn build(b: *std.Build) void {
     // own libraries on macOS and Windows.
     //
     // reactor, cloak, warp (the codings), xenoglyph (domain names) and
-    // airlock (the disk cache's durable files) are
-    // fetched lazily, and only for
-    // the client. The one
-    // build option, `client`, is true unless a project says otherwise: a
-    // project that builds an HTTP client writes nothing extra, and one that
-    // only reads and writes HTTP messages sets `.client = false`, fetches no
-    // reactor or cloak, and finds `uplink.wire` alone.
+    // airlock (the disk cache's durable files) are lazy dependencies: fetched
+    // with uplink, and compiled only in a program that imports `uplink`. A
+    // program that imports `uplink.wire` alone compiles std and aegis.
     //=====================================================================
 
-    const with_client = b.option(bool, "client", "Build the HTTP client and the `uplink` module, which fetch reactor; false leaves `uplink.wire` alone") orelse true;
     const aegis = b.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis");
-    const reactor: ?*std.Build.Module = if (with_client) if (b.dependencyLazy("reactor", .{ .target = target, .optimize = optimize })) |package| package.module("reactor") else |_| null else null;
-    const cloak: ?*std.Build.Module = if (with_client) if (b.dependencyLazy("cloak", .{ .target = target, .optimize = optimize })) |package| package.module("cloak") else |_| null else null;
-    const warp: ?*std.Build.Module = if (with_client) if (b.dependencyLazy("warp", .{ .target = target, .optimize = optimize })) |package| package.module("warp") else |_| null else null;
-    const xenoglyph: ?*std.Build.Module = if (with_client) if (b.dependencyLazy("xenoglyph", .{ .target = target, .optimize = optimize })) |package| package.module("xenoglyph") else |_| null else null;
-    const airlock: ?*std.Build.Module = if (with_client) if (b.dependencyLazy("airlock", .{ .target = target, .optimize = optimize })) |package| package.module("airlock") else |_| null else null;
-    _ = uplinkModules(b, target, optimize, aegis, with_client, .{ .reactor = reactor, .cloak = cloak, .warp = warp, .xenoglyph = xenoglyph, .airlock = airlock });
+    // Every lazy dependency asked for before any is used, so one configure pass marks them all.
+    const reactor: ?*std.Build.Module = if (b.dependencyLazy("reactor", .{ .target = target, .optimize = optimize })) |package| package.module("reactor") else |_| null;
+    const cloak: ?*std.Build.Module = if (b.dependencyLazy("cloak", .{ .target = target, .optimize = optimize })) |package| package.module("cloak") else |_| null;
+    const warp: ?*std.Build.Module = if (b.dependencyLazy("warp", .{ .target = target, .optimize = optimize })) |package| package.module("warp") else |_| null;
+    const xenoglyph: ?*std.Build.Module = if (b.dependencyLazy("xenoglyph", .{ .target = target, .optimize = optimize })) |package| package.module("xenoglyph") else |_| null;
+    const airlock: ?*std.Build.Module = if (b.dependencyLazy("airlock", .{ .target = target, .optimize = optimize })) |package| package.module("airlock") else |_| null;
+    _ = uplinkModules(b, target, optimize, aegis, .{ .reactor = reactor, .cloak = cloak, .warp = warp, .xenoglyph = xenoglyph, .airlock = airlock });
 }
 
 /// The lazy dependency `name` of `p`, or null where it is not fetched yet: std has marked it
@@ -230,8 +226,9 @@ pub fn dev(b: *std.Build, tools: type) void {
     // A project that depends on uplink by path, with only aegis, reactor,
     // cloak and warp (and what they depend on) to fetch: the build a
     // client's user gets.
-    preflight.addConsumerCheck(b, p, .{ .package = "uplink", .program = p.path("ci/consumer.zig"), .modules = &.{ "uplink", "uplink.wire" }, .packages = &.{ aegis_package, reactor_package, cloak_package, warp_package, xenoglyph_package, airlock_package } });
-    addWireConsumerCheck(b, p, aegis_package);
+    const packages: []const *std.Build.Dependency = &.{ aegis_package, reactor_package, cloak_package, warp_package, xenoglyph_package, airlock_package };
+    preflight.addConsumerCheck(b, p, .{ .package = "uplink", .program = p.path("ci/consumer.zig"), .modules = &.{ "uplink", "uplink.wire" }, .packages = packages });
+    addWireConsumerCheck(b, p, packages);
     addColdConsumerCheck(b, p);
 }
 
@@ -252,12 +249,12 @@ fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.l
     }) catch @panic("OOM");
 }
 
-/// What the build publishes: the codecs, and with a client, everything.
+/// What the build publishes: the codecs, and everything.
 const Modules = struct {
     /// `uplink.wire`: the codecs, sans I/O, on `std` and aegis alone.
     wire: *std.Build.Module,
-    /// `uplink`, which names every concern; absent in a build without the client.
-    root: ?*std.Build.Module,
+    /// `uplink`, which names every concern.
+    root: *std.Build.Module,
 };
 
 /// The lazy packages `uplink` imports, each null until it is fetched.
@@ -271,7 +268,7 @@ const Lazy = struct {
 
 /// The modules, one set of source files per module: `uplink` imports `uplink.wire`
 /// rather than its files, so a type is one declaration whichever a user names.
-fn uplinkModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, aegis: *std.Build.Module, client: bool, lazy: Lazy) Modules {
+fn uplinkModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, aegis: *std.Build.Module, lazy: Lazy) Modules {
     // Each module named and rooted by literals: preflight's release check reads what the
     // package exports from this text.
     const wire = b.addModule("uplink.wire", .{
@@ -280,7 +277,6 @@ fn uplinkModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         .optimize = optimize,
         .imports = &.{.{ .name = "aegis", .module = aegis }},
     });
-    if (!client) return .{ .wire = wire, .root = null };
     // Declared before reactor and cloak are fetched: a consumer's first pass
     // must find the module it asks for, and only learns here what to fetch.
     // They are imported once they are there.
@@ -345,11 +341,11 @@ fn backends(os: std.Target.Os.Tag) []const []const u8 {
     };
 }
 
-/// `check-wire-consumer`: a project that asks for `uplink.wire` alone
-/// (`.client = false`), built with fetching off and only aegis in its package
-/// directory. reactor, shakedown and preflight are absent, so the build fails
-/// if `uplink.wire` or the build script reaches for any of them.
-fn addWireConsumerCheck(b: *std.Build, p: *std.Build, aegis: *std.Build.Dependency) void {
+/// `check-wire-consumer`: a project that imports `uplink.wire` alone compiles
+/// nothing of the client. It is built with fetching off and every package
+/// uplink's graph needs in its package directory, as a fetch leaves them; the
+/// program imports `uplink.wire` and nothing else, and builds.
+fn addWireConsumerCheck(b: *std.Build, p: *std.Build, dependencies: []const *std.Build.Dependency) void {
     const generator = b.addExecutable(.{ .name = "wire-consumer", .root_module = b.createModule(.{
         .root_source_file = p.path("ci/wire_consumer.zig"),
         .target = b.graph.host,
@@ -357,8 +353,14 @@ fn addWireConsumerCheck(b: *std.Build, p: *std.Build, aegis: *std.Build.Dependen
         .imports = &.{.{ .name = "aegis", .module = hostAegis(p) }},
     }) });
     const packages = b.addWriteFiles();
-    _ = packages.add("README", "aegis, and nothing else.\n");
-    _ = packages.addCopyDirectory(aegis.path(""), aegis.builder.pkg_hash, .{});
+    _ = packages.add("README", "uplink's dependencies, and what they depend on.\n");
+    var closure: std.array_hash_map.String(void) = .empty;
+    for (dependencies) |dependency| gather(b, &closure, dependency.builder.pkg_hash);
+    for (closure.keys()) |hash| {
+        if (!fetchedByHash(hash)) continue;
+        const entry = std.Build.package_map.get(hash) orelse unreachable; // gather puts only hashes it found
+        _ = packages.addCopyDirectory(.{ .cwd_relative = entry.build_root }, hash, .{});
+    }
     const run = b.addRunArtifact(generator);
     run.addArg(b.graph.zig_exe);
     run.addDirectoryArg2(b.graph.path(.local_cache, "uplink-wire-consumer"), .{});
@@ -366,9 +368,29 @@ fn addWireConsumerCheck(b: *std.Build, p: *std.Build, aegis: *std.Build.Dependen
     run.addDirectoryArg2(p.path("."), .{});
     run.addFileArg(p.path("ci/wire_program.zig"));
     run.has_side_effects = true;
-    const step = b.step("check-wire-consumer", "Build a project that asks for uplink.wire alone, with only aegis to fetch");
+    const step = b.step("check-wire-consumer", "Build a project that imports uplink.wire alone, with fetching off");
     step.dependOn(&run.step);
     step.dependOn(&inGraph(b, p, "wire_program", "uplink.wire").step);
+}
+
+/// Puts `hash` and every package it depends on, transitively, into `closure`, as
+/// preflight's consumer check gathers them: with fetching off, the build needs each on
+/// disk. A package reached by path is read where it is, and a lazy one never fetched
+/// was asked for by nothing here.
+fn gather(b: *std.Build, closure: *std.array_hash_map.String(void), hash: []const u8) void {
+    const entry = std.Build.package_map.get(hash) orelse return;
+    if (!entry.available) return;
+    const found = closure.getOrPut(b.graph.arena, hash) catch @panic("OOM");
+    if (found.found_existing) return;
+    for (entry.deps) |dependency| gather(b, closure, dependency[1]);
+}
+
+/// Whether Zig fetched the package `key` names by hash (`name-version-digest`, the digest
+/// 44 characters), which a build with fetching off looks up among its packages. A package
+/// reached by path is keyed by its path, or by a digest when the path is long.
+fn fetchedByHash(key: []const u8) bool {
+    if (key.len < 44 or std.mem.findAny(u8, key, "/\\") != null) return false;
+    return std.mem.countScalar(u8, key[0 .. key.len - 44], '-') >= 2;
 }
 
 /// aegis for the programs the build runs on the machine it runs on.
