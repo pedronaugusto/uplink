@@ -147,6 +147,29 @@ the lock, and say so where they are declared.
   client, tests (including a reference parser and differential tests) and
   anyone building another stack.
 
+### URIs
+
+- **`wire.uri` is the family's one strict URI recognizer**: RFC 3986's generic
+  syntax with every component's grammar (IPv6 in all its forms, IPvFuture,
+  IPv4 dec-octets) and RFC 3987's IRIs (`ucschar` everywhere, `iprivate` in
+  the query). It is sans-I/O, allocates nothing, and reads nothing past its
+  text. `parse` takes the text as `aegis.input.Untrusted` and the production
+  it must be (`Form`: URI, reference, absolute, relative); `check` answers
+  JSON Schema's `uri`, `uri-reference`, `iri` and `iri-reference`; `resolve`
+  is RFC 3986 §5.2 with dot segments removed, and nothing more normalized.
+- **Refused by the grammar, not by taste**: an IPv6 zone identifier (RFC 6874
+  is not RFC 3986), a non-digit port, a `%` without two hex digits, spaces,
+  controls and backslashes, a scheme not starting with a letter, any byte past
+  ASCII in the `uri` charset, and in the `iri` charset invalid UTF-8, code
+  points outside `ucschar` and the bidi formatting characters RFC 3987 §4.1
+  forbids.
+- **`wire.url` is a different job**: an `http` or `https` request's parts,
+  read leniently, as written, as a browser takes a `Location`. It is not to
+  be made strict; what must be exactly a URI is asked of `wire.uri`.
+- The proof is JSON-Schema-Test-Suite's format cases (vendored under
+  testdata/, MIT), RFC 3986 §5.4's 41 resolution examples, every IPv6 form and
+  its near misses, recomposition and resolution properties, and fuzzing.
+
 ### Connections and the pool
 
 - **A route is where a connection goes**: TLS or not, host (compared without
@@ -585,6 +608,36 @@ the lock, and say so where they are declared.
 - **The environment is never read by uplink.** `Proxy.fromEnvironment` takes the
   environment it is given. Programs differ in variables, default port and what
   `no_proxy` can name, so the rules are a parameter.
+
+## What std leaves to uplink
+
+std is taken as fixed, and uplink (or reactor, below it) owns each gap:
+std's client sends a request in the clear through a CONNECT tunnel; its chunk
+parser can panic and misparse; 0.17's `Io.Threaded` cannot bound a socket
+operation (`ConnectOptions.timeout` panics, `operateTimeout` blocks timed
+writes), so resolving, dialing and their deadlines are reactor's;
+`HostName.connect` waits on `io.async` work (above), so uplink does not use it;
+`http.Method` is exhaustive; std has no Brotli
+(warp's) and no TLS server (cloak's).
+
+## Rivals and targets
+
+The rivals are libcurl, hyper and reqwest, ureq, Go's net/http, undici, httpx,
+std.http, and http.zig and websocket.zig for the server; fastwebsockets for
+WebSocket, picohttpparser and httparse for heads, nghttp2 for HPACK. Their
+drivers and results live outside this repository, which names no rival in
+code. Where uplink aims:
+
+- No allocation per request on the HTTP/1.1 keep-alive path after warm-up,
+  and an idle pooled connection holds no I/O buffer: about 1 KiB for plain TCP,
+  each TLS state about 2 KiB plus keys on cloak's engine. Both are tests.
+- Requests per second and tail latency at least the best of curl and hyper,
+  1.5x std.http; a server at least http.zig's rate; head parsing at least
+  httparse's. A miss is a defect, reported with the `Io` named where the gap
+  is the runtime's.
+- HPACK on a ring-buffer table with table-driven Huffman; WebSocket masking 32
+  bytes a step and payloads unmasked in place; a kept permessage-deflate
+  compressor is costly, so the server's default is `no_context_takeover`.
 
 ## Tests
 
