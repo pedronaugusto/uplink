@@ -28,8 +28,6 @@ gpa: Allocator,
 options: Options,
 /// The buffers connections and requests borrow.
 buffers: BufferPool,
-/// The deadlines of every connection's operations.
-deadlines: reactor.net.Deadlines,
 /// The buffers a zstd or Brotli request body is decoded in.
 windows: Windows,
 /// The encoders compressed responses are written through, when
@@ -156,12 +154,6 @@ pub const Timeouts = struct {
     /// take the server's last bytes (a refusal, a TLS alert) from the
     /// client before it reads them. Null closes at once.
     linger: ?Duration = .literal("2s"),
-
-    fn shortest(t: Timeouts) Duration {
-        var d: ?Duration = null;
-        for ([_]?Duration{ t.head, t.idle, t.activity, t.handshake }) |each| d = span.shorter(d, each);
-        return d orelse .literal("10s");
-    }
 };
 
 /// Every request as it is answered, with its timing, in one callback,
@@ -248,7 +240,6 @@ pub fn init(gpa: Allocator, options: Options) Context {
         .gpa = gpa,
         .options = options,
         .buffers = .init(gpa, options.max_free_buffers),
-        .deadlines = .init(span.toIo(options.timeouts.shortest())),
         .windows = .init(options.max_zstd_window, options.max_brotli_window),
         .encoders = if (options.compression) |c| .init(gpa, c.settings, options.max_free_buffers) else null,
         .tickets = if (own) |r| cloak.tls.TicketKeys.init(gpa, .{ .lifetime = span.toIo(r.lifetime), .rotation = span.toIo(r.rotation) }) catch aegis.assert.never("both spans were checked above") else null,
@@ -287,7 +278,6 @@ pub fn ticketKeys(c: *Context, io: Io) error{ OutOfMemory, EntropyUnavailable, C
 
 /// Release what the connections shared; every one must have ended.
 pub fn deinit(c: *Context, io: Io) void {
-    c.deadlines.deinit(io);
     c.windows.deinit(c.gpa);
     if (c.encoders) |*e| e.deinit(io);
     if (c.tickets) |*t| t.deinit();
@@ -297,7 +287,7 @@ pub fn deinit(c: *Context, io: Io) void {
 
 /// What keeps the deadlines of the server's connections.
 pub fn keeper(c: *Context) Timed.Keeper {
-    return .{ .deadlines = &c.deadlines, .unenforced = &c.counters.timeouts_unenforced };
+    return .{ .unenforced = &c.counters.timeouts_unenforced };
 }
 
 /// Whether the server is stopping.

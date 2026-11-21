@@ -438,7 +438,6 @@ fn teardown(conn: *Connection, io: Io, polite_at_first: bool) void {
         for (conn.session_buffers[i]) |b| conn.ctx.buffers.release(io, b);
         conn.session_on[i] = false;
     }
-    conn.timed.deinit(io, conn.ctx.keeper());
     switch (conn.bottom) {
         .endpoint => |*owned| owned.deinit(io),
         .carrier => |carrier| carrier.vtable.close(carrier, io),
@@ -1162,9 +1161,6 @@ fn socksTunnel(conn: *Connection, proxy: Proxy, started: Io.Timestamp) OpenError
     };
     conn.handshake_until = until;
     conn.handshake_bound = bound;
-    // The deadlines tick fine enough for a negotiation bounded by `connect`
-    // alone, which no per-operation timeout sets their tick for.
-    if (until) |u| ctx.deadlines.tighten(io, Io.Clock.awake.now(io).durationTo(u));
     defer {
         conn.handshake_until = null;
         conn.handshake_bound = .handshake;

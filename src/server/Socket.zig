@@ -305,7 +305,6 @@ pub fn close(c: *Socket) void {
         c.secure = false;
     }
     c.linger();
-    c.timed.deinit(io, c.context.keeper());
     c.context.closing(io, &c.entry);
     c.stream.deinit(io);
     for ([_]BufferPool.Buffer{ c.input.reclaim(), c.output.reclaim() }) |b| if (b.len != 0) pool.release(io, b);
