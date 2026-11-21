@@ -44,10 +44,17 @@ pub fn readsServices(r: Resolver) bool {
 
 pub const LookupError = reactor.net.ResolveError;
 
-/// Why `service` could not answer. A name whose records could not be had
-/// (no answer, a server failure) has none: a client then connects as it
-/// would without them (RFC 9460 §3).
-pub const ServiceError = error{ OutOfMemory, Canceled };
+/// Why `service` could not answer. A DNS outcome is no error: a name whose
+/// records DNS does not give (no answer, a server failure) has none, and a
+/// client then connects as it would without them (RFC 9460 §3). A refusal
+/// of this side's is named.
+pub const ServiceError = error{
+    OutOfMemory,
+    /// No task and no bound of the `Io`'s own could keep a wait's timeout:
+    /// nothing was asked, which is no DNS outcome.
+    ConcurrencyUnavailable,
+    Canceled,
+};
 
 /// An origin's HTTPS service binding: the ServiceMode records a client can
 /// use (every key they make mandatory known), the most preferred first,

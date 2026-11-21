@@ -263,8 +263,10 @@ fn serviceFn(io: Io, interface: *Resolver.Interface, gpa: Allocator, name: []con
     return d.https(io, gpa, name) catch |err| switch (err) {
         error.Canceled => error.Canceled,
         error.OutOfMemory => error.OutOfMemory,
-        // RFC 9460 §3: records that cannot be had are none.
-        error.InvalidName, error.NoName, error.NoAnswer, error.ConcurrencyUnavailable => null,
+        // RFC 9460 §3: records DNS does not give are none.
+        error.InvalidName, error.NoName, error.NoAnswer => null,
+        // Not DNS's answer but this `Io`'s refusal to bound the query.
+        error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
     };
 }
 
@@ -571,6 +573,38 @@ test "a server that never answers fails the lookup at the stub's timeout" {
     var d: Dns = .{ .transport = stub.transport() };
     var out: [8]IpAddress = undefined;
     try testing.expectError(error.NameServerFailure, d.resolver().lookup(io, "silent.test", 80, .ip4, &out));
+}
+
+/// An `Io` with no task to spare and no bound of its own on an operation.
+const Unbounding = @import("shakedown").Layer(u8, .{
+    .concurrent = struct {
+        fn concurrent(_: ?*anyopaque, _: usize, _: std.mem.Alignment, _: []const u8, _: std.mem.Alignment, _: *const fn (*const anyopaque, *anyopaque) void) Io.ConcurrentError!*Io.AnyFuture {
+            return error.ConcurrencyUnavailable;
+        }
+    }.concurrent,
+    .groupConcurrent = struct {
+        fn groupConcurrent(_: ?*anyopaque, _: *Io.Group, _: []const u8, _: std.mem.Alignment, _: *const fn (*const anyopaque) void) Io.ConcurrentError!void {
+            return error.ConcurrencyUnavailable;
+        }
+    }.groupConcurrent,
+    .batchAwaitConcurrent = struct {
+        fn awaitBatch(_: ?*anyopaque, _: *Io.Batch, _: Io.Timeout) Io.Batch.AwaitConcurrentError!void {
+            return error.ConcurrencyUnavailable;
+        }
+    }.awaitBatch,
+});
+
+test "a service lookup no wait of which can be bounded is refused by name, never read as no records" {
+    const testing = std.testing;
+    const base = @import("../testing/io.zig").io();
+    var fake: FakeServer = undefined;
+    try fake.start(base);
+    defer fake.stop(base);
+    const servers = [_]IpAddress{fake.address};
+    var stub: Stub = .init(&servers, .{ .timeout = .literal("2s"), .attempts = 1 });
+    var d: Dns = .{ .transport = stub.transport() };
+    var layer: Unbounding = .init(base, 0);
+    try testing.expectError(error.ConcurrencyUnavailable, d.resolver().service(layer.io(), testing.allocator, "small.test", 443));
 }
 
 test "a stub canceled at its socket returns error.Canceled, not the next server's answer" {
