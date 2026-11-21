@@ -279,7 +279,6 @@ fn openOnce(ctx: *Context, io: Io, route: Context.Route, options: OpenOptions, a
             else => |e| e,
         };
     };
-    if (!dialed.timeout_enforced) sync.bump(&ctx.counters.timeouts_unenforced);
     sync.bump(&ctx.counters.opened);
     if (diagnostics) |d| d.peer = dialed.peer;
     if (ctx.observer) |o| o.emit(.{ .connected = .{

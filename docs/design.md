@@ -240,9 +240,7 @@ the lock, and say so where they are declared.
   bounded by `Io.operateTimeout` where the `Io` can, and refused with
   `ConcurrencyUnavailable` where it cannot; a lookup, a service binding's
   lookup and a Unix socket's connect, which only a task can bound, are
-  refused so too. reactor's connect still connects unbounded there, and says
-  so: `Dialed.timeout_enforced` is false and `Client.stats().timeouts_unenforced`
-  counts it.
+  refused so too, and so is a connect with a timeout.
 - **Every span uplink takes or reports is aegis's** (`Duration`, nanoseconds,
   never negative): a timeout, a delay, a keepalive, a lifetime, and what the
   observer is told a step took. It reads and writes the same text a command
@@ -309,8 +307,8 @@ the lock, and say so where they are declared.
   it is. What only a socket has (options, a peek, a half close, a peer's
   address) is asked of `socketStream()`, and a pipe goes without. reactor
   opens the pipe overlapped and keeps its deadlines on its runtime; on any
-  other `Io` they are counted unenforced, as a socket's are where nothing
-  can keep them.
+  other `Io` an operation runs in a task its deadline ends, and with no task
+  to spare it is refused with `ConcurrencyUnavailable`, as a socket's is.
 ### Policy
 
 - **Redirects are followed, up to ten, and the default is the safe one.**

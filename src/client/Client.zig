@@ -129,9 +129,6 @@ pub const Stats = struct {
     reused: u64,
     idle: u32,
     in_use: u32,
-    /// Timeouts asked for that could not be kept: no task to keep them, and
-    /// an `Io` that cannot bound the operation itself.
-    timeouts_unenforced: u64,
 };
 
 pub fn stats(c: *const Client) Stats {
@@ -141,6 +138,5 @@ pub fn stats(c: *const Client) Stats {
         .reused = k.reused.load(.monotonic).raw(),
         .idle = c.shared.pool.count(),
         .in_use = k.in_use.load(.monotonic).raw(),
-        .timeouts_unenforced = k.timeouts_unenforced.load(.monotonic).raw(),
     };
 }

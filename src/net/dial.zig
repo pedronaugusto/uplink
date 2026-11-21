@@ -63,8 +63,6 @@ pub const Dialed = struct {
     /// The address connected to; null for a Unix socket. (A connected
     /// stream's own `socket.address` is the local end.)
     peer: ?IpAddress = null,
-    /// False when a timeout was asked for and no task could keep it.
-    timeout_enforced: bool = true,
     /// How long the name's lookup took; zero for an address.
     lookup: Duration = .fromRaw(0),
     /// How many addresses the name had.
@@ -121,7 +119,6 @@ fn dialBy(io: Io, host: []const u8, port: u16, hints: []const IpAddress, options
     return .{
         .stream = connected.stream.move(),
         .peer = connected.address,
-        .timeout_enforced = connected.timeout_enforced,
         .lookup = lookup,
         .addresses = @intCast(addresses.len), // safe: a lookup keeps at most `max_addresses`, 32
     };
@@ -351,7 +348,6 @@ pub fn interleave(addresses: []const IpAddress, out: []IpAddress) []IpAddress {
 const Won = struct {
     stream: OwnedStream,
     address: IpAddress,
-    timeout_enforced: bool,
 };
 
 /// What every attempt's socket is made with.
@@ -380,6 +376,9 @@ const Failures = struct {
             error.Canceled => return error.Canceled,
             // The same for every address: the socket's, not the peer's.
             error.OptionUnsupported => return error.OptionUnsupported,
+            // No task to keep the timeout: this side's, the same for every
+            // address, never a peer that failed.
+            error.ConcurrencyUnavailable => return error.ConcurrencyUnavailable,
             error.Timeout => f.timed_out = true,
             error.AccessDenied => f.denied += 1,
             else => {},
@@ -478,7 +477,7 @@ fn connectOne(io: Io, address: IpAddress, deadline: Io.Timeout, local: Local) re
     var c = try reactor.net.connect(io, &address, .{ .timeout = deadline, .socket = local.socket, .local_address = local.address, .interface = local.interface });
     var stream: Io.net.Stream = undefined;
     c.stream.take(&stream);
-    return .{ .stream = .init(.ofSocket(stream)), .address = address, .timeout_enforced = c.timeout_enforced };
+    return .{ .stream = .init(.ofSocket(stream)), .address = address };
 }
 
 const testing = std.testing;

@@ -327,9 +327,6 @@ pub const Counters = struct {
     reused: sync.Counter = .init(.fromRaw(0)),
     /// Connections an exchange holds now.
     in_use: sync.Gauge = .init(.fromRaw(0)),
-    /// Timeouts asked for that could not be kept, for want of a task to
-    /// keep them or an `Io` that bounds the operation.
-    timeouts_unenforced: sync.Counter = .init(.fromRaw(0)),
 };
 
 /// The system's authorities, read once, at the first verifying handshake

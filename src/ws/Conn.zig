@@ -15,6 +15,9 @@
 //!
 //! No task watches the connection: with `ping_interval` set, a reader that
 //! waits that long for a frame sends a ping, and closes after twice that.
+//! An interval the `Io` cannot keep (no bounded wait for a frame) is
+//! refused with `ConcurrencyUnavailable` when the connection is made, and
+//! never left to a reader that just reads.
 //!
 //! A connection must not move once it is used.
 
@@ -114,6 +117,9 @@ pub const ReadError = error{
     ConnectionFailed,
     /// No frame came within twice `ping_interval`.
     TimedOut,
+    /// The `Io` cannot wait a bounded time for a frame, which
+    /// `ping_interval` needs.
+    ConcurrencyUnavailable,
     Canceled,
     OutOfMemory,
 };
@@ -170,6 +176,15 @@ const Writing = struct {
 /// parameters agreed, if any.
 pub fn init(gpa: Allocator, role: Role, transport: Transport, options: Options, deflate: ?ws.Deflate) Conn {
     return .{ .gpa = gpa, .role = role, .transport = transport, .options = options, .deflate = deflate, .writing = .init(.{}) };
+}
+
+/// `ConcurrencyUnavailable` when `ping_interval` is set and the `Io`
+/// cannot wait a bounded time for a frame, which the interval needs: asked
+/// once, as the connection is made, so it is refused there and never left
+/// to a reader that just reads.
+pub fn keepsPingInterval(c: *Conn, io: Io) error{ ConcurrencyUnavailable, Canceled }!void {
+    if (c.options.ping_interval == null) return;
+    if (try c.transport.readableFn(&c.transport, io, span.toIo(.fromRaw(0))) == .unbounded) return error.ConcurrencyUnavailable;
 }
 
 /// Free what the connection holds. The stream under it is its owner's to
@@ -297,10 +312,20 @@ fn readHeader(c: *Conn, io: Io) ReadError!ws.Header {
 /// of silence and a close after the second.
 fn waitForFrame(c: *Conn, io: Io) ReadError!void {
     const interval = c.options.ping_interval orelse return;
-    // An `Io` that cannot wait a bounded time just reads.
-    if (try c.transport.readableFn(&c.transport, io, span.toIo(interval)) != .timed_out) return;
+    // An `Io` that cannot wait a bounded time is refused, never left to
+    // just read (`keepsPingInterval` refused it at the start where it could
+    // tell).
+    switch (try c.transport.readableFn(&c.transport, io, span.toIo(interval))) {
+        .ready => return,
+        .unbounded => return error.ConcurrencyUnavailable,
+        .timed_out => {},
+    }
     c.ping(io, "") catch |err| return answerFailed(err);
-    if (try c.transport.readableFn(&c.transport, io, span.toIo(interval)) != .timed_out) return;
+    switch (try c.transport.readableFn(&c.transport, io, span.toIo(interval))) {
+        .ready => return,
+        .unbounded => return error.ConcurrencyUnavailable,
+        .timed_out => {},
+    }
     c.failure = ws.Close.going_away;
     // The peer is gone or silent, and the close a courtesy; a cancel that
     // stops it is the read's answer.
@@ -678,12 +703,16 @@ pub fn close(c: *Conn, io: Io, code: u16, reason: []const u8) Io.Cancelable!void
     while (c.peer_close == null and c.failure == null) {
         const left = Io.Clock.awake.now(io).durationTo(until);
         if (span.spent(left)) return;
-        const ready = try c.transport.readableFn(&c.transport, io, left);
-        if (ready == .timed_out) return;
+        // A close that cannot wait a bounded time for the peer's ends
+        // without it, never reading unbounded.
+        switch (try c.transport.readableFn(&c.transport, io, left)) {
+            .ready => {},
+            .timed_out, .unbounded => return,
+        }
         // A close that cannot read the peer's ends without it.
         _ = c.next(io, &buffer) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
-            error.ProtocolError, error.ConnectionFailed, error.TimedOut, error.OutOfMemory => return,
+            error.ProtocolError, error.ConnectionFailed, error.TimedOut, error.ConcurrencyUnavailable, error.OutOfMemory => return,
         };
     }
 }

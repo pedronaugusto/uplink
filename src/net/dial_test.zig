@@ -41,9 +41,11 @@ test "a dial with no task to spare tries a name's addresses one after another" {
     var serial: Serial = .init(io, 0);
     const port = listener.socket.address.getPort();
     // An address connects; the connection completes in the backlog.
-    var by_address = try dial(serial.io(), "127.0.0.1", port, .{ .timeout = .literal("5s") });
+    var by_address = try dial(serial.io(), "127.0.0.1", port, .{});
     by_address.stream.deinit(io);
-    try testing.expect(!by_address.timeout_enforced);
+    // A timeout no task can keep refuses the dial before it connects, never
+    // a connect that waits unbounded.
+    try testing.expectError(error.ConcurrencyUnavailable, dial(serial.io(), "127.0.0.1", port, .{ .timeout = .literal("5s") }));
     // A name is looked up on a target that can do it without a task, and
     // refused on one that cannot; it never waits on itself.
     var by_name = dial(serial.io(), "localhost", port, .{}) catch |err| {
@@ -173,7 +175,6 @@ test "a dial with a timeout is bounded, on a runtime by the kernel with no fallb
     const before = reactor.fallbacks();
     var dialed = try dial(io, "127.0.0.1", listener.socket.address.getPort(), .{ .timeout = .literal("5s") });
     dialed.stream.deinit(io);
-    try testing.expect(dialed.timeout_enforced);
     // The peer is the listener, not the stream's own end.
     try testing.expect(dialed.peer.?.eql(&listener.socket.address));
     if (test_io.evented) try testing.expectEqual(before, reactor.fallbacks());

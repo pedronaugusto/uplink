@@ -609,7 +609,6 @@ test "an answer that stops coming is given up on at the activity timeout, and it
             const stats = client.stats();
             try testing.expectEqual(@as(u32, 0), stats.idle);
             try testing.expectEqual(@as(u32, 0), stats.in_use);
-            try testing.expectEqual(@as(u64, 0), stats.timeouts_unenforced);
         }
     }.inSim, .{});
 }
@@ -628,7 +627,7 @@ const Serial = shakedown.Layer(u8, .{
     }.groupConcurrent,
 });
 
-test "with no task to spare, reads are bounded by the Io where it can, and counted where it cannot" {
+test "with no task to spare, reads are bounded by the Io where it can" {
     try test_io.simulated(struct {
         fn inSim() !void {
             const server = try Server.start(testing.allocator, test_io.io(), Server.fixedAnswer(.{ .silent = true }));
@@ -646,7 +645,6 @@ test "with no task to spare, reads are bounded by the Io where it can, and count
                 return error.SkipZigTest;
             }
             try testing.expectError(error.TimedOut, client.send(io, .{ .url = server.url(&buf, "/") }));
-            try testing.expectEqual(@as(u64, 0), client.stats().timeouts_unenforced);
         }
     }.inSim, .{});
 }

@@ -205,8 +205,7 @@ operation by itself: on Windows it refuses a timed socket read, on POSIX a
 timed write waits only for the socket to take bytes, and its connect timeout
 is not implemented anywhere. With no task to spare, reads and writes are
 bounded by `Io.operateTimeout` where the `Io` can and refused with
-`ConcurrencyUnavailable` where it cannot, as a lookup is; a connect is not
-bounded, and `Client.stats().timeouts_unenforced` counts it.
+`ConcurrencyUnavailable` where it cannot, as a lookup and a connect are.
 
 **Names.** A name is looked up through a `Resolver`: the system's by default,
 or `Resolver.Static` for chosen names, as a pinned address does, and a

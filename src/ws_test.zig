@@ -70,6 +70,47 @@ fn open(running: *Running, client: *Client, opened: *ws.Opened, options: ws.Conn
     try ws.connect(opened, client, testing.allocator, test_io.io(), running.url(&buf, "/"), options);
 }
 
+/// An `Io` with no task to spare and no bound of its own on an operation.
+const Unbounding = @import("shakedown").Layer(u8, .{
+    .concurrent = struct {
+        fn concurrent(_: ?*anyopaque, _: usize, _: std.mem.Alignment, _: []const u8, _: std.mem.Alignment, _: *const fn (*const anyopaque, *anyopaque) void) Io.ConcurrentError!*Io.AnyFuture {
+            return error.ConcurrencyUnavailable;
+        }
+    }.concurrent,
+    .groupConcurrent = struct {
+        fn groupConcurrent(_: ?*anyopaque, _: *Io.Group, _: []const u8, _: std.mem.Alignment, _: *const fn (*const anyopaque) void) Io.ConcurrentError!void {
+            return error.ConcurrencyUnavailable;
+        }
+    }.groupConcurrent,
+    .batchAwaitConcurrent = struct {
+        fn awaitBatch(_: ?*anyopaque, _: *Io.Batch, _: Io.Timeout) Io.Batch.AwaitConcurrentError!void {
+            return error.ConcurrencyUnavailable;
+        }
+    }.awaitBatch,
+});
+
+test "a ping interval the Io cannot keep refuses the connection at setup, never a connection that just reads" {
+    try test_io.simulated(struct {
+        fn inSim() !void {
+            const gpa = testing.allocator;
+            const io = test_io.io();
+            const running = try Running.start(gpa, .of(echo));
+            defer running.stop();
+            var unbounding: Unbounding = .init(io, 0);
+            var seamed: test_io.Seamed = .{};
+            const bare = seamed.over(unbounding.io());
+            var client: Client = .init(gpa, .{});
+            defer client.deinit(bare);
+            var buf: [64]u8 = undefined;
+            var opened: ws.Opened = undefined;
+            if (ws.connect(&opened, &client, gpa, bare, running.url(&buf, "/"), .{ .conn = .{ .ping_interval = .literal("1s") } })) |_| {
+                opened.deinit(bare);
+                return error.TestUnexpectedResult;
+            } else |err| try testing.expectEqual(@as(anyerror, error.ConcurrencyUnavailable), @as(anyerror, err));
+        }
+    }.inSim, .{});
+}
+
 test "messages of every kind and size come back whole, compressed or not" {
     try test_io.simulated(struct {
         fn inSim() !void {
