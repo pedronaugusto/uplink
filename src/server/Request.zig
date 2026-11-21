@@ -108,6 +108,9 @@ pub const ReadError = error{
     /// timeout.
     ConnectionFailed,
     TimedOut,
+    /// No task and no bound of the `Io`'s own could keep a wait's timeout:
+    /// the read did not run.
+    ConcurrencyUnavailable,
     Canceled,
     /// Chunk framing that does not parse.
     HttpProtocolError,

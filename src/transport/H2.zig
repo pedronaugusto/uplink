@@ -274,6 +274,9 @@ pub const Error = error{
     /// The peer went away before it processed the stream: it may go again.
     Refused,
     TimedOut,
+    /// No task and no bound of the `Io`'s own could keep an operation's
+    /// deadline: it did not run.
+    ConcurrencyUnavailable,
     Canceled,
     OutOfMemory,
 };

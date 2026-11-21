@@ -157,6 +157,7 @@ fn streamError(err: H2.Error) Connection.OpenError {
         // The proxy went away before it took the stream.
         error.Refused => error.ProxyRefused,
         error.TimedOut => error.TimedOut,
+        error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
         error.Canceled => error.Canceled,
         error.OutOfMemory => error.OutOfMemory,
     };

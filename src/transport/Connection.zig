@@ -90,7 +90,15 @@ diagnostics: ?*Diagnostics = null,
 unbound: bool = false,
 
 /// Why an operation failed.
-pub const Failure = enum(u8) { none, timed_out, canceled, broken };
+pub const Failure = enum(u8) {
+    none,
+    timed_out,
+    canceled,
+    broken,
+    /// No task and no bound of the `Io`'s own could keep the operation's
+    /// deadline: it did not run.
+    unbounded,
+};
 
 /// Errors from `open`: a lookup's failure as `Resolver.lookup` names it
 /// (`UnknownHostName`, `NoAddressReturned`, `NameServerFailure`, ...), or the
@@ -128,6 +136,9 @@ pub const OpenError = Resolver.LookupError || error{
 pub const IoError = error{
     ConnectionFailed,
     TimedOut,
+    /// No task and no bound of the `Io`'s own could keep an operation's
+    /// deadline: it did not run.
+    ConcurrencyUnavailable,
     TlsFailed,
     ClientCertificateRejected,
     Canceled,
@@ -610,6 +621,7 @@ fn recordedCause(context: *const anyopaque) ?anyerror {
     return switch (conn.failed()) {
         .canceled => error.Canceled,
         .timed_out => error.TimedOut,
+        .unbounded => error.ConcurrencyUnavailable,
         .none, .broken => null,
     };
 }
@@ -651,6 +663,7 @@ pub fn readError(conn: *Connection) IoError {
     switch (conn.failed()) {
         .timed_out => return error.TimedOut,
         .canceled => return error.Canceled,
+        .unbounded => return error.ConcurrencyUnavailable,
         .none, .broken => {},
     }
     if (conn.timed.fired()) return conn.timedOut(conn.armed.load(.monotonic));
@@ -687,6 +700,7 @@ pub fn writeError(conn: *Connection) IoError {
     switch (conn.failed()) {
         .timed_out => return error.TimedOut,
         .canceled => return error.Canceled,
+        .unbounded => return error.ConcurrencyUnavailable,
         .none, .broken => {},
     }
     if (conn.timed.fired()) return conn.timedOut(conn.armed.load(.monotonic));
@@ -777,12 +791,13 @@ fn perform(conn: *Connection, op: Io.Operation) error{Failed}!Io.Operation.Resul
     const io = conn.io;
     const limit = conn.operationLimit(io, op == .net_read);
     if (limit) |l| conn.armed.store(l.kind, .monotonic);
-    return conn.timed.perform(io, conn.ctx.keeper(), op, if (limit) |l| l.at else null) catch |err| switch (err) {
+    return conn.timed.perform(io, op, if (limit) |l| l.at else null) catch |err| switch (err) {
         error.TimedOut => {
             conn.noteTimedOut(limit.?.kind);
             return error.Failed;
         },
         error.Canceled => conn.fail(.canceled),
+        error.ConcurrencyUnavailable => conn.fail(.unbounded),
     };
 }
 

@@ -18,7 +18,6 @@ const BufferPool = @import("BufferPool.zig");
 const span = @import("../span.zig");
 const Duration = span.Duration;
 const Windows = @import("../coding/windows.zig").Windows;
-const Timed = @import("../net/Timed.zig");
 const Observer = @import("Observer.zig");
 const Proxy = @import("Proxy.zig");
 const ProxyAuth = @import("ProxyAuth.zig");
@@ -92,11 +91,6 @@ pub fn init(gpa: Allocator, options: Options) Context {
 /// GREASE for a handshake with no ECH config, when the options ask for it.
 pub fn greaseOr(ctx: *const Context) cloak.tls.ech.Mode {
     return if (ctx.tls.ech == .grease) .grease else .off;
-}
-
-/// What keeps the deadlines of the context's connections.
-pub fn keeper(ctx: *Context) Timed.Keeper {
-    return .{ .unenforced = &ctx.counters.timeouts_unenforced };
 }
 
 /// The resolver connections use. Pointing at the context's cache, it is

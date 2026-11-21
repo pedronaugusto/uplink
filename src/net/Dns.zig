@@ -47,6 +47,9 @@ pub const Transport = struct {
 pub const ExchangeError = error{
     /// No server answered in time, or every one failed.
     NoAnswer,
+    /// No task and no bound of the `Io`'s own could keep a wait's timeout:
+    /// nothing was asked.
+    ConcurrencyUnavailable,
     Canceled,
 };
 
@@ -80,6 +83,7 @@ fn lookupFn(io: Io, interface: *Resolver.Interface, host: []const u8, port: u16,
             error.NoName => continue,
             // SERVFAIL, REFUSED, an unreadable answer, or none in time.
             error.NoAnswer => return error.NameServerFailure,
+            error.ConcurrencyUnavailable => return error.ConcurrencyUnavailable,
         };
         // NOERROR with no record of the family asked for.
         if (n == 0) return error.NoAddressReturned;
@@ -89,7 +93,7 @@ fn lookupFn(io: Io, interface: *Resolver.Interface, host: []const u8, port: u16,
     return error.UnknownHostName;
 }
 
-const NameError = error{ InvalidName, NoName, NoAnswer, Canceled };
+const NameError = error{ InvalidName, NoName, NoAnswer, ConcurrencyUnavailable, Canceled };
 
 /// `name`'s addresses, IPv6 first, into `out`; how many.
 fn lookupName(d: *const Dns, io: Io, name: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress) NameError!usize {
@@ -137,6 +141,7 @@ fn ask(d: *const Dns, io: Io, name: []const u8, kind: dns.Type, port: u16, out: 
     // Transport.exchange's contract returns the part of `answer` it wrote; a transport is any implementor's, behind a function pointer
     const answer = d.transport.exchange(io, query, &answer_buf) catch |err| return switch (err) {
         error.NoAnswer => error.NoAnswer,
+        error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
         error.Canceled => error.Canceled,
     };
     const m = dns.Message.parse(answer) catch return error.NoAnswer;
@@ -204,6 +209,7 @@ pub fn https(d: *const Dns, io: Io, gpa: Allocator, host: []const u8) (NameError
         // Transport.exchange's contract returns the part of `answer` it wrote; a transport is any implementor's, behind a function pointer
         const answer = d.transport.exchange(io, query, &answer_buf) catch |err| return switch (err) {
             error.NoAnswer => error.NoAnswer,
+            error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
             error.Canceled => error.Canceled,
         };
         const m = dns.Message.parse(answer) catch return error.NoAnswer;
@@ -258,7 +264,7 @@ fn serviceFn(io: Io, interface: *Resolver.Interface, gpa: Allocator, name: []con
         error.Canceled => error.Canceled,
         error.OutOfMemory => error.OutOfMemory,
         // RFC 9460 §3: records that cannot be had are none.
-        error.InvalidName, error.NoName, error.NoAnswer => null,
+        error.InvalidName, error.NoName, error.NoAnswer, error.ConcurrencyUnavailable => null,
     };
 }
 
@@ -286,8 +292,6 @@ pub const Stub = struct {
     rotate: bool = false,
     /// Private: the next server to start at, under `rotate`.
     turn: sync.Counter = .init(.fromRaw(0)),
-    /// Private: the sockets whose waits no task could bound.
-    unenforced: sync.Counter = .init(.fromRaw(0)),
     /// Private: the transport's function.
     exchanging: Transport = .{ .exchangeFn = exchange },
 
@@ -320,10 +324,6 @@ pub const Stub = struct {
         return &s.exchanging;
     }
 
-    fn keeper(s: *Stub) Timed.Keeper {
-        return .{ .unenforced = &s.unenforced };
-    }
-
     fn exchange(io: Io, t: *Transport, query: []const u8, answer: []u8) ExchangeError![]u8 {
         const s: *Stub = @alignCast(@fieldParentPtr("exchanging", t));
         if (s.servers.len == 0) return error.NoAnswer;
@@ -332,6 +332,7 @@ pub const Stub = struct {
             const server = s.servers[(first + i) % s.servers.len];
             const got = s.overUdp(io, server, query, answer) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
+                error.ConcurrencyUnavailable => return error.ConcurrencyUnavailable,
                 error.Failed => continue,
             };
             // An answer that does not parse is no answer: the next server is asked.
@@ -339,13 +340,14 @@ pub const Stub = struct {
             if (!message.flags.truncated) return got;
             return s.overTcp(io, server, query, answer) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
+                error.ConcurrencyUnavailable => return error.ConcurrencyUnavailable,
                 error.Failed => continue,
             };
         };
         return error.NoAnswer;
     }
 
-    const TryError = error{ Failed, Canceled };
+    const TryError = error{ Failed, ConcurrencyUnavailable, Canceled };
 
     /// The answer to `query` from `server` over UDP: a datagram from that
     /// address with the query's id and question, waited for until the
@@ -369,13 +371,14 @@ pub const Stub = struct {
         const deadline = Io.Clock.awake.now(io).addDuration(span.toIo(s.timeout));
         while (true) {
             var message: Io.net.IncomingMessage = .init;
-            const result = timed.perform(io, s.keeper(), .{ .net_receive = .{
+            const result = timed.perform(io, .{ .net_receive = .{
                 .socket_handle = socket.handle,
                 .message_buffer = (&message)[0..1],
                 .data_buffer = answer,
                 .flags = .{},
             } }, deadline) catch |err| return switch (err) {
                 error.TimedOut => error.Failed,
+                error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
                 error.Canceled => error.Canceled,
             };
             const maybe_err, const count = result.net_receive;
@@ -414,26 +417,28 @@ pub const Stub = struct {
                 skip = 0;
                 n += 1;
             }
-            const result = timed.perform(io, s.keeper(), .{ .net_write = .{ .socket_handle = stream.socket.handle, .data = rest[0..n] } }, deadline) catch |err| return switch (err) {
+            const result = timed.perform(io, .{ .net_write = .{ .socket_handle = stream.socket.handle, .data = rest[0..n] } }, deadline) catch |err| return switch (err) {
                 error.TimedOut => error.Failed,
+                error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
                 error.Canceled => error.Canceled,
             };
             sent += result.net_write catch return error.Failed;
         }
-        try s.readExact(io, &timed, stream, &length, deadline);
+        try readExact(io, &timed, stream, &length, deadline);
         const len = std.mem.readInt(u16, &length, .big);
         if (len > answer.len) return error.Failed;
-        try s.readExact(io, &timed, stream, answer[0..len], deadline);
+        try readExact(io, &timed, stream, answer[0..len], deadline);
         if (!sameQuestion(query, answer[0..len])) return error.Failed;
         return answer[0..len];
     }
 
-    fn readExact(s: *Stub, io: Io, timed: *Timed, stream: Io.net.Stream, into: []u8, deadline: Io.Timestamp) TryError!void {
+    fn readExact(io: Io, timed: *Timed, stream: Io.net.Stream, into: []u8, deadline: Io.Timestamp) TryError!void {
         var got: usize = 0;
         while (got < into.len) {
             var data = [_][]u8{into[got..]};
-            const result = timed.perform(io, s.keeper(), .{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } }, deadline) catch |err| return switch (err) {
+            const result = timed.perform(io, .{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } }, deadline) catch |err| return switch (err) {
                 error.TimedOut => error.Failed,
+                error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
                 error.Canceled => error.Canceled,
             };
             const n = (result.net_read catch return error.Failed).data_len;

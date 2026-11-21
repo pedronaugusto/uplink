@@ -18,7 +18,6 @@ const Body = @import("../transport/Body.zig");
 const Duration = span.Duration;
 const BufferPool = @import("../transport/BufferPool.zig");
 const Head = @import("../transport/Head.zig");
-const Timed = @import("../net/Timed.zig");
 const Windows = @import("../coding/windows.zig").Windows;
 const Encoder = @import("../coding/Encoder.zig");
 
@@ -283,11 +282,6 @@ pub fn deinit(c: *Context, io: Io) void {
     if (c.tickets) |*t| t.deinit();
     c.buffers.deinit(io);
     c.* = undefined;
-}
-
-/// What keeps the deadlines of the server's connections.
-pub fn keeper(c: *Context) Timed.Keeper {
-    return .{ .unenforced = &c.counters.timeouts_unenforced };
 }
 
 /// Whether the server is stopping.

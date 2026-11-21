@@ -523,6 +523,7 @@ pub fn h2Failure(run: *Run, io: Io, err: H2.Error) H2Error {
         },
         error.Refused => error.Refused,
         error.ConnectionFailed => error.ConnectionFailed,
+        error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
         error.TlsFailed => error.TlsFailed,
         error.ClientCertificateRejected => error.ClientCertificateRejected,
         error.Canceled => error.Canceled,
