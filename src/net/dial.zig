@@ -102,9 +102,8 @@ fn dialBy(io: Io, host: []const u8, port: u16, hints: []const IpAddress, options
     var storage: [max_addresses]IpAddress = undefined;
     const literal = reactor.net.literal(host, port) != null;
     const looking = Io.Clock.awake.now(io);
-    var bounded = true;
     // Resolver.lookupWithin's contract returns the part of `out` it wrote; a resolver is any implementor's, behind a function pointer
-    const addresses = options.resolver.lookupWithin(io, host, port, null, &storage, remaining(io, options.timeout, started), &bounded) catch |err| switch (err) {
+    const addresses = options.resolver.lookupWithin(io, host, port, null, &storage, remaining(io, options.timeout, started)) catch |err| switch (err) {
         // The name has no address: the service's hints stand in. Every
         // other failure, a cancel first, is the dial's.
         error.UnknownHostName, error.NoAddressReturned => if (hints.len != 0) hints else return err,
@@ -122,7 +121,7 @@ fn dialBy(io: Io, host: []const u8, port: u16, hints: []const IpAddress, options
     return .{
         .stream = connected.stream.move(),
         .peer = connected.address,
-        .timeout_enforced = bounded and connected.timeout_enforced,
+        .timeout_enforced = connected.timeout_enforced,
         .lookup = lookup,
         .addresses = @intCast(addresses.len), // safe: a lookup keeps at most `max_addresses`, 32
     };
@@ -164,8 +163,7 @@ pub const DialedHttps = struct {
 /// attempt share `options.timeout`.
 pub fn dialHttps(io: Io, gpa: Allocator, host: []const u8, port: u16, https: Https, options: Options) HttpsError!DialedHttps {
     const started = Io.Clock.awake.now(io);
-    var bounded = true;
-    var binding = try serviceWithin(options.resolver, io, gpa, host, port, options.timeout, &bounded);
+    var binding = try serviceWithin(options.resolver, io, gpa, host, port, options.timeout);
     errdefer if (binding) |*b| b.deinit(gpa);
     const looked: Duration = span.of(started.durationTo(Io.Clock.awake.now(io)));
     var reliant = false;
@@ -183,13 +181,11 @@ pub fn dialHttps(io: Io, gpa: Allocator, host: []const u8, port: u16, https: Htt
             },
         };
         dialed.lookup = looked.add(dialed.lookup) catch dialed.lookup;
-        dialed.timeout_enforced = dialed.timeout_enforced and bounded;
         return .{ .dialed = dialed, .binding = binding, .record = record };
     };
     if (reliant) return last;
     var dialed = try dialBy(io, host, port, &.{}, options, started);
     dialed.lookup = looked.add(dialed.lookup) catch dialed.lookup;
-    dialed.timeout_enforced = dialed.timeout_enforced and bounded;
     if (binding) |*b| b.deinit(gpa);
     return .{ .dialed = dialed, .binding = null, .record = null };
 }
@@ -222,7 +218,10 @@ fn hintsOf(s: @import("uplink.wire").dns.Service, port: u16, out: *[max_addresse
 
 /// `resolver.service`, given up once `timeout` runs out, as
 /// `Resolver.lookupWithin` is.
-fn serviceWithin(r: Resolver, io: Io, gpa: Allocator, host: []const u8, port: u16, timeout: ?Duration, bounded: *bool) HttpsError!?Resolver.Binding {
+/// The service binding's lookup, abandoned once `timeout` runs out, as
+/// `Resolver.lookupWithin` bounds a lookup: refused with
+/// `ConcurrencyUnavailable` when no task can be had, never run unbounded.
+fn serviceWithin(r: Resolver, io: Io, gpa: Allocator, host: []const u8, port: u16, timeout: ?Duration) HttpsError!?Resolver.Binding {
     if (!r.readsServices()) return null;
     const limit = timeout orelse return serviceNow(r, io, gpa, host, port);
     const Race = union(enum) {
@@ -238,17 +237,9 @@ fn serviceWithin(r: Resolver, io: Io, gpa: Allocator, host: []const u8, port: u1
         },
         .expired => {},
     };
-    race.concurrent(.found, serviceNow, .{ r, io, gpa, host, port }) catch {
-        bounded.* = false;
-        return serviceNow(r, io, gpa, host, port);
-    };
-    race.concurrent(.expired, Io.sleep, .{ io, span.toIo(limit), .awake }) catch {
-        bounded.* = false;
-        return switch (try race.await()) {
-            .found => |result| result,
-            .expired => unreachable, // unreachable: no delay was started
-        };
-    };
+    // The timer first: a lookup is started only once its bound is kept.
+    race.concurrent(.expired, Io.sleep, .{ io, span.toIo(limit), .awake }) catch return error.ConcurrencyUnavailable;
+    race.concurrent(.found, serviceNow, .{ r, io, gpa, host, port }) catch return error.ConcurrencyUnavailable;
     return switch (try race.await()) {
         .found => |result| result,
         .expired => |result| if (result) |_| error.TimedOut else |err| err,
@@ -263,7 +254,8 @@ fn serviceNow(r: Resolver, io: Io, gpa: Allocator, host: []const u8, port: u16) 
 /// socket options for TCP do not apply.
 ///
 /// reactor's connect is for IP addresses, so the attempt is raced against a
-/// sleep as a task of its own, or run unbounded when none can be had.
+/// sleep as a task of its own; with no task to spare it is refused with
+/// `ConcurrencyUnavailable` before it starts, never run unbounded.
 pub fn dialUnix(io: Io, path: []const u8, options: Options) DialError!Dialed {
     const limit = options.timeout orelse return unixNow(io, path);
     const Race = union(enum) {
@@ -281,22 +273,9 @@ pub fn dialUnix(io: Io, path: []const u8, options: Options) DialError!Dialed {
         },
         .expired => {},
     };
-    race.concurrent(.connected, unixNow, .{ io, path }) catch {
-        var d = try unixNow(io, path);
-        d.timeout_enforced = false;
-        return d;
-    };
-    race.concurrent(.expired, Io.sleep, .{ io, span.toIo(limit), .awake }) catch {
-        // The attempt runs already; wait for it, unbounded.
-        switch (try race.await()) {
-            .connected => |result| {
-                var d = try result;
-                d.timeout_enforced = false;
-                return d;
-            },
-            .expired => unreachable, // unreachable: no delay was started
-        }
-    };
+    // The timer first: the attempt is started only once its bound is kept.
+    race.concurrent(.expired, Io.sleep, .{ io, span.toIo(limit), .awake }) catch return error.ConcurrencyUnavailable;
+    race.concurrent(.connected, unixNow, .{ io, path }) catch return error.ConcurrencyUnavailable;
     return switch (try race.await()) {
         .connected => |result| result,
         .expired => |result| if (result) |_| error.TimedOut else |err| err,

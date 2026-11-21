@@ -7,12 +7,13 @@
 //! Every read and write on the socket goes through one place, which keeps
 //! the connection's deadlines: the activity timeout of the operation, the
 //! handshake's while one is under way, the request's own deadline, and the
-//! low-speed window's end. The nearest is kept by the client's
-//! `Deadlines`: in the kernel on a reactor runtime, by one task on any
-//! other `Io`. Where no task can be had for that, the operation is bounded
-//! by the `Io` itself where it can be (`operateTimeout`), and counted as
-//! unenforced where it cannot. An operation with no deadline to keep reads
-//! no clock. A connection whose deadline fired is never used again.
+//! low-speed window's end. The nearest is kept by reactor's `Deadlines`:
+//! in the kernel on a reactor runtime, by a task of its own that the
+//! deadline cancels on any other `Io`. Where no task can be had for that,
+//! the operation is bounded by the `Io` itself where it can be
+//! (`operateTimeout`), and refused with `ConcurrencyUnavailable` where it
+//! cannot: it never runs unbounded. An operation with no deadline to keep
+//! reads no clock. A connection whose deadline fired is never used again.
 //!
 //! The socket's buffers come from the client's pool. A connection put away
 //! idle gives them back, keeping only what its TLS sessions need.
@@ -1213,9 +1214,8 @@ fn socksLookup(conn: *Connection, ipv4: bool, until: ?Io.Timestamp) OpenError!Io
     var storage: [reactor.net.max_addresses]Io.net.IpAddress = undefined;
     const timeout: ?Io.Duration = if (until) |u| Io.Clock.awake.now(io).durationTo(u) else null;
     if (timeout) |t| if (span.spent(t)) return conn.timedOutOpen();
-    var bounded = true;
     // Resolver.lookupWithin's contract returns the part of `out` it wrote; a resolver is any implementor's, behind a function pointer
-    const addresses = conn.ctx.resolve().lookupWithin(io, conn.route.host(), conn.route.port, if (ipv4) .ip4 else null, &storage, if (timeout) |t| span.of(t) else null, &bounded) catch |err| return switch (err) {
+    const addresses = conn.ctx.resolve().lookupWithin(io, conn.route.host(), conn.route.port, if (ipv4) .ip4 else null, &storage, if (timeout) |t| span.of(t) else null) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
         error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
         error.TimedOut => conn.timedOutOpen(),
@@ -1227,7 +1227,6 @@ fn socksLookup(conn: *Connection, ipv4: bool, until: ?Io.Timestamp) OpenError!Io
         error.ResolvConfParseFailed => error.ResolvConfParseFailed,
         error.SystemResources => error.SystemResources,
     };
-    if (!bounded) sync.bump(&conn.ctx.counters.timeouts_unenforced);
     var address: ?Io.net.IpAddress = null;
     for (addresses) |a| {
         if (address == null or (!ipv4 and address.? == .ip4 and a == .ip6)) address = a;
