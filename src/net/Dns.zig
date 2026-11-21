@@ -354,23 +354,28 @@ pub const Stub = struct {
 
     const TryError = error{ Failed, Canceled };
 
-    /// The answer to `query` from `server` over UDP: a datagram from that
-    /// address with the query's id and question, waited for until the
-    /// timeout; others are dropped.
+    /// The answer to `query` from `server` over UDP: a datagram with the
+    /// query's id and question, waited for until the timeout; others are
+    /// dropped.
+    ///
+    /// The socket is connected to the server, so only its datagrams arrive,
+    /// a refusal (ICMP port unreachable) ends the wait at once, and a
+    /// deadline that fires can end it: reactor's `Deadlines` end a wait by a
+    /// shutdown, which an unconnected datagram socket refuses as not
+    /// connected, and its receive then waited past every deadline.
     fn overUdp(s: *Stub, io: Io, server: IpAddress, query: []const u8, answer: []u8) TryError![]u8 {
-        const any: IpAddress = switch (server) {
-            .ip4 => .{ .ip4 = .unspecified(0) },
-            .ip6 => .{ .ip6 = .unspecified(0) },
-        };
-        const socket = any.bind(io, .{ .mode = .dgram }) catch |err| return switch (err) {
+        const stream = server.connect(io, .{ .mode = .dgram }) catch |err| return switch (err) {
             error.Canceled => error.Canceled,
             else => error.Failed,
         };
+        const socket = stream.socket;
         defer socket.close(io);
-        socket.send(io, &server, query) catch |err| return switch (err) {
+        const parts = [_][]const u8{query};
+        const sent = io.operate(.{ .net_write = .{ .socket_handle = socket.handle, .data = &parts } }) catch |err| return switch (err) {
             error.Canceled => error.Canceled,
-            else => error.Failed,
         };
+        const written = sent.net_write catch return error.Failed;
+        if (written != query.len) return error.Failed;
         var timed: Timed = .init(.ofSocket(.{ .socket = socket }));
         defer timed.deinit(io, s.keeper());
         const deadline = Io.Clock.awake.now(io).addDuration(span.toIo(s.timeout));
@@ -565,7 +570,7 @@ test "a lookup's failure is named by what the server said" {
     try testing.expectError(error.NameServerFailure, r.lookup(io, "refused.test", 80, null, &out));
 }
 
-test "a lookup no server answers in time is a name server's failure" {
+test "a server that never answers fails the lookup at the stub's timeout" {
     const testing = std.testing;
     const io = @import("../testing/io.zig").io();
     var fake: FakeServer = undefined;
@@ -594,8 +599,8 @@ test "a stub canceled at its socket returns error.Canceled, not the next server'
     const query = try dns.writeQuery(&query_buf, 7, "small.test", .a);
     var answer: [dns.max_message]u8 = undefined;
     for ([_]shakedown.IoPlan.Entry{
-        .{ .at = .{ .nth = .{ .call = .netBindIp, .n = 1 } }, .fault = .cancel },
-        .{ .at = .{ .nth = .{ .call = .net_send, .n = 1 } }, .fault = .cancel },
+        .{ .at = .{ .nth = .{ .call = .netConnectIp, .n = 1 } }, .fault = .cancel },
+        .{ .at = .{ .nth = .{ .call = .net_write, .n = 1 } }, .fault = .cancel },
     }) |entry| {
         const fio = try shakedown.FaultIo.init(testing.allocator, base, .{ .plan = &.{entry} });
         defer fio.deinit();

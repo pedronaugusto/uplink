@@ -75,6 +75,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A `Dns.Stub` lookup whose server never answers fails at the stub's timeout, where it waited forever on Darwin and the BSDs: a deadline ends a wait by shutting the socket down, which an unconnected datagram socket refuses as not connected. The stub's UDP socket is connected to the server, so the deadline ends its wait, only that server's datagrams arrive, and a refusal (ICMP port unreachable) moves on to the next server at once.
 - A brotli body is decoded by warp main fb3a584, whose bit reader keeps its place across a stream fed in pieces, where a piece's end could panic a ReleaseSafe build (the release tier's fuzz finding, on Windows): a response or request body under `br` reached it from the peer. warp was pinned at 4649084.
 - A target `wire.uri.resolve` and `wire.url.resolve` write with no authority keeps a path that begins with `//` a path, `/.` before it (RFC 3986 §3.3, as the URL Standard writes it), where it read back as an authority: `urn:a:b` with `/.//` gave `urn://`, and a `Location` of `x:/.//h` resolved to `x://h`, a URL naming the host `h`. The release tier's fuzz job found it (tape `0:2:0:0:6:1:0:3:2f`, now a regression of the resolution property).
 - A zstd body is decoded by warp main 79a4611, whose decoder no longer reads out of bounds on a crafted frame (advisory GHSA-9r52-p7vw-225m): a response or request body under `zstd` reached it from the peer. warp was pinned at 569a2f8.
