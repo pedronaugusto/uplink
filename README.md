@@ -203,9 +203,10 @@ client costs no wakeups. Either way an operation with no deadline reads no
 clock. `Io.Threaded` needs the task because it cannot bound a socket
 operation by itself: on Windows it refuses a timed socket read, on POSIX a
 timed write waits only for the socket to take bytes, and its connect timeout
-is not implemented anywhere. With no task to spare, reads are bounded by
-`Io.operateTimeout` where the `Io` can, connects are not bounded, and
-`Client.stats().timeouts_unenforced` counts what was not kept.
+is not implemented anywhere. With no task to spare, reads and writes are
+bounded by `Io.operateTimeout` where the `Io` can and refused with
+`ConcurrencyUnavailable` where it cannot, as a lookup is; a connect is not
+bounded, and `Client.stats().timeouts_unenforced` counts it.
 
 **Names.** A name is looked up through a `Resolver`: the system's by default,
 or `Resolver.Static` for chosen names, as a pinned address does, and a
@@ -425,8 +426,8 @@ has it. A refused option is returned by name, never passed over. `Dial`
 also takes a local address (only the name's addresses of its family are
 then tried) and an interface. On
 Windows, with no task to spare, a read timeout cannot be kept: `Io.Threaded`
-refuses a timed socket read there, and the client counts it in
-`timeouts_unenforced`. For the same reason a request with `expect_continue`
+refuses a timed socket read there, and the read is refused with
+`ConcurrencyUnavailable`. For the same reason a request with `expect_continue`
 sends its body there at once instead of waiting for the go-ahead. On
 reactor's runtime both are kept on every system.
 

@@ -193,8 +193,6 @@ pub const Timeout = enum { head, idle, activity, handshake };
 pub const Counters = struct {
     accepted: sync.Counter = .init(.fromRaw(0)),
     requests: sync.Counter = .init(.fromRaw(0)),
-    /// Timeouts no task and no `Io` could keep.
-    timeouts_unenforced: sync.Counter = .init(.fromRaw(0)),
     /// Connections closed unserved for want of memory.
     dropped: sync.Counter = .init(.fromRaw(0)),
 };

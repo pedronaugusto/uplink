@@ -150,11 +150,12 @@ pub const LookupWithinError = LookupError || error{
     TimedOut,
 };
 
-/// `lookup`, abandoned once `timeout` runs out. Keeping the bound needs a
-/// task to race the lookup against; with none to spare the lookup runs
-/// unbounded, and `bounded` is set false.
-pub fn lookupWithin(r: Resolver, io: Io, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress, timeout: ?Duration, bounded: *bool) LookupWithinError![]IpAddress {
-    bounded.* = true;
+/// `lookup`, abandoned once `timeout` runs out: the lookup runs in a task
+/// of its own, raced against a task that sleeps out the timeout. With no
+/// task to spare for either it is refused with `ConcurrencyUnavailable`
+/// before it starts, and never runs unbounded. A name that is an address
+/// needs no lookup.
+pub fn lookupWithin(r: Resolver, io: Io, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress, timeout: ?Duration) LookupWithinError![]IpAddress {
     const limit = timeout orelse return r.lookupMapped(io, host, port, family, out);
     if (reactor.net.literal(host, port) != null) return r.lookupMapped(io, host, port, family, out);
     const Race = union(enum) {
@@ -164,18 +165,9 @@ pub fn lookupWithin(r: Resolver, io: Io, host: []const u8, port: u16, family: ?I
     var buffer: [2]Race = undefined;
     var race: Io.Select(Race) = .init(io, &buffer);
     defer while (race.cancel()) |_| {};
-    race.concurrent(.found, lookup, .{ r, io, host, port, family, out }) catch {
-        bounded.* = false;
-        return r.lookupMapped(io, host, port, family, out);
-    };
-    race.concurrent(.expired, Io.sleep, .{ io, span.toIo(limit), .awake }) catch {
-        // The lookup runs already; wait for it, unbounded.
-        bounded.* = false;
-        return switch (try race.await()) {
-            .found => |result| result,
-            .expired => unreachable, // unreachable: no delay was started
-        };
-    };
+    // The timer first: a lookup is started only once its bound is kept.
+    race.concurrent(.expired, Io.sleep, .{ io, span.toIo(limit), .awake }) catch return error.ConcurrencyUnavailable;
+    race.concurrent(.found, lookup, .{ r, io, host, port, family, out }) catch return error.ConcurrencyUnavailable;
     return switch (try race.await()) {
         .found => |result| result,
         .expired => |result| if (result) |_| error.TimedOut else |err| err,
@@ -565,29 +557,33 @@ const Counting = struct {
 /// and answers 10.0.0.1.
 const Slow = struct {
     resolving: Interface = .{ .lookupFn = answer },
+    /// How many lookups started.
+    started: u32 = 0,
 
     fn resolver(s: *Slow) Resolver {
         return .{ .interface = &s.resolving };
     }
 
-    fn answer(io: Io, _: *Interface, _: []const u8, port: u16, _: ?IpAddress.Family, out: []IpAddress) LookupError![]IpAddress {
+    fn answer(io: Io, interface: *Interface, _: []const u8, port: u16, _: ?IpAddress.Family, out: []IpAddress) LookupError![]IpAddress {
+        const s: *Slow = @alignCast(@fieldParentPtr("resolving", interface));
+        s.started += 1;
         try io.sleep(span.toIo(.literal("20ms")), .awake);
         out[0] = .{ .ip4 = .{ .bytes = .{ 10, 0, 0, 1 }, .port = port } };
         return out[0..1];
     }
 };
 
-test "a lookup with no task for its limit is waited for, never canceled" {
-    // The lookup's task starts; the limit's does not.
-    const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .groupConcurrent, .n = 2 } }, .fault = .{ .fail = error.ConcurrencyUnavailable } }};
-    const fio = try shakedown.FaultIo.init(testing.allocator, test_io.io(), .{ .plan = &plan });
-    defer fio.deinit();
-    var out: [4]IpAddress = undefined;
-    var bounded = true;
-    var slow: Slow = .{};
-    const found = try slow.resolver().lookupWithin(fio.io(), "slow.example", 80, null, &out, .literal("5s"), &bounded);
-    try testing.expectEqual(@as(usize, 1), found.len);
-    try testing.expect(!bounded);
+test "a lookup with no task for its limit is refused, and never runs unbounded" {
+    // Either task of the race refused: the lookup never runs.
+    for ([_]u32{ 1, 2 }) |n| {
+        const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .groupConcurrent, .n = n } }, .fault = .{ .fail = error.ConcurrencyUnavailable } }};
+        const fio = try shakedown.FaultIo.init(testing.allocator, test_io.io(), .{ .plan = &plan });
+        defer fio.deinit();
+        var out: [4]IpAddress = undefined;
+        var slow: Slow = .{};
+        try testing.expectError(error.ConcurrencyUnavailable, slow.resolver().lookupWithin(fio.io(), "slow.example", 80, null, &out, .literal("5s")));
+        try testing.expectEqual(@as(u32, 0), slow.started);
+    }
 }
 
 test "static entries answer their names on their ports, and pass the rest on" {

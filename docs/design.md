@@ -236,11 +236,13 @@ the lock, and say so where they are declared.
   not implemented on any system. reactor's connect keeps its timeout in the
   kernel on a runtime and, on any other `Io`, abandons the attempt by canceling
   the task it runs on.
-- **Without a task to spare the client degrades and says so**: reads are
-  bounded by `Io.operateTimeout` where the `Io` can, connects are not bounded,
-  `Dialed.timeout_enforced` is false, and `Client.stats().timeouts_unenforced`
-  counts what was not kept. A timeout that cannot be kept is reported, not
-  assumed.
+- **Without a task to spare nothing runs unbounded**: reads and writes are
+  bounded by `Io.operateTimeout` where the `Io` can, and refused with
+  `ConcurrencyUnavailable` where it cannot; a lookup, a service binding's
+  lookup and a Unix socket's connect, which only a task can bound, are
+  refused so too. reactor's connect still connects unbounded there, and says
+  so: `Dialed.timeout_enforced` is false and `Client.stats().timeouts_unenforced`
+  counts it.
 - **Every span uplink takes or reports is aegis's** (`Duration`, nanoseconds,
   never negative): a timeout, a delay, a keepalive, a lifetime, and what the
   observer is told a step took. It reads and writes the same text a command

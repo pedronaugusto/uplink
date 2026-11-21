@@ -88,8 +88,6 @@ pub const Stats = struct {
     requests: u64,
     /// Connections open now.
     open: u32,
-    /// Timeouts no task and no `Io` could keep.
-    timeouts_unenforced: u64,
     /// Connections closed unserved for want of memory: a buffer to read
     /// their requests into, or an HTTP/2 session.
     dropped: u64,
@@ -103,7 +101,6 @@ pub fn stats(s: *Server, io: Io) Stats {
         .accepted = k.accepted.load(.monotonic).raw(),
         .requests = k.requests.load(.monotonic).raw(),
         .open = s.context.openNow(io),
-        .timeouts_unenforced = k.timeouts_unenforced.load(.monotonic).raw(),
         .dropped = k.dropped.load(.monotonic).raw(),
     };
 }
