@@ -78,12 +78,15 @@ fn lookupFn(io: Io, interface: *Resolver.Interface, host: []const u8, port: u16,
             error.Canceled => return error.Canceled,
             error.InvalidName => return error.InvalidHostName,
             error.NoName => continue,
-            error.NoAnswer => return error.NameNotResolved,
+            // SERVFAIL, REFUSED, an unreadable answer, or none in time.
+            error.NoAnswer => return error.NameServerFailure,
         };
-        if (n == 0) return error.NameNotResolved;
+        // NOERROR with no record of the family asked for.
+        if (n == 0) return error.NoAddressReturned;
         return out[0..n];
     }
-    return error.NameNotResolved;
+    // NXDOMAIN for every name the search list made.
+    return error.UnknownHostName;
 }
 
 const NameError = error{ InvalidName, NoName, NoAnswer, Canceled };
@@ -527,7 +530,7 @@ test "a stub asks a server over UDP, and over TCP when the answer is truncated" 
     // Truncated over UDP: the whole answer over TCP, through a CNAME.
     const big = try r.lookup(io, "big.test", 80, .ip4, &out);
     try testing.expectEqual(3, big.len);
-    try testing.expectError(error.NameNotResolved, r.lookup(io, "missing.test", 80, null, &out));
+    try testing.expectError(error.UnknownHostName, r.lookup(io, "missing.test", 80, null, &out));
     var binding = (try d.https(io, testing.allocator, "small.test")).?;
     defer binding.deinit(testing.allocator);
     try testing.expectEqual(1, binding.records.len);
@@ -538,6 +541,42 @@ test "a stub asks a server over UDP, and over TCP when the answer is truncated" 
     var protocols = service.alpn();
     try testing.expectEqualStrings("h2", (try protocols.next()).?);
     try testing.expectEqual(8443, service.port().?);
+}
+
+test "a lookup's failure is named by what the server said" {
+    const testing = std.testing;
+    const io = @import("../testing/io.zig").io();
+    var fake: FakeServer = undefined;
+    try fake.start(io);
+    defer fake.stop(io);
+    const servers = [_]IpAddress{fake.address};
+    var stub: Stub = .init(&servers, .{ .timeout = .literal("200ms"), .attempts = 1 });
+    defer stub.deinit(io);
+    var d: Dns = .{ .transport = stub.transport() };
+    const r = d.resolver();
+    var out: [8]IpAddress = undefined;
+    // NXDOMAIN.
+    try testing.expectError(error.UnknownHostName, r.lookup(io, "missing.test", 80, null, &out));
+    // NOERROR, and no record of the family asked for.
+    try testing.expectEqual(1, (try r.lookup(io, "four.test", 80, .ip4, &out)).len);
+    try testing.expectError(error.NoAddressReturned, r.lookup(io, "four.test", 80, .ip6, &out));
+    // SERVFAIL and REFUSED.
+    try testing.expectError(error.NameServerFailure, r.lookup(io, "servfail.test", 80, null, &out));
+    try testing.expectError(error.NameServerFailure, r.lookup(io, "refused.test", 80, null, &out));
+}
+
+test "a lookup no server answers in time is a name server's failure" {
+    const testing = std.testing;
+    const io = @import("../testing/io.zig").io();
+    var fake: FakeServer = undefined;
+    try fake.start(io);
+    defer fake.stop(io);
+    const servers = [_]IpAddress{fake.address};
+    var stub: Stub = .init(&servers, .{ .timeout = .literal("200ms"), .attempts = 1 });
+    defer stub.deinit(io);
+    var d: Dns = .{ .transport = stub.transport() };
+    var out: [8]IpAddress = undefined;
+    try testing.expectError(error.NameServerFailure, d.resolver().lookup(io, "silent.test", 80, .ip4, &out));
 }
 
 test "a stub canceled at its socket returns error.Canceled, not the next server's answer" {
@@ -595,13 +634,9 @@ test "the system's configuration is read: its servers, at most three" {
 /// AAAA record and an HTTPS record; `big.test` is a CNAME to `many.test`,
 /// whose three A records come truncated over UDP and whole over TCP; any
 /// other name does not exist.
-fn closeServer(server: *Io.net.Server, io: Io) void {
-    server.deinit(io);
-}
-
 const FakeServer = struct {
     udp: Io.net.Socket,
-    tcp: aegis.own.OwnedIo(Io.net.Server, closeServer),
+    tcp: aegis.own.Server,
     address: IpAddress,
     udp_task: Io.Future(void),
     tcp_task: Io.Future(void),
@@ -699,6 +734,8 @@ const FakeServer = struct {
         const name = dns.readName(query, q.question_at, &name_buf) catch return null;
         const kind = std.mem.readInt(u16, query[q.answers_at - 4 ..][0..2], .big);
         @memcpy(out[0..q.answers_at], query[0..q.answers_at]);
+        // `silent.test` is never answered.
+        if (std.mem.eql(u8, name, "silent.test")) return null;
         var flags: u16 = 0x8180;
         var records: [4][]const u8 = undefined;
         var n: usize = 0;
@@ -721,6 +758,16 @@ const FakeServer = struct {
                 },
                 else => {},
             }
+        } else if (std.mem.eql(u8, name, "four.test")) {
+            // An A record and no other: NOERROR and no AAAA.
+            if (kind == 1) {
+                records[0] = "\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04\xc0\x00\x02\x04";
+                n = 1;
+            }
+        } else if (std.mem.eql(u8, name, "servfail.test")) {
+            flags |= 2;
+        } else if (std.mem.eql(u8, name, "refused.test")) {
+            flags |= 5;
         } else if (std.mem.eql(u8, name, "big.test")) {
             if (udp) {
                 flags |= 0x0200;

@@ -71,12 +71,13 @@ pub const Dialed = struct {
     addresses: u8 = 1,
 };
 
-/// Why no connection was made.
-pub const DialError = error{
-    /// The name is not a host name.
-    InvalidHostName,
-    /// The name has no address.
-    NameNotResolved,
+/// Why no connection was made: the lookup's failure as
+/// `Resolver.lookupWithin` names it (`UnknownHostName`, `NoAddressReturned`,
+/// `NameServerFailure`, ...), or the connection's.
+pub const DialError = Resolver.LookupWithinError || error{
+    /// A Unix socket's or a named pipe's path names no file: no server has
+    /// made it there. A path, not a host name, so no lookup failed.
+    FileNotFound,
     /// Every address refused or failed.
     ConnectionFailed,
     /// The system has no such socket option, or refuses its value.
@@ -86,14 +87,8 @@ pub const DialError = error{
     AccessDenied,
     /// The name has no address of the local address's family.
     AddressFamilyMismatch,
-    /// `Options.timeout` ran out.
-    TimedOut,
     /// A named pipe asked for on a system that has none: Windows' alone.
     NamedPipeUnsupported,
-    /// A name was to be looked up with no task to spare, on a target with
-    /// no lookup of its own.
-    ConcurrencyUnavailable,
-    Canceled,
 };
 
 /// Connect to `host` on `port`.
@@ -110,11 +105,10 @@ fn dialBy(io: Io, host: []const u8, port: u16, hints: []const IpAddress, options
     var bounded = true;
     // Resolver.lookupWithin's contract returns the part of `out` it wrote; a resolver is any implementor's, behind a function pointer
     const addresses = options.resolver.lookupWithin(io, host, port, null, &storage, remaining(io, options.timeout, started), &bounded) catch |err| switch (err) {
-        error.NameNotResolved => if (hints.len != 0) hints else return error.NameNotResolved,
-        error.InvalidHostName => return error.InvalidHostName,
-        error.ConcurrencyUnavailable => return error.ConcurrencyUnavailable,
-        error.TimedOut => return error.TimedOut,
-        error.Canceled => return error.Canceled,
+        // The name has no address: the service's hints stand in. Every
+        // other failure, a cancel first, is the dial's.
+        error.UnknownHostName, error.NoAddressReturned => if (hints.len != 0) hints else return err,
+        else => |e| return e,
     };
     const lookup: Duration = if (literal) .fromRaw(0) else span.of(looking.durationTo(Io.Clock.awake.now(io)));
     // The lookup took its share of the one limit; the attempts end at what
@@ -319,7 +313,7 @@ pub fn dialPipe(io: Io, path: []const u8, options: Options) DialError!Dialed {
         error.NamedPipeUnsupported => error.NamedPipeUnsupported,
         error.InvalidPipeName => error.InvalidHostName,
         // No server has made it, as a Unix socket's missing path is.
-        error.FileNotFound => error.NameNotResolved,
+        error.FileNotFound => error.FileNotFound,
         error.AccessDenied => error.AccessDenied,
         error.Timeout => error.TimedOut,
         error.Unexpected => error.ConnectionFailed,
@@ -333,7 +327,7 @@ fn unixNow(io: Io, path: []const u8) DialError!Dialed {
     const address = Io.net.UnixAddress.init(path) catch return error.InvalidHostName;
     const stream = address.connect(io) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
-        error.FileNotFound, error.NotDir => error.NameNotResolved,
+        error.FileNotFound, error.NotDir => error.FileNotFound,
         else => error.ConnectionFailed,
     };
     return .{ .stream = .init(.ofSocket(stream)) };

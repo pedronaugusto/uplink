@@ -378,9 +378,9 @@ pub const Sessions = struct {
         const cache = try gpa.create(cloak.tls.SessionCache);
         errdefer gpa.destroy(cache);
         cache.* = cloak.tls.SessionCache.init(gpa, .{
-            .max_entries = options.max_tickets,
-            .max_bytes = options.max_bytes.raw(),
-            .per_key = options.per_server,
+            .max_entries = .fromRaw(options.max_tickets),
+            .max_bytes = .fromRaw(options.max_bytes.raw()),
+            .per_key = .fromRaw(options.per_server),
         }) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.InvalidOptions => unreachable, // unreachable: `Context.init` checked the bounds

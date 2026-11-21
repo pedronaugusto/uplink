@@ -170,15 +170,11 @@ const Record = struct {
 /// key, values and head read.
 const Held = struct {
     handle: Handle,
-    file: aegis.own.OwnedIo(Io.File, closeFile),
+    file: aegis.own.File,
     framing: Framing,
     /// The key, the values and the head, one allocation.
     text: []u8,
 };
-
-fn closeFile(file: *Io.File, io: Io) void {
-    file.close(io);
-}
 
 /// A variant being written, until its commit or abort.
 const Written = struct {
@@ -412,7 +408,7 @@ fn lookup(iface: *Store, io: Io, key: []const u8, out: []Entry) Error!usize {
 /// that is not one fails the lookup by name and is removed.
 fn read(d: *Disk, io: Io, key: []const u8, name: Name) Error!?Entry {
     const text_name = name.text();
-    var file: aegis.own.OwnedIo(Io.File, closeFile) = .init(d.dir.get().openFile(io, &text_name, .{}) catch |err| return switch (err) {
+    var file: aegis.own.File = .init(d.dir.get().openFile(io, &text_name, .{}) catch |err| return switch (err) {
         error.FileNotFound => null,
         error.Canceled => error.Canceled,
         else => error.StoreFailed,

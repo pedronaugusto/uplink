@@ -92,10 +92,12 @@ unbound: bool = false,
 /// Why an operation failed.
 pub const Failure = enum(u8) { none, timed_out, canceled, broken };
 
-/// Errors from `open`.
-pub const OpenError = error{
-    InvalidHostName,
-    NameNotResolved,
+/// Errors from `open`: a lookup's failure as `Resolver.lookup` names it
+/// (`UnknownHostName`, `NoAddressReturned`, `NameServerFailure`, ...), or the
+/// connection's.
+pub const OpenError = Resolver.LookupError || error{
+    /// A Unix socket's or a named pipe's path names no file.
+    FileNotFound,
     ConnectionFailed,
     /// A socket option `Dial.socket` asked for is one the system has none
     /// of, or refuses.
@@ -1206,7 +1208,13 @@ fn socksLookup(conn: *Connection, ipv4: bool, until: ?Io.Timestamp) OpenError!Io
         error.Canceled => error.Canceled,
         error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
         error.TimedOut => conn.timedOutOpen(),
-        error.InvalidHostName, error.NameNotResolved => error.ProxyHostUnreachable,
+        // The proxy's target has no address; a server that failed, a
+        // configuration unread or a cancel is no fault of the target's.
+        error.InvalidHostName, error.UnknownHostName, error.NoAddressReturned => error.ProxyHostUnreachable,
+        error.NameServerFailure => error.NameServerFailure,
+        error.DetectingNetworkConfigurationFailed => error.DetectingNetworkConfigurationFailed,
+        error.ResolvConfParseFailed => error.ResolvConfParseFailed,
+        error.SystemResources => error.SystemResources,
     };
     if (!bounded) sync.bump(&conn.ctx.counters.timeouts_unenforced);
     var address: ?Io.net.IpAddress = null;
