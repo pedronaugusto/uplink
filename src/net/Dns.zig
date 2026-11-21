@@ -10,6 +10,7 @@
 //! asked (`Options.resolver`).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const sync = @import("../sync.zig");
 const reactor = @import("reactor");
 const Allocator = std.mem.Allocator;
@@ -354,28 +355,52 @@ pub const Stub = struct {
 
     const TryError = error{ Failed, Canceled };
 
+    /// Whether a query's UDP socket is connected to its server. On POSIX it
+    /// is: only that server's datagrams arrive, a refusal (ICMP port
+    /// unreachable) ends the wait at once, and a deadline that fires can end
+    /// the wait, since reactor's `Deadlines` end one by a shutdown, which an
+    /// unconnected datagram socket refuses as not connected (its receive
+    /// then waited past every deadline on Darwin and the BSDs). On Windows
+    /// std connects through AFD's stream connect, which a datagram socket
+    /// refuses as an invalid parameter, so there it stays unconnected, and
+    /// the deadline's abortive disconnect is to end the wait: the test of a
+    /// server that never answers holds it to that.
+    const udp_connected = builtin.os.tag != .windows;
+
     /// The answer to `query` from `server` over UDP: a datagram with the
     /// query's id and question, waited for until the timeout; others are
     /// dropped.
     ///
-    /// The socket is connected to the server, so only its datagrams arrive,
-    /// a refusal (ICMP port unreachable) ends the wait at once, and a
-    /// deadline that fires can end it: reactor's `Deadlines` end a wait by a
-    /// shutdown, which an unconnected datagram socket refuses as not
-    /// connected, and its receive then waited past every deadline.
+    /// On POSIX the socket is connected to the server (`udp_connected`).
     fn overUdp(s: *Stub, io: Io, server: IpAddress, query: []const u8, answer: []u8) TryError![]u8 {
-        const stream = server.connect(io, .{ .mode = .dgram }) catch |err| return switch (err) {
+        const socket = if (udp_connected) connected: {
+            const stream = server.connect(io, .{ .mode = .dgram }) catch |err| return switch (err) {
+                error.Canceled => error.Canceled,
+                else => error.Failed,
+            };
+            break :connected stream.socket;
+        } else unconnected: {
+            const any: IpAddress = switch (server) {
+                .ip4 => .{ .ip4 = .unspecified(0) },
+                .ip6 => .{ .ip6 = .unspecified(0) },
+            };
+            break :unconnected any.bind(io, .{ .mode = .dgram }) catch |err| return switch (err) {
+                error.Canceled => error.Canceled,
+                else => error.Failed,
+            };
+        };
+        defer socket.close(io);
+        if (udp_connected) {
+            const parts = [_][]const u8{query};
+            const sent = io.operate(.{ .net_write = .{ .socket_handle = socket.handle, .data = &parts } }) catch |err| return switch (err) {
+                error.Canceled => error.Canceled,
+            };
+            const written = sent.net_write catch return error.Failed;
+            if (written != query.len) return error.Failed;
+        } else socket.send(io, &server, query) catch |err| return switch (err) {
             error.Canceled => error.Canceled,
             else => error.Failed,
         };
-        const socket = stream.socket;
-        defer socket.close(io);
-        const parts = [_][]const u8{query};
-        const sent = io.operate(.{ .net_write = .{ .socket_handle = socket.handle, .data = &parts } }) catch |err| return switch (err) {
-            error.Canceled => error.Canceled,
-        };
-        const written = sent.net_write catch return error.Failed;
-        if (written != query.len) return error.Failed;
         var timed: Timed = .init(.ofSocket(.{ .socket = socket }));
         defer timed.deinit(io, s.keeper());
         const deadline = Io.Clock.awake.now(io).addDuration(span.toIo(s.timeout));
@@ -599,8 +624,8 @@ test "a stub canceled at its socket returns error.Canceled, not the next server'
     const query = try dns.writeQuery(&query_buf, 7, "small.test", .a);
     var answer: [dns.max_message]u8 = undefined;
     for ([_]shakedown.IoPlan.Entry{
-        .{ .at = .{ .nth = .{ .call = .netConnectIp, .n = 1 } }, .fault = .cancel },
-        .{ .at = .{ .nth = .{ .call = .net_write, .n = 1 } }, .fault = .cancel },
+        .{ .at = .{ .nth = .{ .call = if (Stub.udp_connected) .netConnectIp else .netBindIp, .n = 1 } }, .fault = .cancel },
+        .{ .at = .{ .nth = .{ .call = if (Stub.udp_connected) .net_write else .net_send, .n = 1 } }, .fault = .cancel },
     }) |entry| {
         const fio = try shakedown.FaultIo.init(testing.allocator, base, .{ .plan = &.{entry} });
         defer fio.deinit();
