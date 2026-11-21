@@ -68,6 +68,10 @@ pub const AcceptError = error{
     WriteFailed,
     /// The task answering was canceled, or the connection's.
     Canceled,
+    /// `Conn.Options.ping_interval` is set and the `Io` cannot wait a
+    /// bounded time for a frame: the connection was taken over and is
+    /// refused (`Conn.keepsPingInterval`).
+    ConcurrencyUnavailable,
     OutOfMemory,
 };
 
@@ -123,6 +127,10 @@ pub fn accept(out: *Accepted, gpa: Allocator, io: Io, request: *ServerRequest, r
         .readableFn = readableAccepted,
         .canceledFn = canceledAccepted,
     }, options.conn, agreed);
+    out.conn.keepsPingInterval(io) catch |err| {
+        out.conn.deinit();
+        return err;
+    };
 }
 
 /// The accepted connection whose transport `t` is.
@@ -341,6 +349,10 @@ fn open(out: *Opened, client: *Client, gpa: Allocator, io: Io, http_url: []const
         .readableFn = readableOpened,
         .canceledFn = canceledOpened,
     }, options.conn, agreed);
+    out.conn.keepsPingInterval(io) catch |err| {
+        out.deinit(io);
+        return err;
+    };
 }
 
 /// The opened connection whose transport `t` is.

@@ -38,7 +38,7 @@ pub const Side = struct {
 };
 
 /// How a side's deadlines are kept.
-const Mode = enum {
+pub const Mode = enum {
     /// `Deadlines` keep them.
     deadlines,
     /// No task could be had for that: `Io.operateTimeout` keeps them.
