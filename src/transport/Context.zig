@@ -18,7 +18,6 @@ const BufferPool = @import("BufferPool.zig");
 const span = @import("../span.zig");
 const Duration = span.Duration;
 const Windows = @import("../coding/windows.zig").Windows;
-const Timed = @import("../net/Timed.zig");
 const Observer = @import("Observer.zig");
 const Proxy = @import("Proxy.zig");
 const ProxyAuth = @import("ProxyAuth.zig");
@@ -27,9 +26,6 @@ const Context = @This();
 
 gpa: Allocator,
 buffers: BufferPool,
-/// Keeps the deadlines of operations: in the kernel on a reactor runtime,
-/// by one task on any other `Io`, started at the first one.
-deadlines: reactor.net.Deadlines,
 proxies: Proxies,
 tls: tls_mod.ClientOptions,
 /// Private: the sink every session writes its secrets to, when `tls` names a
@@ -80,7 +76,6 @@ pub fn init(gpa: Allocator, options: Options) Context {
     return .{
         .gpa = gpa,
         .buffers = .init(gpa, options.max_free_buffers),
-        .deadlines = .init(span.toIo(options.timeouts.shortestPerOperation() orelse .literal("10s"))),
         .proxies = .init(gpa, options.proxy),
         .tls = options.tls,
         .key_log = if (options.tls.key_log) |w| .init(w) else null,
@@ -98,11 +93,6 @@ pub fn greaseOr(ctx: *const Context) cloak.tls.ech.Mode {
     return if (ctx.tls.ech == .grease) .grease else .off;
 }
 
-/// What keeps the deadlines of the context's connections.
-pub fn keeper(ctx: *Context) Timed.Keeper {
-    return .{ .deadlines = &ctx.deadlines, .unenforced = &ctx.counters.timeouts_unenforced };
-}
-
 /// The resolver connections use. Pointing at the context's cache, it is
 /// taken where the context stays.
 pub fn resolve(ctx: *Context) Resolver {
@@ -111,7 +101,6 @@ pub fn resolve(ctx: *Context) Resolver {
 
 /// Release what the connections shared. Every connection must be closed.
 pub fn deinit(ctx: *Context, io: Io) void {
-    ctx.deadlines.deinit(io);
     ctx.proxies.deinit(io);
     ctx.system_trust.deinit(io);
     ctx.sessions.deinit(ctx.gpa, io);
@@ -150,13 +139,6 @@ pub const Timeouts = struct {
         const moved = window.mul(l.bytes_per_second) catch aegis.assert.never("a u64 times a u32 fits a u128");
         const need = moved.div(Duration.literal("1s").raw()) catch aegis.assert.never("a second is a nonzero divisor");
         return .fromRaw(aegis.int.cast(u64, need.raw()) catch std.math.maxInt(u64));
-    }
-
-    /// The shortest of the timeouts kept per operation, or null.
-    pub fn shortestPerOperation(t: Timeouts) ?Duration {
-        var shortest: ?Duration = null;
-        for ([_]?Duration{ t.handshake, t.activity, if (t.low_speed) |l| l.window else null }) |maybe| shortest = span.shorter(shortest, maybe);
-        return shortest;
     }
 };
 
@@ -431,18 +413,14 @@ const testing = std.testing;
 const test_io = @import("../testing/io.zig");
 const Unwiped = @import("../testing/Unwiped.zig");
 
-test "routes are equal without case in the host, and the shortest per-operation timeout is found" {
+test "routes are equal without case in the host, and a low-speed window's need is its rate times its length" {
     const a: Route = try .init(true, "Example.com", 443, null);
     try testing.expect(a.eql(&try .init(true, "example.COM", 443, null)));
     try testing.expect(!a.eql(&try .init(false, "example.com", 443, null)));
     try testing.expect(!a.eql(&try .init(true, "example.com", 8443, null)));
     const long: [Io.net.HostName.max_len + 1]u8 = @splat('a');
     try testing.expectError(error.InvalidHostName, Route.init(true, &long, 443, null));
-    const t: Timeouts = .{ .connect = .literal("1s"), .handshake = .literal("10s"), .activity = .literal("5s") };
-    try testing.expectEqual(Duration.literal("5s"), t.shortestPerOperation().?);
-    try testing.expectEqual(null, (Timeouts{ .connect = .literal("1s") }).shortestPerOperation());
     const slow: Timeouts = .{ .low_speed = .{ .bytes_per_second = 1000, .window = .literal("2s") } };
-    try testing.expectEqual(Duration.literal("2s"), slow.shortestPerOperation().?);
     try testing.expectEqual(@as(u64, 2000), Timeouts.lowSpeedNeed(slow.low_speed.?).raw());
 }
 

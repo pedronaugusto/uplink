@@ -8,6 +8,7 @@ const Io = std.Io;
 const IpAddress = Io.net.IpAddress;
 const span = @import("../span.zig");
 const Duration = span.Duration;
+const Resolver = @import("Resolver.zig");
 const dialing = @import("dial.zig");
 const Options = dialing.Options;
 const Dialed = dialing.Dialed;
@@ -305,7 +306,7 @@ test "a Unix socket is connected by its path, and a missing one named" {
             defer server.deinit(io);
             var d = try dialUnix(io, path, .{ .timeout = .literal("5s") });
             d.stream.deinit(io);
-            try testing.expectError(error.NameNotResolved, dialUnix(io, "/run/none.sock", .{}));
+            try testing.expectError(error.FileNotFound, dialUnix(io, "/run/none.sock", .{}));
         }
     }.inSim, .{});
 }
@@ -335,7 +336,7 @@ test "an origin is dialed as it is when its endpoints fail, unless one publishes
             plain.dialed.stream.deinit(io);
             try testing.expectEqual(null, plain.binding);
             try testing.expectEqual(null, plain.record);
-            try testing.expectError(error.NameNotResolved, dialHttps(io, gpa, "origin.test", port, .{ .protocols = protocols, .ech = true }, options));
+            try testing.expectError(error.UnknownHostName, dialHttps(io, gpa, "origin.test", port, .{ .protocols = protocols, .ech = true }, options));
         }
     }.inSim, .{});
 }
@@ -360,6 +361,47 @@ test "an endpoint's hints are dialed when its name has no address" {
             defer got.binding.?.deinit(gpa);
             got.dialed.stream.deinit(io);
             try testing.expectEqualStrings("nameless.test", got.record.?.target);
+        }
+    }.inSim, .{});
+}
+
+test "a cancel in an endpoint's lookup is the dial's, never a turn to its hints" {
+    try test_io.simulated(struct {
+        /// The zone's service records, and a lookup of the endpoint's
+        /// target that is canceled.
+        const Canceling = struct {
+            inner: Resolver,
+            resolving: Resolver.Interface = .{ .lookupFn = lookup, .serviceFn = service },
+
+            fn lookup(io: Io, interface: *Resolver.Interface, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress) Resolver.LookupError![]IpAddress {
+                const c: *Canceling = @alignCast(@fieldParentPtr("resolving", interface));
+                if (std.mem.eql(u8, host, "nameless.test")) return error.Canceled;
+                return c.inner.lookup(io, host, port, family, out);
+            }
+
+            fn service(io: Io, interface: *Resolver.Interface, gpa: std.mem.Allocator, name: []const u8) Resolver.ServiceError!?Resolver.Binding {
+                const c: *Canceling = @alignCast(@fieldParentPtr("resolving", interface));
+                const inner = c.inner.interface.?;
+                return inner.serviceFn.?(io, inner, gpa, name);
+            }
+        };
+
+        fn inSim() !void {
+            const zone = @import("../testing/zone.zig");
+            const Dns = @import("Dns.zig");
+            const io = test_io.io();
+            const gpa = testing.allocator;
+            var listener = try (try IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
+            defer listener.deinit(io);
+            var port_value = zone.port(listener.socket.address.getPort());
+            const entries = [_]zone.Entry{.{ .name = "hinted.test", .https = &.{.{ .target = "nameless.test", .params = &.{
+                .{ .key = .port, .value = &port_value },
+                .{ .key = .ipv4hint, .value = "\x7f\x00\x00\x01" },
+            } }} }};
+            var z: zone.Zone = .{ .entries = &entries };
+            var d: Dns = .{ .transport = z.transport() };
+            var canceling: Canceling = .{ .inner = d.resolver() };
+            try testing.expectError(error.Canceled, dialHttps(io, gpa, "hinted.test", 443, .{ .protocols = &.{"http/1.1"}, .ech = false }, .{ .resolver = .{ .interface = &canceling.resolving }, .timeout = .literal("5s") }));
         }
     }.inSim, .{});
 }

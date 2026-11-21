@@ -121,10 +121,7 @@ pub fn init(c: *Shared, io: Io, request: Request) Error!Run {
         .bearer => |t| if (!fields.isFieldValue(t) or t.len == 0) return error.InvalidHeader,
     };
     var deadline: ?Io.Timestamp = null;
-    if (request.timeout.toTimestamp(io)) |t| {
-        deadline = t.toClock(io, .awake).raw;
-        c.context.deadlines.tighten(io, Io.Clock.awake.now(io).durationTo(deadline.?));
-    }
+    if (request.timeout.toTimestamp(io)) |t| deadline = t.toClock(io, .awake).raw;
     const ascii = try asciiUrl(c, io, request.url, url);
     return .{
         .shared = c,
@@ -526,6 +523,7 @@ pub fn h2Failure(run: *Run, io: Io, err: H2.Error) H2Error {
         },
         error.Refused => error.Refused,
         error.ConnectionFailed => error.ConnectionFailed,
+        error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
         error.TlsFailed => error.TlsFailed,
         error.ClientCertificateRejected => error.ClientCertificateRejected,
         error.Canceled => error.Canceled,

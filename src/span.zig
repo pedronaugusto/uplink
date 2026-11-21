@@ -60,20 +60,10 @@ pub fn spent(left: Io.Duration) bool {
     return IoSpan.fromIoDuration(left, .exact).compare(.fromRaw(0)) != .gt;
 }
 
-/// The shorter of two optional spans; null is no limit.
-pub fn shorter(a: ?Duration, b: ?Duration) ?Duration {
-    const x = a orelse return b;
-    const y = b orelse return x;
-    return if (x.compare(y) == .lt) x else y;
-}
-
 test "spans meet std's: negative is zero, and every span converts back" {
     try std.testing.expectEqual(@as(u64, 0), of(.fromSeconds(-1)).raw());
     try std.testing.expectEqual(@as(i96, 250 * std.time.ns_per_ms), toIo(.literal("250ms")).nanoseconds);
     try std.testing.expectEqual(@as(i96, std.math.maxInt(u64)), toIo(of(.{ .nanoseconds = std.math.maxInt(i96) })).nanoseconds);
-    try std.testing.expectEqual(Duration.literal("1s"), shorter(.literal("1s"), .literal("2s")).?);
-    try std.testing.expectEqual(Duration.literal("2s"), shorter(null, .literal("2s")).?);
-    try std.testing.expectEqual(null, shorter(null, null));
 }
 
 test "timestamps order as their clock's moments, and a span left is spent at zero or less" {

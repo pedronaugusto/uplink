@@ -98,7 +98,7 @@ pub const Http2 = enum {
 };
 
 /// Why a request failed.
-pub const SendError = error{
+pub const SendError = Resolver.LookupError || error{
     /// Not an `http` or `https` URL, one with a byte a request line
     /// cannot carry, or one whose host IDNA refuses (UTS #46 ToASCII).
     InvalidUrl,
@@ -106,7 +106,8 @@ pub const SendError = error{
     /// A field name or value that cannot be sent, or a field uplink writes
     /// itself.
     InvalidHeader,
-    NameNotResolved,
+    /// A Unix socket's or a named pipe's path names no file.
+    FileNotFound,
     ConnectionFailed,
     /// A socket option `Dial.socket` asked for is one the system has none
     /// of, or refuses.

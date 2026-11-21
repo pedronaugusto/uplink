@@ -1,9 +1,10 @@
 //! One socket's operations, each ended at its deadline: by reactor's
-//! `Deadlines`, which keep it in the kernel on a reactor runtime and by one
-//! task on any other `Io`; by the `Io` itself (`operateTimeout`) when no
-//! task can be had for that; and not at all when the `Io` cannot bound an
-//! operation either, which is counted once and then runs unbounded. An
-//! operation with no deadline runs as the `Io` runs it.
+//! `Deadlines`, in the kernel on a reactor runtime and on any other `Io` by
+//! running the operation in a task of its own that the deadline cancels;
+//! by the `Io` itself (`operateTimeout`) when no task can be had for that.
+//! Where neither can keep it the operation is refused with
+//! `ConcurrencyUnavailable` and never runs unbounded. An operation with no
+//! deadline runs as the `Io` runs it.
 //!
 //! The client's connections and the server's share it: what differs is
 //! which deadline an operation gets, which each finds for itself. A
@@ -17,7 +18,6 @@
 const std = @import("std");
 const span = @import("../span.zig");
 const aegis = @import("aegis");
-const sync = @import("../sync.zig");
 const reactor = @import("reactor");
 const Io = std.Io;
 const Deadlines = reactor.net.Deadlines;
@@ -29,83 +29,35 @@ const Timed = @This();
 reads: Side,
 /// Private: the writes' deadline.
 writes: Side,
-/// Private: the socket is counted among those whose deadlines nothing
-/// could keep.
-counted: sync.Latch = .init(.clear),
 
-/// One direction's operations: the deadline `Deadlines` keeps for the one
-/// under way, and how deadlines are kept. Only the task doing that
-/// direction's operation touches it.
+/// One direction's operations. Only the task doing that direction's
+/// operation touches it.
 pub const Side = struct {
     watch: Deadlines.Watch,
-    mode: Modes.Runtime(void) = .init({}),
+    mode: Mode = .deadlines,
 };
 
+/// How a side's deadlines are kept.
 const Mode = enum {
-    /// No deadline kept yet: the first operation with one decides.
-    unwatched,
     /// `Deadlines` keep them.
     deadlines,
-    /// `Io.operateTimeout` keeps them.
+    /// No task could be had for that: `Io.operateTimeout` keeps them.
     operate,
-    /// Asked for, and nothing could keep them.
-    unenforced,
-};
-
-/// What decides how a side's deadlines are kept.
-const Change = enum {
-    /// `Deadlines` took the side's watch.
-    watched,
-    /// `Deadlines` could not: the `Io` keeps them.
-    unwatchable,
-    /// The `Io` cannot bound the operation either.
-    unbounded,
-    /// The socket is done with; nothing is under way.
-    released,
-};
-
-/// How a side's deadlines come to be kept: decided by its first operation
-/// with one, given up on only when the `Io` cannot keep them, and forgotten
-/// when the socket is.
-const Modes = aegis.state.Machine(Mode, Change, .{ .initial = .unwatched, .edges = &.{
-    .{ .from = .unwatched, .on = .watched, .to = .deadlines },
-    .{ .from = .unwatched, .on = .unwatchable, .to = .operate },
-    .{ .from = .operate, .on = .unbounded, .to = .unenforced },
-    .{ .from = .deadlines, .on = .released, .to = .unwatched },
-    .{ .from = .operate, .on = .released, .to = .unwatched },
-    .{ .from = .unenforced, .on = .released, .to = .unwatched },
-} });
-
-/// What keeps the deadlines of a set of sockets, and counts the ones that
-/// could not be kept.
-pub const Keeper = struct {
-    deadlines: *Deadlines,
-    /// Sockets whose deadlines no task and no `Io` could keep.
-    unenforced: *sync.Counter,
 };
 
 /// Why an operation did not complete.
 pub const Error = error{
     /// The deadline ended it; the socket is poisoned.
     TimedOut,
+    /// Neither a task to race it in nor a bound of the `Io`'s own could be
+    /// had: it did not run, and nothing ran unbounded.
+    ConcurrencyUnavailable,
     Canceled,
 };
 
 /// Operations on `endpoint`.
 pub fn init(endpoint: Endpoint) Timed {
     return .{ .reads = .{ .watch = endpoint.watch() }, .writes = .{ .watch = endpoint.watch() } };
-}
-
-/// Stop keeping deadlines; nothing may be under way.
-pub fn deinit(t: *Timed, io: Io, keeper: Keeper) void {
-    for ([_]*Side{ &t.reads, &t.writes }) |side| switch (side.mode.current()) {
-        .unwatched => {},
-        .deadlines => {
-            keeper.deadlines.remove(io, &side.watch);
-            _ = side.mode.step(.released) catch aegis.assert.never("a side watched until now is released");
-        },
-        .operate, .unenforced => _ = side.mode.step(.released) catch aegis.assert.never("a side kept until now is released"),
-    };
 }
 
 /// Whether a deadline fired on the socket, which is then never to be used
@@ -116,35 +68,31 @@ pub fn fired(t: *const Timed) bool {
 
 /// Perform `op`, ended at `deadline` on the awake clock when there is one.
 /// A deadline already past ends it before it starts.
-pub fn perform(t: *Timed, io: Io, keeper: Keeper, op: Io.Operation, deadline: ?Io.Timestamp) Error!Io.Operation.Result {
+pub fn perform(t: *Timed, io: Io, op: Io.Operation, deadline: ?Io.Timestamp) Error!Io.Operation.Result {
     const at = deadline orelse return io.operate(op);
     const side = switch (op) {
         .net_read, .net_receive, .file_read_streaming => &t.reads,
         else => &t.writes,
     };
-    if (side.mode.current() == .unenforced) return io.operate(op);
     if (!span.before(Io.Clock.awake.now(io), at)) return error.TimedOut;
     // A deadline that fired on the other side has aborted the socket.
     if (t.fired()) return error.TimedOut;
-    if (side.mode.current() == .unwatched) _ = side.mode.step(if (keeper.deadlines.add(io, &side.watch)) .watched else .unwatchable) catch aegis.assert.never("a side unwatched until now is watched, or found unwatchable");
-    switch (side.mode.current()) {
-        .deadlines => return keeper.deadlines.operate(io, &side.watch, op, .{ .raw = at, .clock = .awake }) catch |err| switch (err) {
-            error.Timeout => error.TimedOut,
-            error.Canceled => error.Canceled,
-        },
-        .operate => return io.operateTimeout(op, .{ .deadline = .{ .raw = at, .clock = .awake } }) catch |err| switch (err) {
-            error.Timeout => error.TimedOut,
-            error.Canceled => error.Canceled,
-            error.ConcurrencyUnavailable => {
-                // This `Io` cannot bound a socket operation: from here on
-                // this side runs unbounded, the socket counted once.
-                _ = side.mode.step(.unbounded) catch aegis.assert.never("a side the Io kept until now goes unbounded");
-                if (t.counted.swap(.set, .monotonic) == .clear) sync.bump(keeper.unenforced);
-                return io.operate(op);
-            },
-        },
-        .unwatched, .unenforced => unreachable, // unreachable: the mode was chosen above, and unenforced returned before it
+    const bound: Io.Clock.Timestamp = .{ .raw = at, .clock = .awake };
+    if (side.mode == .deadlines) {
+        if (Deadlines.operate(io, &side.watch, op, bound)) |result| return result else |err| switch (err) {
+            error.Timeout => return error.TimedOut,
+            error.Canceled => return error.Canceled,
+            // No task to race the operation in, and it did not start: the
+            // `Io` keeps this side's deadlines from here on.
+            error.ConcurrencyUnavailable => side.mode = .operate,
+        }
     }
+    return io.operateTimeout(op, .{ .deadline = bound }) catch |err| switch (err) {
+        error.Timeout => error.TimedOut,
+        error.Canceled => error.Canceled,
+        // This `Io` cannot bound a socket operation either: refused.
+        error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
+    };
 }
 
 /// What a wait for something to read found.
@@ -203,12 +151,12 @@ const test_io = @import("../testing/io.zig");
 /// Whether a test's read under way has ended.
 const Ended = enum(u32) { no, yes };
 
-fn readUntil(t: *Timed, io: Io, keeper: Keeper, handle: Io.net.Socket.Handle, deadline: Io.Timestamp, done: *aegis.Atomic(Ended)) Error!Io.Operation.Result {
+fn readUntil(t: *Timed, io: Io, handle: Io.net.Socket.Handle, deadline: Io.Timestamp, done: *aegis.Atomic(Ended)) Error!Io.Operation.Result {
     defer done.store(.yes, .release);
     var buf: [16]u8 = undefined;
     // the kernel writes what a read takes into `buf`; nothing reads it here, the read only waits
     var data: [1][]u8 = .{&buf};
-    return t.perform(io, keeper, .{ .net_read = .{ .socket_handle = handle, .data = &data } }, deadline);
+    return t.perform(io, .{ .net_read = .{ .socket_handle = handle, .data = &data } }, deadline);
 }
 
 test "a read and a write under way at once each end at their own deadline" {
@@ -219,22 +167,17 @@ test "a read and a write under way at once each end at their own deadline" {
     defer client.close(io);
     const server = try listener.accept(io);
     defer server.close(io);
-    var deadlines: Deadlines = .init(.fromMilliseconds(20));
-    defer deadlines.deinit(io);
-    var unenforced: sync.Counter = .init(.fromRaw(0));
-    const keeper: Keeper = .{ .deadlines = &deadlines, .unenforced = &unenforced };
     var timed: Timed = .init(.ofSocket(client));
-    defer timed.deinit(io, keeper);
 
     // A read waits for bytes that never come, until its deadline; a write
     // with a far one starts and ends while it waits. The write's deadline
     // neither replaces the read's nor, once the write is done, unarms it.
     var done: aegis.Atomic(Ended) = .init(.no);
     const read_by = Io.Clock.awake.now(io).addDuration(.fromMilliseconds(300));
-    var reading = try io.concurrent(readUntil, .{ &timed, io, keeper, client.socket.handle, read_by, &done });
+    var reading = try io.concurrent(readUntil, .{ &timed, io, client.socket.handle, read_by, &done });
     try io.sleep(.fromMilliseconds(50), .awake);
     const far = Io.Clock.awake.now(io).addDuration(.fromSeconds(60));
-    const wrote = try timed.perform(io, keeper, .{ .net_write = .{ .socket_handle = client.socket.handle, .header = "", .data = &.{"x"}, .splat = 1 } }, far);
+    const wrote = try timed.perform(io, .{ .net_write = .{ .socket_handle = client.socket.handle, .header = "", .data = &.{"x"}, .splat = 1 } }, far);
     try testing.expectEqual(@as(usize, 1), try wrote.net_write);
 
     // Ten times the read's deadline, then the test stops waiting.
@@ -247,4 +190,45 @@ test "a read and a write under way at once each end at their own deadline" {
     }
     try testing.expectError(error.TimedOut, reading.await(io));
     try testing.expect(timed.fired());
+}
+
+/// An `Io` with no task to spare and no bound of its own on an operation.
+const Unbounding = @import("shakedown").Layer(u8, .{
+    .concurrent = struct {
+        fn concurrent(_: ?*anyopaque, _: usize, _: std.mem.Alignment, _: []const u8, _: std.mem.Alignment, _: *const fn (*const anyopaque, *anyopaque) void) Io.ConcurrentError!*Io.AnyFuture {
+            return error.ConcurrencyUnavailable;
+        }
+    }.concurrent,
+    .groupConcurrent = struct {
+        fn groupConcurrent(_: ?*anyopaque, _: *Io.Group, _: []const u8, _: std.mem.Alignment, _: *const fn (*const anyopaque) void) Io.ConcurrentError!void {
+            return error.ConcurrencyUnavailable;
+        }
+    }.groupConcurrent,
+    .batchAwaitConcurrent = struct {
+        fn awaitBatch(_: ?*anyopaque, _: *Io.Batch, _: Io.Timeout) Io.Batch.AwaitConcurrentError!void {
+            return error.ConcurrencyUnavailable;
+        }
+    }.awaitBatch,
+});
+
+test "an operation whose deadline nothing can keep is refused, and never runs" {
+    const base = test_io.io();
+    var layer: Unbounding = .init(base, 0);
+    const io = layer.io();
+    var listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(base, .{ .reuse_address = true });
+    defer listener.deinit(base);
+    const client = try listener.socket.address.connect(base, .{ .mode = .stream });
+    defer client.close(base);
+    const server = try listener.accept(base);
+    defer server.close(base);
+    var timed: Timed = .init(.ofSocket(client));
+    const far = Io.Clock.awake.now(base).addDuration(.fromSeconds(60));
+    try testing.expectError(error.ConcurrencyUnavailable, timed.perform(io, .{ .net_write = .{ .socket_handle = client.socket.handle, .header = "", .data = &.{"x"}, .splat = 1 } }, far));
+    try testing.expect(!timed.fired());
+    // Nothing was written: the peer's bounded read ends empty.
+    var peer: Timed = .init(.ofSocket(server));
+    var buf: [4]u8 = undefined;
+    var data: [1][]u8 = .{&buf};
+    const soon = Io.Clock.awake.now(base).addDuration(.fromMilliseconds(50));
+    try testing.expectError(error.TimedOut, peer.perform(base, .{ .net_read = .{ .socket_handle = server.socket.handle, .data = &data } }, soon));
 }

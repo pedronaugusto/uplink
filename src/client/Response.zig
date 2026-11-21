@@ -140,6 +140,9 @@ fn teeStream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamErro
 pub const ReadError = error{
     ConnectionFailed,
     TimedOut,
+    /// No task and no bound of the `Io`'s own could keep a wait's timeout:
+    /// the read did not run.
+    ConcurrencyUnavailable,
     TlsFailed,
     ClientCertificateRejected,
     Canceled,
@@ -157,6 +160,9 @@ pub const ReadError = error{
 pub const CollectError = error{
     ConnectionFailed,
     TimedOut,
+    /// No task and no bound of the `Io`'s own could keep a wait's timeout:
+    /// the read did not run.
+    ConcurrencyUnavailable,
     TlsFailed,
     ClientCertificateRejected,
     Canceled,
@@ -333,6 +339,7 @@ pub fn failure(r: *const Response) ReadError {
 fn streamError(st: *const H2.Stream) ReadError {
     return switch (st.read_failure orelse return error.ConnectionFailed) {
         error.TimedOut => error.TimedOut,
+        error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
         error.Canceled => error.Canceled,
         error.TlsFailed => error.TlsFailed,
         error.ClientCertificateRejected => error.ClientCertificateRejected,
@@ -521,6 +528,9 @@ pub fn fromStream(io: Io, ctx: *Context, pool: *Pool, h: *H2, st: *H2.Stream, op
 pub const ReceiveError = error{
     ConnectionFailed,
     TimedOut,
+    /// No task and no bound of the `Io`'s own could keep a wait's timeout:
+    /// the read did not run.
+    ConcurrencyUnavailable,
     TlsFailed,
     ClientCertificateRejected,
     Canceled,

@@ -10,7 +10,6 @@
 //! asked (`Options.resolver`).
 
 const std = @import("std");
-const builtin = @import("builtin");
 const sync = @import("../sync.zig");
 const reactor = @import("reactor");
 const Allocator = std.mem.Allocator;
@@ -48,6 +47,9 @@ pub const Transport = struct {
 pub const ExchangeError = error{
     /// No server answered in time, or every one failed.
     NoAnswer,
+    /// No task and no bound of the `Io`'s own could keep a wait's timeout:
+    /// nothing was asked.
+    ConcurrencyUnavailable,
     Canceled,
 };
 
@@ -79,15 +81,19 @@ fn lookupFn(io: Io, interface: *Resolver.Interface, host: []const u8, port: u16,
             error.Canceled => return error.Canceled,
             error.InvalidName => return error.InvalidHostName,
             error.NoName => continue,
-            error.NoAnswer => return error.NameNotResolved,
+            // SERVFAIL, REFUSED, an unreadable answer, or none in time.
+            error.NoAnswer => return error.NameServerFailure,
+            error.ConcurrencyUnavailable => return error.ConcurrencyUnavailable,
         };
-        if (n == 0) return error.NameNotResolved;
+        // NOERROR with no record of the family asked for.
+        if (n == 0) return error.NoAddressReturned;
         return out[0..n];
     }
-    return error.NameNotResolved;
+    // NXDOMAIN for every name the search list made.
+    return error.UnknownHostName;
 }
 
-const NameError = error{ InvalidName, NoName, NoAnswer, Canceled };
+const NameError = error{ InvalidName, NoName, NoAnswer, ConcurrencyUnavailable, Canceled };
 
 /// `name`'s addresses, IPv6 first, into `out`; how many.
 fn lookupName(d: *const Dns, io: Io, name: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress) NameError!usize {
@@ -135,6 +141,7 @@ fn ask(d: *const Dns, io: Io, name: []const u8, kind: dns.Type, port: u16, out: 
     // Transport.exchange's contract returns the part of `answer` it wrote; a transport is any implementor's, behind a function pointer
     const answer = d.transport.exchange(io, query, &answer_buf) catch |err| return switch (err) {
         error.NoAnswer => error.NoAnswer,
+        error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
         error.Canceled => error.Canceled,
     };
     const m = dns.Message.parse(answer) catch return error.NoAnswer;
@@ -202,6 +209,7 @@ pub fn https(d: *const Dns, io: Io, gpa: Allocator, host: []const u8) (NameError
         // Transport.exchange's contract returns the part of `answer` it wrote; a transport is any implementor's, behind a function pointer
         const answer = d.transport.exchange(io, query, &answer_buf) catch |err| return switch (err) {
             error.NoAnswer => error.NoAnswer,
+            error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
             error.Canceled => error.Canceled,
         };
         const m = dns.Message.parse(answer) catch return error.NoAnswer;
@@ -256,7 +264,7 @@ fn serviceFn(io: Io, interface: *Resolver.Interface, gpa: Allocator, name: []con
         error.Canceled => error.Canceled,
         error.OutOfMemory => error.OutOfMemory,
         // RFC 9460 §3: records that cannot be had are none.
-        error.InvalidName, error.NoName, error.NoAnswer => null,
+        error.InvalidName, error.NoName, error.NoAnswer, error.ConcurrencyUnavailable => null,
     };
 }
 
@@ -284,9 +292,6 @@ pub const Stub = struct {
     rotate: bool = false,
     /// Private: the next server to start at, under `rotate`.
     turn: sync.Counter = .init(.fromRaw(0)),
-    /// Private: what keeps each wait's deadline.
-    deadlines: reactor.net.Deadlines,
-    unenforced: sync.Counter = .init(.fromRaw(0)),
     /// Private: the transport's function.
     exchanging: Transport = .{ .exchangeFn = exchange },
 
@@ -297,7 +302,6 @@ pub const Stub = struct {
             .timeout = options.timeout,
             .attempts = options.attempts,
             .rotate = options.rotate,
-            .deadlines = .init(span.toIo(options.timeout)),
         };
     }
 
@@ -316,17 +320,8 @@ pub const Stub = struct {
         };
     }
 
-    pub fn deinit(s: *Stub, io: Io) void {
-        s.deadlines.deinit(io);
-        s.* = undefined;
-    }
-
     pub fn transport(s: *Stub) *Transport {
         return &s.exchanging;
-    }
-
-    fn keeper(s: *Stub) Timed.Keeper {
-        return .{ .deadlines = &s.deadlines, .unenforced = &s.unenforced };
     }
 
     fn exchange(io: Io, t: *Transport, query: []const u8, answer: []u8) ExchangeError![]u8 {
@@ -337,6 +332,7 @@ pub const Stub = struct {
             const server = s.servers[(first + i) % s.servers.len];
             const got = s.overUdp(io, server, query, answer) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
+                error.ConcurrencyUnavailable => return error.ConcurrencyUnavailable,
                 error.Failed => continue,
             };
             // An answer that does not parse is no answer: the next server is asked.
@@ -344,72 +340,45 @@ pub const Stub = struct {
             if (!message.flags.truncated) return got;
             return s.overTcp(io, server, query, answer) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
+                error.ConcurrencyUnavailable => return error.ConcurrencyUnavailable,
                 error.Failed => continue,
             };
         };
         return error.NoAnswer;
     }
 
-    const TryError = error{ Failed, Canceled };
+    const TryError = error{ Failed, ConcurrencyUnavailable, Canceled };
 
-    /// Whether a query's UDP socket is connected to its server. On POSIX it
-    /// is: only that server's datagrams arrive, a refusal (ICMP port
-    /// unreachable) ends the wait at once, and a deadline that fires can end
-    /// the wait, since reactor's `Deadlines` end one by a shutdown, which an
-    /// unconnected datagram socket refuses as not connected (its receive
-    /// then waited past every deadline on Darwin and the BSDs). On Windows
-    /// std connects through AFD's stream connect, which a datagram socket
-    /// refuses as an invalid parameter, so there it stays unconnected, and
-    /// the deadline's abortive disconnect is to end the wait: the test of a
-    /// server that never answers holds it to that.
-    const udp_connected = builtin.os.tag != .windows;
-
-    /// The answer to `query` from `server` over UDP: a datagram with the
-    /// query's id and question, waited for until the timeout; others are
-    /// dropped.
-    ///
-    /// On POSIX the socket is connected to the server (`udp_connected`).
+    /// The answer to `query` from `server` over UDP: a datagram from that
+    /// address with the query's id and question, waited for until the
+    /// timeout, which reactor's `Deadlines` end the wait at on any socket;
+    /// others are dropped.
     fn overUdp(s: *Stub, io: Io, server: IpAddress, query: []const u8, answer: []u8) TryError![]u8 {
-        const socket = if (udp_connected) connected: {
-            const stream = server.connect(io, .{ .mode = .dgram }) catch |err| return switch (err) {
-                error.Canceled => error.Canceled,
-                else => error.Failed,
-            };
-            break :connected stream.socket;
-        } else unconnected: {
-            const any: IpAddress = switch (server) {
-                .ip4 => .{ .ip4 = .unspecified(0) },
-                .ip6 => .{ .ip6 = .unspecified(0) },
-            };
-            break :unconnected any.bind(io, .{ .mode = .dgram }) catch |err| return switch (err) {
-                error.Canceled => error.Canceled,
-                else => error.Failed,
-            };
+        const any: IpAddress = switch (server) {
+            .ip4 => .{ .ip4 = .unspecified(0) },
+            .ip6 => .{ .ip6 = .unspecified(0) },
+        };
+        const socket = any.bind(io, .{ .mode = .dgram }) catch |err| return switch (err) {
+            error.Canceled => error.Canceled,
+            else => error.Failed,
         };
         defer socket.close(io);
-        if (udp_connected) {
-            const parts = [_][]const u8{query};
-            const sent = io.operate(.{ .net_write = .{ .socket_handle = socket.handle, .data = &parts } }) catch |err| return switch (err) {
-                error.Canceled => error.Canceled,
-            };
-            const written = sent.net_write catch return error.Failed;
-            if (written != query.len) return error.Failed;
-        } else socket.send(io, &server, query) catch |err| return switch (err) {
+        socket.send(io, &server, query) catch |err| return switch (err) {
             error.Canceled => error.Canceled,
             else => error.Failed,
         };
         var timed: Timed = .init(.ofSocket(.{ .socket = socket }));
-        defer timed.deinit(io, s.keeper());
         const deadline = Io.Clock.awake.now(io).addDuration(span.toIo(s.timeout));
         while (true) {
             var message: Io.net.IncomingMessage = .init;
-            const result = timed.perform(io, s.keeper(), .{ .net_receive = .{
+            const result = timed.perform(io, .{ .net_receive = .{
                 .socket_handle = socket.handle,
                 .message_buffer = (&message)[0..1],
                 .data_buffer = answer,
                 .flags = .{},
             } }, deadline) catch |err| return switch (err) {
                 error.TimedOut => error.Failed,
+                error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
                 error.Canceled => error.Canceled,
             };
             const maybe_err, const count = result.net_receive;
@@ -430,7 +399,6 @@ pub const Stub = struct {
         defer connected.stream.deinit(io);
         const stream = connected.stream.borrow().*;
         var timed: Timed = .init(.ofSocket(stream));
-        defer timed.deinit(io, s.keeper());
         var length: [2]u8 = undefined;
         std.mem.writeInt(u16, &length, @intCast(query.len), .big); // safe: a query is far below 64 KiB
         const parts = [_][]const u8{ &length, query };
@@ -449,26 +417,28 @@ pub const Stub = struct {
                 skip = 0;
                 n += 1;
             }
-            const result = timed.perform(io, s.keeper(), .{ .net_write = .{ .socket_handle = stream.socket.handle, .data = rest[0..n] } }, deadline) catch |err| return switch (err) {
+            const result = timed.perform(io, .{ .net_write = .{ .socket_handle = stream.socket.handle, .data = rest[0..n] } }, deadline) catch |err| return switch (err) {
                 error.TimedOut => error.Failed,
+                error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
                 error.Canceled => error.Canceled,
             };
             sent += result.net_write catch return error.Failed;
         }
-        try s.readExact(io, &timed, stream, &length, deadline);
+        try readExact(io, &timed, stream, &length, deadline);
         const len = std.mem.readInt(u16, &length, .big);
         if (len > answer.len) return error.Failed;
-        try s.readExact(io, &timed, stream, answer[0..len], deadline);
+        try readExact(io, &timed, stream, answer[0..len], deadline);
         if (!sameQuestion(query, answer[0..len])) return error.Failed;
         return answer[0..len];
     }
 
-    fn readExact(s: *Stub, io: Io, timed: *Timed, stream: Io.net.Stream, into: []u8, deadline: Io.Timestamp) TryError!void {
+    fn readExact(io: Io, timed: *Timed, stream: Io.net.Stream, into: []u8, deadline: Io.Timestamp) TryError!void {
         var got: usize = 0;
         while (got < into.len) {
             var data = [_][]u8{into[got..]};
-            const result = timed.perform(io, s.keeper(), .{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } }, deadline) catch |err| return switch (err) {
+            const result = timed.perform(io, .{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } }, deadline) catch |err| return switch (err) {
                 error.TimedOut => error.Failed,
+                error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
                 error.Canceled => error.Canceled,
             };
             const n = (result.net_read catch return error.Failed).data_len;
@@ -545,7 +515,6 @@ test "a stub asks a server over UDP, and over TCP when the answer is truncated" 
     defer fake.stop(io);
     const servers = [_]IpAddress{fake.address};
     var stub: Stub = .init(&servers, .{ .timeout = .literal("2s"), .attempts = 1 });
-    defer stub.deinit(io);
     var d: Dns = .{ .transport = stub.transport() };
     const r = d.resolver();
     var out: [8]IpAddress = undefined;
@@ -557,7 +526,7 @@ test "a stub asks a server over UDP, and over TCP when the answer is truncated" 
     // Truncated over UDP: the whole answer over TCP, through a CNAME.
     const big = try r.lookup(io, "big.test", 80, .ip4, &out);
     try testing.expectEqual(3, big.len);
-    try testing.expectError(error.NameNotResolved, r.lookup(io, "missing.test", 80, null, &out));
+    try testing.expectError(error.UnknownHostName, r.lookup(io, "missing.test", 80, null, &out));
     var binding = (try d.https(io, testing.allocator, "small.test")).?;
     defer binding.deinit(testing.allocator);
     try testing.expectEqual(1, binding.records.len);
@@ -570,6 +539,27 @@ test "a stub asks a server over UDP, and over TCP when the answer is truncated" 
     try testing.expectEqual(8443, service.port().?);
 }
 
+test "a lookup's failure is named by what the server said" {
+    const testing = std.testing;
+    const io = @import("../testing/io.zig").io();
+    var fake: FakeServer = undefined;
+    try fake.start(io);
+    defer fake.stop(io);
+    const servers = [_]IpAddress{fake.address};
+    var stub: Stub = .init(&servers, .{ .timeout = .literal("200ms"), .attempts = 1 });
+    var d: Dns = .{ .transport = stub.transport() };
+    const r = d.resolver();
+    var out: [8]IpAddress = undefined;
+    // NXDOMAIN.
+    try testing.expectError(error.UnknownHostName, r.lookup(io, "missing.test", 80, null, &out));
+    // NOERROR, and no record of the family asked for.
+    try testing.expectEqual(1, (try r.lookup(io, "four.test", 80, .ip4, &out)).len);
+    try testing.expectError(error.NoAddressReturned, r.lookup(io, "four.test", 80, .ip6, &out));
+    // SERVFAIL and REFUSED.
+    try testing.expectError(error.NameServerFailure, r.lookup(io, "servfail.test", 80, null, &out));
+    try testing.expectError(error.NameServerFailure, r.lookup(io, "refused.test", 80, null, &out));
+}
+
 test "a server that never answers fails the lookup at the stub's timeout" {
     const testing = std.testing;
     const io = @import("../testing/io.zig").io();
@@ -578,10 +568,9 @@ test "a server that never answers fails the lookup at the stub's timeout" {
     defer fake.stop(io);
     const servers = [_]IpAddress{fake.address};
     var stub: Stub = .init(&servers, .{ .timeout = .literal("200ms"), .attempts = 1 });
-    defer stub.deinit(io);
     var d: Dns = .{ .transport = stub.transport() };
     var out: [8]IpAddress = undefined;
-    try testing.expectError(error.NameNotResolved, d.resolver().lookup(io, "silent.test", 80, .ip4, &out));
+    try testing.expectError(error.NameServerFailure, d.resolver().lookup(io, "silent.test", 80, .ip4, &out));
 }
 
 test "a stub canceled at its socket returns error.Canceled, not the next server's answer" {
@@ -594,13 +583,12 @@ test "a stub canceled at its socket returns error.Canceled, not the next server'
     // The same server twice: a failure moves on to the second, a cancelation ends the query.
     const servers = [_]IpAddress{ fake.address, fake.address };
     var stub: Stub = .init(&servers, .{ .timeout = .literal("2s"), .attempts = 1 });
-    defer stub.deinit(base);
     var query_buf: [dns.max_name + 64]u8 = undefined;
     const query = try dns.writeQuery(&query_buf, 7, "small.test", .a);
     var answer: [dns.max_message]u8 = undefined;
     for ([_]shakedown.IoPlan.Entry{
-        .{ .at = .{ .nth = .{ .call = if (Stub.udp_connected) .netConnectIp else .netBindIp, .n = 1 } }, .fault = .cancel },
-        .{ .at = .{ .nth = .{ .call = if (Stub.udp_connected) .net_write else .net_send, .n = 1 } }, .fault = .cancel },
+        .{ .at = .{ .nth = .{ .call = .netBindIp, .n = 1 } }, .fault = .cancel },
+        .{ .at = .{ .nth = .{ .call = .net_send, .n = 1 } }, .fault = .cancel },
     }) |entry| {
         const fio = try shakedown.FaultIo.init(testing.allocator, base, .{ .plan = &.{entry} });
         defer fio.deinit();
@@ -616,7 +604,6 @@ test "search domains are tried as resolv.conf orders them" {
     defer fake.stop(io);
     const servers = [_]IpAddress{fake.address};
     var stub: Stub = .init(&servers, .{ .timeout = .literal("2s"), .attempts = 1 });
-    defer stub.deinit(io);
     var d: Dns = .{ .transport = stub.transport(), .config = .parse("search nowhere.test test\n") };
     var out: [8]IpAddress = undefined;
     const got = try d.resolver().lookup(io, "small", 80, .ip4, &out);
@@ -635,14 +622,14 @@ test "the system's configuration is read: its servers, at most three" {
     for (sys.serverList()) |server| try std.testing.expectEqual(53, server.getPort());
 }
 
-/// A name server on loopback for the tests: `small.test` has an A and an
-/// AAAA record and an HTTPS record; `big.test` is a CNAME to `many.test`,
-/// whose three A records come truncated over UDP and whole over TCP; any
-/// other name does not exist.
 fn closeServer(server: *Io.net.Server, io: Io) void {
     server.deinit(io);
 }
 
+/// A name server on loopback for the tests: `small.test` has an A and an
+/// AAAA record and an HTTPS record; `big.test` is a CNAME to `many.test`,
+/// whose three A records come truncated over UDP and whole over TCP; any
+/// other name does not exist.
 const FakeServer = struct {
     udp: Io.net.Socket,
     tcp: aegis.own.OwnedIo(Io.net.Server, closeServer),
@@ -767,6 +754,16 @@ const FakeServer = struct {
                 },
                 else => {},
             }
+        } else if (std.mem.eql(u8, name, "four.test")) {
+            // An A record and no other: NOERROR and no AAAA.
+            if (kind == 1) {
+                records[0] = "\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04\xc0\x00\x02\x04";
+                n = 1;
+            }
+        } else if (std.mem.eql(u8, name, "servfail.test")) {
+            flags |= 2;
+        } else if (std.mem.eql(u8, name, "refused.test")) {
+            flags |= 5;
         } else if (std.mem.eql(u8, name, "big.test")) {
             if (udp) {
                 flags |= 0x0200;

@@ -102,7 +102,15 @@ pub fn enter(c: *Socket, start: Start) void {
 }
 
 /// Why an operation failed.
-pub const Failure = enum(u8) { none, timed_out, canceled, broken };
+pub const Failure = enum(u8) {
+    none,
+    timed_out,
+    canceled,
+    broken,
+    /// No task and no bound of the `Io`'s own could keep the operation's
+    /// deadline: it did not run.
+    unbounded,
+};
 
 /// Why a read failed.
 pub const ReadError = error{
@@ -110,6 +118,9 @@ pub const ReadError = error{
     ConnectionFailed,
     /// A wait ran past its timeout.
     TimedOut,
+    /// No task and no bound of the `Io`'s own could keep a wait's timeout:
+    /// the read did not run.
+    ConcurrencyUnavailable,
     Canceled,
 };
 
@@ -305,7 +316,6 @@ pub fn close(c: *Socket) void {
         c.secure = false;
     }
     c.linger();
-    c.timed.deinit(io, c.context.keeper());
     c.context.closing(io, &c.entry);
     c.stream.deinit(io);
     for ([_]BufferPool.Buffer{ c.input.reclaim(), c.output.reclaim() }) |b| if (b.len != 0) pool.release(io, b);
@@ -331,9 +341,10 @@ fn linger(c: *Socket) void {
     var data: [1][]u8 = .{&buf};
     while (true) {
         // A deadline that ends the wait aborts the socket, which is closing anyway.
-        const result = c.timed.perform(io, c.context.keeper(), .{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } }, until) catch |err| return c.note(switch (err) {
+        const result = c.timed.perform(io, .{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } }, until) catch |err| return c.note(switch (err) {
             error.TimedOut => .timed_out,
             error.Canceled => .canceled,
+            error.ConcurrencyUnavailable => .unbounded,
         });
         // A read that fails ends the linger: the client is gone.
         const n = (result.net_read catch return c.noteBroken()).data_len;
@@ -446,6 +457,7 @@ pub fn readError(c: *const Socket) ReadError {
     return switch (c.failed()) {
         .timed_out => error.TimedOut,
         .canceled => error.Canceled,
+        .unbounded => error.ConcurrencyUnavailable,
         .none, .broken => error.ConnectionFailed,
     };
 }
@@ -458,6 +470,7 @@ fn recordedCause(context: *const anyopaque) ?anyerror {
     return switch (c.failed()) {
         .canceled => error.Canceled,
         .timed_out => error.TimedOut,
+        .unbounded => error.ConcurrencyUnavailable,
         .none, .broken => null,
     };
 }
@@ -488,10 +501,11 @@ fn activityDeadline(c: *Socket) ?Io.Timestamp {
 /// cancelation point would not say so again.
 fn perform(c: *Socket, op: Io.Operation) error{Failed}!Io.Operation.Result {
     if (c.failed() == .canceled) return error.Failed;
-    return c.timed.perform(c.io, c.context.keeper(), op, c.deadline(op)) catch |err| {
+    return c.timed.perform(c.io, op, c.deadline(op)) catch |err| {
         c.note(switch (err) {
             error.TimedOut => .timed_out,
             error.Canceled => .canceled,
+            error.ConcurrencyUnavailable => .unbounded,
         });
         return error.Failed;
     };

@@ -149,6 +149,7 @@ pub fn close(u: *Upgraded, io: Io) void {
 fn ioError(err: H2.Error) Error {
     return switch (err) {
         error.TimedOut => error.TimedOut,
+        error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
         error.TlsFailed => error.TlsFailed,
         error.ClientCertificateRejected => error.ClientCertificateRejected,
         error.Canceled => error.Canceled,

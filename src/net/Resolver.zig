@@ -128,7 +128,7 @@ pub fn service(r: Resolver, io: Io, gpa: Allocator, host: []const u8, port: u16)
 pub fn lookup(r: Resolver, io: Io, host: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress) LookupError![]IpAddress {
     aegis.assert.invariant(out.len != 0, "out.len != 0");
     if (reactor.net.literal(host, port)) |address| {
-        if (family) |f| if (address != f) return error.NameNotResolved;
+        if (family) |f| if (address != f) return error.NoAddressReturned;
         out[0] = address;
         return out[0..1];
     }
@@ -136,12 +136,9 @@ pub fn lookup(r: Resolver, io: Io, host: []const u8, port: u16, family: ?IpAddre
     return i.lookupFn(io, i, host, port, family, out);
 }
 
-/// Errors from `lookupWithin`.
-pub const LookupWithinError = error{
-    InvalidHostName,
-    NameNotResolved,
-    ConcurrencyUnavailable,
-    Canceled,
+/// Errors from `lookupWithin`: `lookup`'s, which name a failure as
+/// reactor's `net.resolve` does, and the timeout.
+pub const LookupWithinError = LookupError || error{
     /// `timeout` ran out first.
     TimedOut,
 };
@@ -237,7 +234,7 @@ pub const Static = struct {
                 out[n].setPort(port);
                 n += 1;
             }
-            if (n == 0) return error.NameNotResolved;
+            if (n == 0) return error.NoAddressReturned;
             return out[0..n];
         }
         return s.fallback.lookup(io, host, port, family, out);
@@ -456,7 +453,7 @@ pub const Cache = struct {
         // Resolver.lookup's contract returns the part of `out` it wrote; the inner resolver is any implementor's, behind a function pointer
         const got = try c.inner.lookup(io, host, port, null, &fresh);
         c.keep(io, key, now, got);
-        return pick(got, port, family, out) orelse error.NameNotResolved;
+        return pick(got, port, family, out) orelse error.NoAddressReturned;
     }
 
     fn cached(c: *Cache, io: Io, key: []const u8, now: Io.Timestamp, port: u16, family: ?IpAddress.Family, out: []IpAddress) ?[]IpAddress {

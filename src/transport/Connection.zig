@@ -90,12 +90,22 @@ diagnostics: ?*Diagnostics = null,
 unbound: bool = false,
 
 /// Why an operation failed.
-pub const Failure = enum(u8) { none, timed_out, canceled, broken };
+pub const Failure = enum(u8) {
+    none,
+    timed_out,
+    canceled,
+    broken,
+    /// No task and no bound of the `Io`'s own could keep the operation's
+    /// deadline: it did not run.
+    unbounded,
+};
 
-/// Errors from `open`.
-pub const OpenError = error{
-    InvalidHostName,
-    NameNotResolved,
+/// Errors from `open`: a lookup's failure as `Resolver.lookup` names it
+/// (`UnknownHostName`, `NoAddressReturned`, `NameServerFailure`, ...), or the
+/// connection's.
+pub const OpenError = Resolver.LookupError || error{
+    /// A Unix socket's or a named pipe's path names no file.
+    FileNotFound,
     ConnectionFailed,
     /// A socket option `Dial.socket` asked for is one the system has none
     /// of, or refuses.
@@ -126,6 +136,9 @@ pub const OpenError = error{
 pub const IoError = error{
     ConnectionFailed,
     TimedOut,
+    /// No task and no bound of the `Io`'s own could keep an operation's
+    /// deadline: it did not run.
+    ConcurrencyUnavailable,
     TlsFailed,
     ClientCertificateRejected,
     Canceled,
@@ -436,7 +449,6 @@ fn teardown(conn: *Connection, io: Io, polite_at_first: bool) void {
         for (conn.session_buffers[i]) |b| conn.ctx.buffers.release(io, b);
         conn.session_on[i] = false;
     }
-    conn.timed.deinit(io, conn.ctx.keeper());
     switch (conn.bottom) {
         .endpoint => |*owned| owned.deinit(io),
         .carrier => |carrier| carrier.vtable.close(carrier, io),
@@ -609,6 +621,7 @@ fn recordedCause(context: *const anyopaque) ?anyerror {
     return switch (conn.failed()) {
         .canceled => error.Canceled,
         .timed_out => error.TimedOut,
+        .unbounded => error.ConcurrencyUnavailable,
         .none, .broken => null,
     };
 }
@@ -650,6 +663,7 @@ pub fn readError(conn: *Connection) IoError {
     switch (conn.failed()) {
         .timed_out => return error.TimedOut,
         .canceled => return error.Canceled,
+        .unbounded => return error.ConcurrencyUnavailable,
         .none, .broken => {},
     }
     if (conn.timed.fired()) return conn.timedOut(conn.armed.load(.monotonic));
@@ -686,6 +700,7 @@ pub fn writeError(conn: *Connection) IoError {
     switch (conn.failed()) {
         .timed_out => return error.TimedOut,
         .canceled => return error.Canceled,
+        .unbounded => return error.ConcurrencyUnavailable,
         .none, .broken => {},
     }
     if (conn.timed.fired()) return conn.timedOut(conn.armed.load(.monotonic));
@@ -776,12 +791,13 @@ fn perform(conn: *Connection, op: Io.Operation) error{Failed}!Io.Operation.Resul
     const io = conn.io;
     const limit = conn.operationLimit(io, op == .net_read);
     if (limit) |l| conn.armed.store(l.kind, .monotonic);
-    return conn.timed.perform(io, conn.ctx.keeper(), op, if (limit) |l| l.at else null) catch |err| switch (err) {
+    return conn.timed.perform(io, op, if (limit) |l| l.at else null) catch |err| switch (err) {
         error.TimedOut => {
             conn.noteTimedOut(limit.?.kind);
             return error.Failed;
         },
         error.Canceled => conn.fail(.canceled),
+        error.ConcurrencyUnavailable => conn.fail(.unbounded),
     };
 }
 
@@ -1160,9 +1176,6 @@ fn socksTunnel(conn: *Connection, proxy: Proxy, started: Io.Timestamp) OpenError
     };
     conn.handshake_until = until;
     conn.handshake_bound = bound;
-    // The deadlines tick fine enough for a negotiation bounded by `connect`
-    // alone, which no per-operation timeout sets their tick for.
-    if (until) |u| ctx.deadlines.tighten(io, Io.Clock.awake.now(io).durationTo(u));
     defer {
         conn.handshake_until = null;
         conn.handshake_bound = .handshake;
@@ -1206,7 +1219,13 @@ fn socksLookup(conn: *Connection, ipv4: bool, until: ?Io.Timestamp) OpenError!Io
         error.Canceled => error.Canceled,
         error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
         error.TimedOut => conn.timedOutOpen(),
-        error.InvalidHostName, error.NameNotResolved => error.ProxyHostUnreachable,
+        // The proxy's target has no address; a server that failed, a
+        // configuration unread or a cancel is no fault of the target's.
+        error.InvalidHostName, error.UnknownHostName, error.NoAddressReturned => error.ProxyHostUnreachable,
+        error.NameServerFailure => error.NameServerFailure,
+        error.DetectingNetworkConfigurationFailed => error.DetectingNetworkConfigurationFailed,
+        error.ResolvConfParseFailed => error.ResolvConfParseFailed,
+        error.SystemResources => error.SystemResources,
     };
     if (!bounded) sync.bump(&conn.ctx.counters.timeouts_unenforced);
     var address: ?Io.net.IpAddress = null;

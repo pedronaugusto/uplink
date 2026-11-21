@@ -18,6 +18,7 @@ const wire = @import("uplink.wire");
 const h1 = wire.h1;
 const BufferPool = @import("../transport/BufferPool.zig");
 const Connection = @import("../transport/Connection.zig");
+const Resolver = @import("../net/Resolver.zig");
 const H2 = @import("../transport/H2.zig");
 const Response = @import("Response.zig");
 const Run = @import("Run.zig");
@@ -90,11 +91,12 @@ pub const DataWriter = struct {
 };
 
 /// Errors from `finish`.
-pub const FinishError = error{
+pub const FinishError = Resolver.LookupError || error{
     InvalidUrl,
     UnsupportedScheme,
     InvalidHeader,
-    NameNotResolved,
+    /// A Unix socket's or a named pipe's path names no file.
+    FileNotFound,
     ConnectionFailed,
     /// A socket option `Dial.socket` asked for is one the system has none
     /// of, or refuses.
