@@ -69,6 +69,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- uplink's own development holds it to the family's policy: `"policy": "family"` in ci/preflight.json, beside the hardened profile ci/workflow.json declares; the hardened and hardened-tsan legs pass.
 - `wire.url` and `Proxy.parse` read URLs without the standard library's `std.Uri`, on a new `wire.uri.split` (RFC 3986 Appendix B, nothing checked) and `wire.url.parts`, which reads scheme, userinfo, host and port exactly as `std.Uri.parse` did: a differential test runs both readers over generated and mutated URLs and requires the same result, error and slice for each. What they accept and refuse is unchanged. `url.parse` is lenient on purpose, as HTTP clients are, and its doc comment lists what it takes that RFC 3986 refuses. `wire.url.percentDecode` undoes percent escapes as `std.Uri` did.
 - Pins airlock 55f0265, the commit the development build's preflight selects (bay tidy), where it pinned da96dda.
 - Pins xenoglyph d643260, the commit the development build's preflight selects (bay tidy), where it pinned a182c3b.
