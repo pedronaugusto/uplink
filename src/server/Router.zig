@@ -417,7 +417,7 @@ pub fn capture(io: Io, request: *Request, segments: []const Pattern.Segment, val
     for (segments) |seg| {
         if (seg.kind != .wildcard and !(seg.kind == .multi and seg.text.len != 0)) continue;
         const value = Pattern.unescape(values[i], buffer[at..]) orelse values[i];
-        if (value.ptr == buffer.ptr + at) at += value.len;
+        if (value.ptr == buffer[at..].ptr) at += value.len;
         request.params.put(seg.text, value);
         i += 1;
     }
