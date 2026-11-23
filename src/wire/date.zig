@@ -145,13 +145,15 @@ pub fn format(at: Second, out: *[formatted_len]u8) []const u8 {
     const highest = comptime civil(9999, 12, 31, 23, 59, 59).?;
     const s: Second = if (at.compare(lowest) == .lt) lowest else if (at.compare(highest) == .gt) highest else at;
     const since = epoch.saturatingDurationTo(s);
-    const days = since.convert(.day, i64, .down).raw();
-    const midnight = Days.fromRaw(days).convert(.second, i64, .exact) catch aegis.assert.never("a day of a year from 1 to 9999 in seconds fits");
+    const days: Days = since.convert(.day, i64, .down);
+    const midnight = days.convert(.second, i64, .exact) catch aegis.assert.never("a day of a year from 1 to 9999 in seconds fits");
     const in_day = aegis.int.cast(u32, since.saturatingSub(midnight).raw()) catch aegis.assert.never("a second of one day is 0 to 86399");
-    // civil_from_days, Howard Hinnant's inverse.
-    const z = days + 719468;
-    const era = @divFloor(z, 146097);
-    const doe = z - era * 146097;
+    // civil_from_days, Howard Hinnant's inverse, on the days since 0000-03-01.
+    const shifted = days.add(.fromRaw(719468)) catch aegis.assert.never("a day of a year from 1 to 9999 past 0000-03-01 fits");
+    const era_days: Days = .fromRaw(146097);
+    const era = shifted.ratioFloor(era_days) catch aegis.assert.never("an era is not zero days");
+    const into_era = shifted.mod(era_days) catch aegis.assert.never("an era is not zero days");
+    const doe = into_era.ratio(.fromRaw(1)) catch aegis.assert.never("a day is not zero days");
     const yoe = @divFloor(doe - @divFloor(doe, 1460) + @divFloor(doe, 36524) - @divFloor(doe, 146096), 365);
     const doy = doe - (365 * yoe + @divFloor(yoe, 4) - @divFloor(yoe, 100));
     const mp = @divFloor(5 * doy + 2, 153);
@@ -159,7 +161,9 @@ pub fn format(at: Second, out: *[formatted_len]u8) []const u8 {
     const month: u32 = @intCast(if (mp < 10) mp + 3 else mp - 9);
     const year: u32 = @intCast(yoe + era * 400 + @intFromBool(month <= 2));
     // 1970-01-01 was a Thursday.
-    const weekday: usize = @intCast(@mod(days + 3, 7));
+    const from_monday = days.add(.fromRaw(3)) catch aegis.assert.never("a day of a year from 1 to 9999 three days on fits");
+    const into_week = from_monday.mod(.fromRaw(7)) catch aegis.assert.never("a week is not zero days");
+    const weekday: usize = @intCast(into_week.raw());
     return std.mem.print(out, "{s}, {d:0>2} {s} {d:0>4} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
         short_days[weekday], day, months[month - 1], year, in_day / 3600, (in_day / 60) % 60, in_day % 60,
     }) catch aegis.assert.never("every field has its fixed width, 29 bytes in all");
