@@ -478,3 +478,63 @@ test "a stream that failed for a cancelation says so on reads and writes, and on
         try testing.expectError(want, mw.end());
     }
 }
+
+/// A client's transport over frames a server already wrote.
+const Frames = struct {
+    reader: Io.Reader,
+    sink: [256]u8 = undefined,
+    writer: Io.Writer = undefined,
+    conn: ws.Conn = undefined,
+
+    fn open(f: *Frames, bytes: []const u8) *ws.Conn {
+        f.reader = .fixed(bytes);
+        f.writer = .fixed(&f.sink);
+        f.conn = .init(testing.allocator, .client, .{ .reader = &f.reader, .writer = &f.writer, .flushFn = flush, .readableFn = Failed.readable, .canceledFn = never }, .{}, null);
+        return &f.conn;
+    }
+
+    fn flush(_: *ws.Conn.Transport, _: Io) Io.Writer.Error!void {}
+
+    fn never(_: *ws.Conn.Transport) bool {
+        return false;
+    }
+};
+
+test "a message left part read is skipped without its buffer, which its caller may have freed" {
+    const io = test_io.io();
+    var bytes: [2 + 100 + 4]u8 = undefined;
+    bytes[0] = 0x82;
+    bytes[1] = 100;
+    @memset(bytes[2..102], 'x');
+    @memcpy(bytes[102..], "\x81\x02hi");
+    var frames: Frames = .{ .reader = undefined };
+    const conn = frames.open(&bytes);
+    defer conn.deinit();
+    const gpa = testing.allocator;
+    // Past a page, so freeing it unmaps it: a read of it after faults.
+    const first = try gpa.alloc(u8, 64 << 10);
+    const m = (try conn.next(io, first)).?;
+    try testing.expectEqual(@as(u8, 'x'), try m.reader().takeByte());
+    gpa.free(first);
+    var second: [16]u8 = undefined;
+    const n = (try conn.next(io, &second)).?;
+    try testing.expectEqual(ws.Conn.Kind.text, n.kind);
+    try testing.expectEqualStrings("hi", try n.reader().take(2));
+}
+
+test "a whole message too long for its limit leaves the connection reading the next" {
+    const io = test_io.io();
+    var bytes: [2 + 100 + 4]u8 = undefined;
+    bytes[0] = 0x82;
+    bytes[1] = 100;
+    @memset(bytes[2..102], 'x');
+    @memcpy(bytes[102..], "\x81\x02hi");
+    var frames: Frames = .{ .reader = undefined };
+    const conn = frames.open(&bytes);
+    defer conn.deinit();
+    try testing.expectError(error.StreamTooLong, conn.readMessage(io, testing.allocator, .limited(10)));
+    const kind, const payload = (try conn.readMessage(io, testing.allocator, .limited(10))).?;
+    defer testing.allocator.free(payload);
+    try testing.expectEqual(ws.Conn.Kind.text, kind);
+    try testing.expectEqualStrings("hi", payload);
+}

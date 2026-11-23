@@ -54,6 +54,9 @@ peer_close: ?PeerClose = null,
 failure: ?u16 = null,
 /// The message being read, whose reader `next` handed out.
 message: Message = undefined,
+/// Private: the message reader's buffer for what the connection reads itself (`readMessage`,
+/// the close's drain, a skipped message's rest), so it never keeps a caller's.
+read_buffer: [4096]u8 = undefined,
 /// Private: the `Io` of the reading task, for the message reader, which
 /// cannot take one per call.
 read_io: Io = undefined,
@@ -218,6 +221,11 @@ pub const Message = struct {
 pub fn next(c: *Conn, io: Io, buffer: []u8) ReadError!?*Message {
     c.read_io = io;
     if (c.reading.open) {
+        // What the previous message's reader holds is dropped unread: its buffer was its
+        // caller's, which may be gone. The rest is drained through the connection's own.
+        c.message.interface.buffer = &c.read_buffer;
+        c.message.interface.seek = 0;
+        c.message.interface.end = 0;
         var discard: [512]u8 = undefined;
         var r = &c.message.interface;
         while (true) {
@@ -257,8 +265,7 @@ pub fn next(c: *Conn, io: Io, buffer: []u8) ReadError!?*Message {
 /// The next message whole, at most `limit` bytes, in `gpa`; null once the
 /// peer closed.
 pub fn readMessage(c: *Conn, io: Io, gpa: Allocator, limit: Io.Limit) (ReadError || error{StreamTooLong})!?struct { Kind, []u8 } {
-    var buffer: [4096]u8 = undefined;
-    const m = try c.next(io, &buffer) orelse return null;
+    const m = try c.next(io, &c.read_buffer) orelse return null;
     const bytes = m.reader().allocRemaining(gpa, limit) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.StreamTooLong => error.StreamTooLong,
@@ -699,7 +706,6 @@ pub fn close(c: *Conn, io: Io, code: u16, reason: []const u8) Io.Cancelable!void
         error.ConnectionFailed, error.PayloadTooLarge, error.OutOfMemory => return,
     };
     const until = Io.Clock.awake.now(io).addDuration(span.toIo(c.options.close_timeout));
-    var buffer: [512]u8 = undefined;
     while (c.peer_close == null and c.failure == null) {
         const left = Io.Clock.awake.now(io).durationTo(until);
         if (span.spent(left)) return;
@@ -710,7 +716,7 @@ pub fn close(c: *Conn, io: Io, code: u16, reason: []const u8) Io.Cancelable!void
             .timed_out, .unbounded => return,
         }
         // A close that cannot read the peer's ends without it.
-        _ = c.next(io, &buffer) catch |err| switch (err) {
+        _ = c.next(io, &c.read_buffer) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             error.ProtocolError, error.ConnectionFailed, error.TimedOut, error.ConcurrencyUnavailable, error.OutOfMemory => return,
         };
