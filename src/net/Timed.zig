@@ -1,9 +1,11 @@
 //! One socket's operations, each ended at its deadline: by reactor's
 //! `Deadlines`, in the kernel on a reactor runtime and on any other `Io` by
-//! running the operation in a task of its own that the deadline cancels;
-//! by the `Io` itself (`operateTimeout`) when no task can be had for that.
-//! Where neither can keep it the operation is refused with
-//! `ConcurrencyUnavailable` and never runs unbounded. An operation with no
+//! running the operation in a task of its own that the deadline cancels, or,
+//! with no task to be had, a stream socket's read or write bounded on the
+//! calling thread; by the `Io` itself (`operateTimeout`) for what reactor
+//! cannot bound so (a named pipe's operation). Where neither can keep it the
+//! operation is refused with `ConcurrencyUnavailable` and never runs
+//! unbounded. An operation with no
 //! deadline runs as the `Io` runs it.
 //!
 //! The client's connections and the server's share it: what differs is
@@ -211,7 +213,7 @@ const Unbounding = @import("shakedown").Layer(u8, .{
     }.awaitBatch,
 });
 
-test "an operation whose deadline nothing can keep is refused, and never runs" {
+test "with no task to spare and no bound of the Io's own, a write is sent and a read ends at its deadline" {
     const base = test_io.io();
     var layer: Unbounding = .init(base, 0);
     const io = layer.io();
@@ -221,14 +223,19 @@ test "an operation whose deadline nothing can keep is refused, and never runs" {
     defer client.close(base);
     const server = try listener.accept(base);
     defer server.close(base);
+    // reactor bounds a stream socket's operation on the calling thread.
     var timed: Timed = .init(.ofSocket(client));
     const far = Io.Clock.awake.now(base).addDuration(.fromSeconds(60));
-    try testing.expectError(error.ConcurrencyUnavailable, timed.perform(io, .{ .net_write = .{ .socket_handle = client.socket.handle, .header = "", .data = &.{"x"}, .splat = 1 } }, far));
-    try testing.expect(!timed.fired());
-    // Nothing was written: the peer's bounded read ends empty.
+    const wrote = try timed.perform(io, .{ .net_write = .{ .socket_handle = client.socket.handle, .header = "", .data = &.{"x"}, .splat = 1 } }, far);
+    try testing.expectEqual(@as(usize, 1), try wrote.net_write);
     var peer: Timed = .init(.ofSocket(server));
     var buf: [4]u8 = undefined;
     var data: [1][]u8 = .{&buf};
+    const read: Io.Operation = .{ .net_read = .{ .socket_handle = server.socket.handle, .data = &data } };
+    const got = try (try peer.perform(io, read, far)).net_read;
+    try testing.expectEqualStrings("x", buf[0..got.data_len]);
+    // Nothing more comes: the read ends at its deadline.
     const soon = Io.Clock.awake.now(base).addDuration(.fromMilliseconds(50));
-    try testing.expectError(error.TimedOut, peer.perform(base, .{ .net_read = .{ .socket_handle = server.socket.handle, .data = &data } }, soon));
+    try testing.expectError(error.TimedOut, peer.perform(io, read, soon));
+    try testing.expect(peer.fired());
 }
