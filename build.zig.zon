@@ -21,8 +21,8 @@
         },
 
         .reactor = .{
-            .url = "git+https://github.com/pedronaugusto/reactor#c7aa6c7e3cffbcf62277ab31b0fe5b0cc0fa7887",
-            .hash = "reactor-0.9.0-MjQ-WPWSFwCCMNBNQAD3nnmdUtim04WBjdycJmFu4p6F",
+            .url = "git+https://github.com/pedronaugusto/reactor#41a12ab87a20de6e9d9d0e3bc64522d755a62ec0",
+            .hash = "reactor-0.9.0-MjQ-WKPPFwDDx1NNKj40dfDxPxknV-6q0jsTo0mHtnqV",
             .lazy = true,
         },
 

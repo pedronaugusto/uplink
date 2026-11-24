@@ -110,6 +110,52 @@ test "a client's requests are answered over one kept connection" {
     }.inSim, .{});
 }
 
+/// An `Io` with no task to spare.
+const Serial = @import("shakedown").Layer(u8, .{
+    .concurrent = struct {
+        fn concurrent(_: ?*anyopaque, _: usize, _: std.mem.Alignment, _: []const u8, _: std.mem.Alignment, _: *const fn (*const anyopaque, *anyopaque) void) Io.ConcurrentError!*Io.AnyFuture {
+            return error.ConcurrencyUnavailable;
+        }
+    }.concurrent,
+    .groupConcurrent = struct {
+        fn groupConcurrent(_: ?*anyopaque, _: *Io.Group, _: []const u8, _: std.mem.Alignment, _: *const fn (*const anyopaque) void) Io.ConcurrentError!void {
+            return error.ConcurrencyUnavailable;
+        }
+    }.groupConcurrent,
+});
+
+fn served(io: Io, _: *Request, response: *Response) anyerror!void {
+    try response.send(io, "served");
+}
+
+test "a connection served on an Io with no task to spare is read under its timeouts and answered" {
+    // On the system's sockets: with no task to race them in, the head's
+    // read and the answer's write are bounded on the calling thread, where
+    // Windows' Io.Threaded refuses a timed socket operation of its own.
+    const base = testing.io;
+    const gpa = testing.allocator;
+    var serial: Serial = .init(base, 0);
+    var listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(base, .{ .reuse_address = true });
+    defer listener.deinit(base);
+    const client = try listener.socket.address.connect(base, .{ .mode = .stream });
+    defer client.close(base);
+    const accepted = try listener.accept(base);
+    var server: Server = .init(gpa, .{}, .of(served));
+    defer server.deinit(base);
+    var serving = try base.concurrent(Server.serveConnection, .{ &server, serial.io(), accepted });
+    defer serving.await(base);
+    var wbuf: [256]u8 = undefined;
+    var w = client.writer(base, &wbuf);
+    try w.interface.writeAll("GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    try w.interface.flush();
+    var rbuf: [1024]u8 = undefined;
+    var r = client.reader(base, &rbuf);
+    const answer = try r.interface.allocRemaining(gpa, .limited(1 << 16));
+    defer gpa.free(answer);
+    try testing.expect(std.mem.startsWith(u8, answer, "HTTP/1.1 200"));
+    try testing.expect(std.mem.endsWith(u8, answer, "served"));
+}
+
 test "a body longer than the buffer is chunked, and one that fits goes with its length" {
     try test_io.simulated(struct {
         fn inSim() !void {

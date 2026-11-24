@@ -594,7 +594,7 @@ const Unbounding = @import("shakedown").Layer(u8, .{
     }.awaitBatch,
 });
 
-test "a service lookup no wait of which can be bounded is refused by name, never read as no records" {
+test "a service lookup on an Io with no task to spare and no bound of its own is answered, its waits bounded on the calling thread" {
     const testing = std.testing;
     const base = @import("../testing/io.zig").io();
     var fake: FakeServer = undefined;
@@ -604,7 +604,10 @@ test "a service lookup no wait of which can be bounded is refused by name, never
     var stub: Stub = .init(&servers, .{ .timeout = .literal("2s"), .attempts = 1 });
     var d: Dns = .{ .transport = stub.transport() };
     var layer: Unbounding = .init(base, 0);
-    try testing.expectError(error.ConcurrencyUnavailable, d.resolver().service(layer.io(), testing.allocator, "small.test", 443));
+    // reactor bounds the stub's datagram receive on the calling thread.
+    var binding = (try d.resolver().service(layer.io(), testing.allocator, "small.test", 443)).?;
+    defer binding.deinit(testing.allocator);
+    try testing.expect(binding.records.len != 0);
 }
 
 test "a stub canceled at its socket returns error.Canceled, not the next server's answer" {
