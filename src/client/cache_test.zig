@@ -92,7 +92,7 @@ fn freshServed(kind: Kind) !void {
     const body = try response.collect(testing.allocator, io, .limited(64));
     defer testing.allocator.free(body);
     try testing.expectEqualStrings("one", body);
-    try testing.expectEqual(@as(u32, 1), server.requests.load(.monotonic));
+    try testing.expectEqual(@as(u64, 1), server.requests.load(.monotonic).raw());
 }
 
 /// A body far past what a response's reader holds, so one read in part
@@ -119,7 +119,7 @@ fn partNeverStored(kind: Kind) !void {
         try response.reader(io).readSliceAll(&two);
     }
     try expectGot(try get(&f, io, url, &.{}), 200, .miss, &large);
-    try testing.expectEqual(@as(u32, 2), server.requests.load(.monotonic));
+    try testing.expectEqual(@as(u64, 2), server.requests.load(.monotonic).raw());
     // Read whole, it is.
     try expectGot(try get(&f, io, url, &.{}), 200, .hit, &large);
 
@@ -129,7 +129,7 @@ fn partNeverStored(kind: Kind) !void {
     const nurl = never.url(&nbuf, "/");
     try expectGot(try get(&f, io, nurl, &.{}), 200, .miss, "no");
     try expectGot(try get(&f, io, nurl, &.{}), 200, .miss, "no");
-    try testing.expectEqual(@as(u32, 2), never.requests.load(.monotonic));
+    try testing.expectEqual(@as(u64, 2), never.requests.load(.monotonic).raw());
 }
 
 /// An origin with an entity tag: a 200 stale at once, then 304s to a
@@ -171,7 +171,7 @@ fn revalidated(kind: Kind) !void {
     try testing.expect(std.mem.find(u8, seen, "If-None-Match: \"v1\"\r\n") != null);
     // The 304's max-age is the variant's now.
     try expectGot(try get(&f, io, url, &.{}), 200, .hit, "one");
-    try testing.expectEqual(@as(u32, 2), server.requests.load(.monotonic));
+    try testing.expectEqual(@as(u64, 2), server.requests.load(.monotonic).raw());
 }
 
 /// An origin whose answer varies by language.
@@ -203,7 +203,7 @@ fn varyVariants(kind: Kind) !void {
     try expectGot(try get(&f, io, url, en), 200, .hit, "hello");
     try expectGot(try get(&f, io, url, fr), 200, .hit, "bonjour");
     try expectGot(try get(&f, io, url, &.{}), 200, .miss, "hello");
-    try testing.expectEqual(@as(u32, 3), server.requests.load(.monotonic));
+    try testing.expectEqual(@as(u64, 3), server.requests.load(.monotonic).raw());
 }
 
 test "an unsafe method's success removes what is stored for its URL" {
@@ -226,7 +226,7 @@ fn unsafeRemoves(kind: Kind) !void {
         response.deinit(io);
     }
     try expectGot(try get(&f, io, url, &.{}), 200, .miss, "ok");
-    try testing.expectEqual(@as(u32, 3), server.requests.load(.monotonic));
+    try testing.expectEqual(@as(u64, 3), server.requests.load(.monotonic).raw());
 }
 
 test "only-if-cached with nothing stored is a 504 the cache makes, and the server is never asked" {
@@ -242,7 +242,7 @@ fn onlyIfCached(kind: Kind) !void {
     defer f.deinit(io);
     var buf: [64]u8 = undefined;
     try expectGot(try get(&f, io, server.url(&buf, "/none"), &.{.{ .name = "Cache-Control", .value = "only-if-cached" }}), 504, .synthesized, "");
-    try testing.expectEqual(@as(u32, 0), server.requests.load(.monotonic));
+    try testing.expectEqual(@as(u64, 0), server.requests.load(.monotonic).raw());
 }
 
 /// An origin that answers once, then fails.

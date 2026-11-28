@@ -3,6 +3,7 @@
 //! answer built as a server would send it.
 
 const std = @import("std");
+const sync = @import("../sync.zig");
 const Io = std.Io;
 const dns = @import("uplink.wire").dns;
 const Dns = @import("../net/Dns.zig");
@@ -27,7 +28,7 @@ pub const Param = struct { key: dns.Key, value: []const u8 };
 pub const Zone = struct {
     entries: []const Entry,
     /// Questions asked, of every type.
-    asked: std.atomic.Value(u32) = .init(0),
+    asked: sync.Counter = .init(.fromRaw(0)),
 
     exchanging: Dns.Transport = .{ .exchangeFn = exchange },
 
@@ -37,7 +38,7 @@ pub const Zone = struct {
 
     fn exchange(_: Io, t: *Dns.Transport, query: []const u8, answer: []u8) Dns.ExchangeError![]u8 {
         const z: *Zone = @alignCast(@fieldParentPtr("exchanging", t));
-        _ = z.asked.fetchAdd(1, .monotonic);
+        sync.bump(&z.asked);
         return z.respond(query, answer) catch error.NoAnswer;
     }
 

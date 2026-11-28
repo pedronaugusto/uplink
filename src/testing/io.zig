@@ -16,6 +16,7 @@
 //! is made on the simulation through reactor's seam, its options told there.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const reactor = @import("reactor");
 const shakedown = @import("shakedown");
 const reactor_testing = @import("reactor.testing");
@@ -27,16 +28,15 @@ var simulating: ?Io = null;
 /// The node's seam while a test body runs under `simulated`.
 var node_seam: ?*reactor_testing.Seam = null;
 
-var starting: std.atomic.Mutex = .unlocked;
-var started: std.atomic.Value(bool) = .init(false);
 var runtime: reactor.Runtime = undefined;
+/// The runtime, once the first test that asks for it has started it.
+var started: aegis.Lazy(*reactor.Runtime) = .init();
 
 /// The `Io` for the test running now.
 pub fn io() Io {
     if (simulating) |node| return node;
     if (comptime !evented) return std.testing.io;
-    if (!started.load(.acquire)) start();
-    return runtime.io();
+    return started.getOrInit(std.testing.io, {}, start).*.io();
 }
 
 /// Whether the suite is on the reactor runtime.
@@ -48,10 +48,7 @@ pub const backend: ?reactor.Runtime.Backend = if (config.backend) |name|
 else
     null;
 
-fn start() void {
-    while (!starting.tryLock()) std.atomic.spinLoopHint();
-    defer starting.unlock();
-    if (started.load(.acquire)) return;
+fn start(_: void, out: **reactor.Runtime) void {
     // Workers beside the home thread, so what a test starts runs in
     // parallel as in a program; the lanes small, since a test needs a name
     // looked up or a file read now and then. A backend the system lacks
@@ -68,7 +65,7 @@ fn start() void {
         .report_after = null,
     }) catch |err| std.debug.panic("the evented test runtime on {t}: {t}", .{ backend.?, err });
     runtime.start() catch |err| std.debug.panic("the evented test runtime on {t}: {t}", .{ backend.?, err });
-    started.store(true, .release);
+    out.* = &runtime;
 }
 
 /// The socket options reactor told the node's seam so far, under `simulated`

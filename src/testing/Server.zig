@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const aegis = @import("aegis");
+const sync = @import("../sync.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -18,11 +19,11 @@ path: ?[]const u8 = null,
 handler: Handler,
 task: Io.Future(void) = undefined,
 group: Io.Group = .init,
-stopping: std.atomic.Value(bool) = .init(false),
+stopping: sync.Latch = .init(.clear),
 /// Connections accepted.
-accepted: std.atomic.Value(u32) = .init(0),
+accepted: sync.Counter = .init(.fromRaw(0)),
 /// Requests answered.
-requests: std.atomic.Value(u32) = .init(0),
+requests: sync.Counter = .init(.fromRaw(0)),
 /// Every request's head and body, as received, one after another.
 log: aegis.BlockingGuarded(std.ArrayList(u8)),
 
@@ -51,7 +52,7 @@ pub const Request = struct {
     /// The request's place on its connection, from 0.
     index: u32,
     /// The request's place among all the server answered, from 0.
-    number: u32,
+    number: u64,
 };
 
 pub const Answer = struct {
@@ -107,7 +108,7 @@ pub fn startUnix(gpa: Allocator, io: Io, path: []const u8, handler: Handler) !*S
 
 pub fn stop(s: *Server) void {
     const io = s.io;
-    s.stopping.store(true, .release);
+    s.stopping.store(.set, .release);
     if (s.path) |p| {
         const address = Io.net.UnixAddress.init(p) catch unreachable; // unreachable: the server listened on it
         // a wake that cannot connect finds the server already gone, which is what the stop waits for
@@ -141,8 +142,8 @@ pub fn received(s: *Server, gpa: Allocator) ![]u8 {
 fn serve(s: *Server) void {
     while (true) {
         const stream = s.listener.accept(s.io) catch return;
-        if (s.stopping.load(.acquire)) return stream.close(s.io);
-        _ = s.accepted.fetchAdd(1, .monotonic);
+        if (s.stopping.load(.acquire) == .set) return stream.close(s.io);
+        sync.bump(&s.accepted);
         s.group.concurrent(s.io, handle, .{ s, stream }) catch stream.close(s.io);
     }
 }
@@ -172,7 +173,7 @@ fn handle(s: *Server, stream: Io.net.Stream) void {
         };
         const request = readBody(&r.interface, head_len) catch return;
         s.record(request.head, request.body);
-        const number = s.requests.fetchAdd(1, .monotonic);
+        const number = s.requests.fetchAddWrapping(.fromRaw(1), .monotonic).raw();
         const answer = s.handler.answer(s.handler.context, .{ .head = request.head, .body = request.body, .index = index, .number = number });
         r.interface.toss(request.len);
         if (answer.silent) {

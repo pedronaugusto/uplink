@@ -325,7 +325,7 @@ test "a request canceled while it waits on its server ends Canceled" {
     var buf: [64]u8 = undefined;
     var sending = io.concurrent(sendOnce, .{ &client, io, server.url(&buf, "/") }) catch return error.SkipZigTest;
     // The request is out, and its response waited for.
-    while (server.requests.load(.acquire) == 0 and server.accepted.load(.acquire) == 0) try io.sleep(.fromMilliseconds(5), .awake);
+    while (server.requests.load(.acquire).raw() == 0 and server.accepted.load(.acquire).raw() == 0) try io.sleep(.fromMilliseconds(5), .awake);
     try io.sleep(.fromMilliseconds(20), .awake);
     try testing.expectError(error.Canceled, sending.cancel(io));
 }

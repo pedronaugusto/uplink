@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const aegis = @import("aegis");
+const sync = @import("../sync.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const Server = @import("Server.zig");
@@ -23,14 +24,14 @@ port: u16,
 options: Options,
 task: Io.Future(void) = undefined,
 group: Io.Group = .init,
-stopping: std.atomic.Value(bool) = .init(false),
+stopping: sync.Latch = .init(.clear),
 /// Each request's first line, one to a line; SOCKS requests as `SOCKS <v>
 /// <host>:<port>`.
 log: aegis.BlockingGuarded(std.ArrayList(u8)),
 /// Connections accepted.
-accepted: std.atomic.Value(u32) = .init(0),
+accepted: sync.Counter = .init(.fromRaw(0)),
 /// Requests refused for want of credentials.
-challenges: std.atomic.Value(u32) = .init(0),
+challenges: sync.Counter = .init(.fromRaw(0)),
 
 pub const Options = struct {
     kind: Kind = .http,
@@ -69,7 +70,7 @@ pub fn start(gpa: Allocator, io: Io, options: Options) !*Proxy {
 
 pub fn stop(p: *Proxy) void {
     const io = p.io;
-    p.stopping.store(true, .release);
+    p.stopping.store(.set, .release);
     // a wake that cannot connect finds the proxy already gone, which is what the stop waits for
     if (p.address.connect(io, .{ .mode = .stream })) |stream| stream.close(io) else |_| {}
     p.task.await(io);
@@ -97,8 +98,8 @@ fn note(p: *Proxy, comptime format: []const u8, args: anytype) void {
 fn serve(p: *Proxy) void {
     while (true) {
         const stream = p.listener.accept(p.io) catch return;
-        if (p.stopping.load(.acquire)) return stream.close(p.io);
-        _ = p.accepted.fetchAdd(1, .monotonic);
+        if (p.stopping.load(.acquire) == .set) return stream.close(p.io);
+        sync.bump(&p.accepted);
         p.group.concurrent(p.io, handle, .{ p, stream }) catch stream.close(p.io);
     }
 }
@@ -124,7 +125,7 @@ fn handleHttp(p: *Proxy, r: *Io.Reader, w: *Io.Writer, client: Io.net.Stream) !v
         const answered = Server.headerValue(head, "proxy-authorization");
         p.note("{s} [{s}]", .{ line, if (answered) |a| a[0..@min(a.len, 6)] else "none" });
         if (!p.authorized(answered)) {
-            _ = p.challenges.fetchAdd(1, .monotonic);
+            sync.bump(&p.challenges);
             r.toss(head_len);
             try p.challenge(w);
             continue;

@@ -18,14 +18,12 @@ const Io = std.Io;
 const wire = @import("uplink.wire");
 const h1 = wire.h1;
 const fields = wire.fields;
-const coding = wire.coding;
 const Method = wire.Method;
 const Version = wire.Version;
 const BufferPool = @import("../transport/BufferPool.zig");
 const Connection = @import("../transport/Connection.zig");
 const H2 = @import("../transport/H2.zig");
 const Context = @import("../transport/Context.zig");
-const Diagnostics = @import("../transport/Diagnostics.zig");
 const Observer = @import("../transport/Observer.zig");
 const Pool = @import("../pool/Pool.zig");
 const Body = @import("../transport/Body.zig");
@@ -34,6 +32,7 @@ const Head = @import("../transport/Head.zig");
 const Decoder = @import("../coding/Decoder.zig");
 const Upgraded = @import("Upgraded.zig");
 const Cache = @import("Cache.zig");
+const receiving = @import("receiving.zig");
 
 const Response = @This();
 
@@ -524,95 +523,8 @@ pub fn fromStream(io: Io, ctx: *Context, pool: *Pool, h: *H2, st: *H2.Stream, op
     return response;
 }
 
-/// Errors from `receive`.
-pub const ReceiveError = error{
-    ConnectionFailed,
-    TimedOut,
-    /// No task and no bound of the `Io`'s own could keep a wait's timeout:
-    /// the read did not run.
-    ConcurrencyUnavailable,
-    TlsFailed,
-    ClientCertificateRejected,
-    Canceled,
-    HttpProtocolError,
-    OutOfMemory,
-};
-
-/// What `receive` needs besides the connection.
-pub const ReceiveOptions = struct {
-    method: Method,
-    limits: h1.Limits,
-    decompress: bool,
-    diagnostics: ?*Diagnostics,
-    /// Set once a byte of the response has arrived.
-    progress: *bool,
-    /// Return a `100 Continue` rather than skipping it: the request waits
-    /// for one before its body.
-    want_continue: bool = false,
-};
-
-/// Read the response to the request just written on `conn`, which it then
-/// holds. Interim 1xx heads other than 101 are skipped.
-pub fn receive(io: Io, ctx: *Context, pool: *Pool, conn: *Connection, options: ReceiveOptions) ReceiveError!Response {
-    if (options.diagnostics) |d| d.stage = .head;
-    while (true) {
-        var head = try receiveHead(io, ctx, conn, options);
-        errdefer ctx.buffers.release(io, head.buffer);
-        const code = @backingInt(head.head.status);
-        if (code / 100 == 1 and code != 101 and !(code == 100 and options.want_continue)) {
-            ctx.buffers.release(io, head.buffer);
-            continue;
-        }
-        const framing = h1.responseFraming(options.method, &head.head) catch return error.HttpProtocolError;
-        var response: Response = .{
-            .status = head.head.status,
-            .version = head.head.version,
-            .reason = head.head.reason,
-            .headers = head.head.headers,
-            .ctx = ctx,
-            .pool = pool,
-            .conn = conn,
-            .head_buffer = head.buffer,
-            .body_buffer = head.body_buffer,
-            .keep_alive = framing.keep_alive,
-            .tunnel = options.method.eql(.connect),
-            .body = .init(Io.Reader.ending, framing.framing, head.body_buffer),
-        };
-        if (options.decompress) try response.planDecoding(io);
-        if (options.diagnostics) |d| d.stage = .body;
-        return response;
-    }
-}
-
-/// Decode a body whose codings are all gzip, deflate, zstd or Brotli; a body
-/// under any other, or under codings uplink cannot read, is handed over as
-/// it came, `Content-Encoding` and all.
+/// Read the body through a decoder when its codings are all ones uplink
+/// decodes; otherwise it is handed over as it came, `Content-Encoding` and all.
 fn planDecoding(r: *Response, io: Io) Allocator.Error!void {
-    if (r.body.state.current() == .done) return;
-    // Codings uplink cannot read leave the body as it came, Content-Encoding and all.
-    const codings = (coding.Codings.of(&r.headers) catch null) orelse return;
-    if (codings.len == 0 or !Decoder.decodes(codings.slice())) return;
-    r.decoder = try .init(io, r.ctx.gpa, &r.ctx.buffers, &r.ctx.windows, codings.slice());
-}
-
-/// A response head, parsed in its pooled buffer.
-const Received = struct {
-    buffer: BufferPool.Buffer,
-    head: h1.ResponseHead,
-    body_buffer: []u8,
-};
-
-/// Read one head from `conn` into a pooled buffer and parse it there.
-fn receiveHead(io: Io, ctx: *Context, conn: *Connection, options: ReceiveOptions) ReceiveError!Received {
-    var head = Head.gather(io, &ctx.buffers, conn.reader(), options.limits, options.progress) catch |err| return switch (err) {
-        error.HeadTooLarge, error.StartLineTooLong, error.NoStartLine => error.HttpProtocolError,
-        error.EndOfStream => if (conn.failed() == .none) error.ConnectionFailed else conn.readError(),
-        error.ReadFailed => conn.readError(),
-        error.OutOfMemory => error.OutOfMemory,
-    };
-    errdefer head.release(io, &ctx.buffers);
-    const parsed = (h1.parseResponse(head.bytes(), head.fields(), options.limits) catch return error.HttpProtocolError) orelse
-        return error.HttpProtocolError;
-    aegis.assert.invariant(parsed.len == head.len, "parsed.len == head.len");
-    return .{ .buffer = head.buffer, .head = parsed.head, .body_buffer = head.bodyBuffer() };
+    r.decoder = try receiving.decoderFor(io, r.ctx, &r.headers, r.body.state.current() == .done);
 }

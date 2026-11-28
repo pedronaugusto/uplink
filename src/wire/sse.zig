@@ -13,6 +13,9 @@ const std = @import("std");
 const aegis = @import("aegis");
 const Io = std.Io;
 
+/// A reconnection time, in the milliseconds the stream writes it in.
+pub const Retry = aegis.units.Duration(.millisecond, u64);
+
 /// One event. `data` and `type` point into the parser's buffers and are
 /// valid until it is fed again; `id` is the last event ID, which carries
 /// over to later events.
@@ -23,10 +26,10 @@ pub const Event = struct {
     data: []const u8,
     /// The last event ID the stream set, empty when none.
     id: []const u8,
-    /// The reconnection time the stream last set with `retry`, in
-    /// milliseconds: how long a client waits before reconnecting. It
-    /// carries over to later events, as `id` does.
-    retry: ?u64 = null,
+    /// The reconnection time the stream last set with `retry`: how long a
+    /// client waits before reconnecting. It carries over to later events,
+    /// as `id` does.
+    retry: ?Retry = null,
 };
 
 /// Why a stream cannot be read.
@@ -63,7 +66,7 @@ pub const Parser = struct {
     /// Private: a `retry` value being read, and whether it is all digits.
     retry_value: u64 = 0,
     retry_ok: bool = false,
-    retry: ?u64 = null,
+    retry: ?Retry = null,
     /// Private: whether a `data` field was seen since the last dispatch.
     has_data: bool = false,
 
@@ -255,7 +258,7 @@ pub const Parser = struct {
                 p.id_len = p.pending_id_len;
             },
             .retry => if (p.retry_ok) {
-                p.retry = p.retry_value;
+                p.retry = .fromRaw(p.retry_value);
             },
             .event, .ignored => {},
         }
@@ -333,14 +336,14 @@ pub const Outgoing = struct {
     /// Split into one `data` line per line it holds.
     data: []const u8,
     id: ?[]const u8 = null,
-    retry: ?u64 = null,
+    retry: ?Retry = null,
 };
 
 /// An event's fields but its data, for `EventWriter`.
 pub const Head = struct {
     type: ?[]const u8 = null,
     id: ?[]const u8 = null,
-    retry: ?u64 = null,
+    retry: ?Retry = null,
 };
 
 /// Errors from `writeEvent`.
@@ -376,7 +379,7 @@ pub const EventWriter = struct {
         if (head.id) |id| if (std.mem.findAny(u8, id, "\r\n\x00") != null) return error.InvalidField;
         if (head.type) |t| try out.print("event: {s}\n", .{t});
         if (head.id) |id| try out.print("id: {s}\n", .{id});
-        if (head.retry) |ms| try out.print("retry: {d}\n", .{ms});
+        if (head.retry) |wait| try out.print("retry: {d}\n", .{wait.raw()});
         try out.writeAll("data: ");
         return .{ .out = out, .interface = .{ .vtable = &.{ .drain = drain }, .buffer = buffer } };
     }
@@ -427,7 +430,7 @@ fn collect(stream: []const u8, piece: usize, out: *std.ArrayList(u8)) !void {
         const step = try p.feed(window);
         at += step.consumed;
         if (step.event) |e| {
-            try out.print(testing.allocator, "[{s}|{s}|{s}|{?d}]", .{ e.type, e.data, e.id, e.retry });
+            try out.print(testing.allocator, "[{s}|{s}|{s}|{?d}]", .{ e.type, e.data, e.id, if (e.retry) |r| r.raw() else null });
         }
     }
 }
@@ -470,7 +473,7 @@ test "data past the buffer is refused by name, and the reader stops at the end" 
 test "a written event reads back as itself" {
     var buf: [256]u8 = undefined;
     var w: Io.Writer = .fixed(&buf);
-    try writeEvent(&w, .{ .type = "update", .id = "42", .retry = 100, .data = "line one\r\nline two\nline three" });
+    try writeEvent(&w, .{ .type = "update", .id = "42", .retry = .literal("100ms"), .data = "line one\r\nline two\nline three" });
     try writeEvent(&w, .{ .data = "" });
     var in: Io.Reader = .fixed(w.buffered());
     var data: [64]u8 = undefined;
@@ -479,7 +482,7 @@ test "a written event reads back as itself" {
     try testing.expectEqualStrings("update", e.type);
     try testing.expectEqualStrings("line one\nline two\nline three", e.data);
     try testing.expectEqualStrings("42", e.id);
-    try testing.expectEqual(@as(?u64, 100), e.retry);
+    try testing.expectEqual(@as(?Retry, .literal("100ms")), e.retry);
     const empty = (try r.next()).?;
     try testing.expectEqualStrings("", empty.data);
     try testing.expectError(error.InvalidField, writeEvent(&w, .{ .type = "a\nb", .data = "" }));

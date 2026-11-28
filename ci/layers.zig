@@ -121,6 +121,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/client/Cache.zig",
         "src/client/OriginAuth.zig",
         "src/client/Upgraded.zig",
+        "src/client/receiving.zig",
     } },
     .{ .name = "client response", .patterns = &.{
         "src/client/Response.zig",

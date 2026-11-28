@@ -228,7 +228,7 @@ test "statuses the retries cover are tried again after Retry-After or a backoff,
                 defer gpa.free(body);
                 try testing.expectEqualStrings("POST|b|-|-|-", body);
                 try testing.expectEqual(@as(u8, 1), d.retries);
-                try testing.expectEqual(@as(u32, 2), server.requests.load(.monotonic));
+                try testing.expectEqual(@as(u64, 2), server.requests.load(.monotonic).raw());
             }
             {
                 // Not covered by default, and not past what the caller waits for.
@@ -245,7 +245,7 @@ test "statuses the retries cover are tried again after Retry-After or a backoff,
                 var again = try client.send(io, .{ .url = server.url(&buf, "/") });
                 defer again.deinit(io);
                 try testing.expectEqual(std.http.Status.service_unavailable, again.status);
-                try testing.expectEqual(@as(u32, 2), server.requests.load(.monotonic));
+                try testing.expectEqual(@as(u64, 2), server.requests.load(.monotonic).raw());
             }
             {
                 // A backoff that would end past the request's deadline is not waited.
@@ -293,7 +293,7 @@ test "a connection that fails before any answer is tried again when the request 
                 var client: Client = .init(gpa, fast);
                 defer client.deinit(io);
                 try testing.expectError(error.ConnectionFailed, client.send(io, .{ .method = .post, .url = server.url(&buf, "/"), .body = .{ .bytes = "x" } }));
-                try testing.expectEqual(@as(u32, 1), server.requests.load(.monotonic));
+                try testing.expectEqual(@as(u64, 1), server.requests.load(.monotonic).raw());
             }
         }
     }.inSim, .{});
@@ -370,7 +370,7 @@ test "a 401 is answered from the caller's credentials once, and the answer sent 
                 // 401, then the answer (Digest: twice, for the stale nonce), then
                 // the answer at once for each later request.
                 const extra: u32 = if (std.mem.eql(u8, case[0], "Digest")) 1 else 0;
-                try testing.expectEqual(@as(u32, 4 + extra), server.requests.load(.monotonic));
+                try testing.expectEqual(@as(u64, 4 + extra), server.requests.load(.monotonic).raw());
             }
         }
     }.inSim, .{});

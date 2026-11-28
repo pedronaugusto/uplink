@@ -36,6 +36,7 @@ const BufferPool = @import("../transport/BufferPool.zig");
 const Shared = @import("Shared.zig");
 const Request = @import("Request.zig");
 const Response = @import("Response.zig");
+const receiving = @import("receiving.zig");
 const OriginAuth = @import("OriginAuth.zig");
 const Prepare = @import("Prepare.zig");
 const Cache = @import("Cache.zig");
@@ -608,7 +609,7 @@ pub fn receive(run: *Run, io: Io, conn: *Connection, want_continue: bool) Error!
         if (!want_continue) o.emit(.{ .sent = .{ .method = run.method.name, .url = run.url_text } });
         run.sent_at = Io.Clock.awake.now(io);
     }
-    const response = try Response.receive(io, &c.context, &c.pool, conn, .{
+    const response = try receiveResponse(io, &c.context, &c.pool, conn, .{
         .method = run.method,
         .limits = c.options.limits,
         .decompress = run.decodes(),
@@ -618,6 +619,39 @@ pub fn receive(run: *Run, io: Io, conn: *Connection, want_continue: bool) Error!
     });
     if (c.context.observer) |o| o.emit(.{ .head = .{ .status = @backingInt(response.status), .wait = span.of(run.sent_at.?.durationTo(Io.Clock.awake.now(io))) } });
     return response;
+}
+
+/// Read the response to the request just written on `conn`, which it then
+/// holds. Interim 1xx heads other than 101 are skipped.
+fn receiveResponse(io: Io, ctx: *Context, pool: *Pool, conn: *Connection, options: receiving.ReceiveOptions) receiving.ReceiveError!Response {
+    if (options.diagnostics) |d| d.stage = .head;
+    while (true) {
+        var head = try receiving.receiveHead(io, ctx, conn, options);
+        errdefer ctx.buffers.release(io, head.buffer);
+        const code = @backingInt(head.head.status);
+        if (code / 100 == 1 and code != 101 and !(code == 100 and options.want_continue)) {
+            ctx.buffers.release(io, head.buffer);
+            continue;
+        }
+        const framing = h1.responseFraming(options.method, &head.head) catch return error.HttpProtocolError;
+        var response: Response = .{
+            .status = head.head.status,
+            .version = head.head.version,
+            .reason = head.head.reason,
+            .headers = head.head.headers,
+            .ctx = ctx,
+            .pool = pool,
+            .conn = conn,
+            .head_buffer = head.buffer,
+            .body_buffer = head.body_buffer,
+            .keep_alive = framing.keep_alive,
+            .tunnel = options.method.eql(.connect),
+            .body = .init(Io.Reader.ending, framing.framing, head.body_buffer),
+        };
+        if (options.decompress) response.decoder = try receiving.decoderFor(io, ctx, &response.headers, response.body.state.current() == .done);
+        if (options.diagnostics) |d| d.stage = .body;
+        return response;
+    }
 }
 
 /// Run the prepare hook for the attempt about to be written.

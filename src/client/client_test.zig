@@ -41,7 +41,7 @@ test "requests to one server go over one kept connection" {
             try testing.expectEqual(@as(u64, 19), stats.reused);
             try testing.expectEqual(@as(u32, 1), stats.idle);
             try testing.expectEqual(@as(u32, 0), stats.in_use);
-            try testing.expectEqual(@as(u32, 1), server.accepted.load(.monotonic));
+            try testing.expectEqual(@as(u64, 1), server.accepted.load(.monotonic).raw());
         }
     }.inSim, .{});
 }
@@ -78,7 +78,7 @@ test "a request's head is written exactly, with nothing unchecked" {
                 try testing.expectError(error.InvalidUrl, client.send(io, .{ .url = text }));
             }
             try testing.expectError(error.UnsupportedScheme, client.send(io, .{ .url = "ftp://127.0.0.1/" }));
-            try testing.expectEqual(@as(u32, 1), server.requests.load(.monotonic));
+            try testing.expectEqual(@as(u64, 1), server.requests.load(.monotonic).raw());
         }
     }.inSim, .{});
 }
@@ -116,7 +116,7 @@ test "an extended CONNECT on a connection in HTTP/1.1 is refused with nothing se
             const body = try get(&client, io, server.url(&buf, "/"));
             defer testing.allocator.free(body);
             try testing.expectEqualStrings("ok", body);
-            try testing.expectEqual(@as(u32, 1), server.requests.load(.monotonic));
+            try testing.expectEqual(@as(u64, 1), server.requests.load(.monotonic).raw());
             try testing.expectEqual(@as(u64, 1), client.stats().connections_opened);
         }
     }.inSim, .{});
@@ -809,7 +809,7 @@ test "a host with a forbidden domain code point is refused before it reaches an 
                     return err;
                 };
             }
-            try testing.expectEqual(@as(u32, 0), proxy.accepted.load(.monotonic));
+            try testing.expectEqual(@as(u64, 0), proxy.accepted.load(.monotonic).raw());
         }
     }.inSim, .{});
 }

@@ -857,11 +857,11 @@ test "service answers are kept for their time, none included, and a static name 
         try testing.expectEqual(null, try r.service(io, gpa, "none.example", 443));
     }
     // One question each for the two names, the second round from the cache.
-    try testing.expectEqual(@as(u32, 2), z.asked.load(.monotonic));
+    try testing.expectEqual(@as(u64, 2), z.asked.load(.monotonic).raw());
     clock.advance(.fromSeconds(61));
     var again = (try r.service(io, gpa, "svc.example", 443)).?;
     again.deinit(gpa);
-    try testing.expectEqual(@as(u32, 3), z.asked.load(.monotonic));
+    try testing.expectEqual(@as(u64, 3), z.asked.load(.monotonic).raw());
     // A name a static entry answers is reached at its addresses alone.
     const pinned = [_]Static.Entry{.{ .host = "svc.example", .addresses = &.{.{ .ip4 = .loopback(0) }} }};
     var s: Static = .init(&pinned, d.resolver());
