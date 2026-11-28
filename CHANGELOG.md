@@ -68,6 +68,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A connection's endpoint is a view of the handle its one owner keeps (A015): `net.stream.Endpoint.socket` and `net.stream.Endpoint.pipe` are `aegis.own.Unowned`, read with `.get()` and made by `net.stream.Endpoint.ofSocket` and `net.stream.Endpoint.ofPipe`, and `net.stream.Owned` closes what its endpoint names.
 - `Response.receive`, `Response.ReceiveError` and `Response.ReceiveOptions` (`Response.ReceiveOptions.method`, `Response.ReceiveOptions.limits`, `Response.ReceiveOptions.decompress`, `Response.ReceiveOptions.diagnostics`, `Response.ReceiveOptions.progress`, `Response.ReceiveOptions.want_continue`) are gone from the API: reading a response from a connection is the client's own work, which `Client` and `Request` do. Nothing outside uplink called it with a connection of its own.
 - `uplink.wire.sse`'s reconnection time is a `uplink.wire.sse.Retry`, an aegis duration in milliseconds, where it was a bare `?u64` of milliseconds: `uplink.wire.sse.Event.retry`, `uplink.wire.sse.Outgoing.retry`, `uplink.wire.sse.Head.retry` and `uplink.wire.sse.Parser.retry`. Write `.retry = .literal("2500ms")` where `.retry = 2500` was, and read `retry.?.raw()` for the milliseconds.
+
 ### Changed
 
 - uplink's own development holds it to the family's policy: `"policy": "family"` in ci/preflight.json, beside the hardened profile ci/workflow.json declares; the hardened and hardened-tsan legs pass.
